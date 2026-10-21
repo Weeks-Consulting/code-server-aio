@@ -1,0 +1,176 @@
+name: Build and publish container
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  release:
+    types: [published]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    outputs:
+      code_server_version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Validate code-server version and release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          version = Path("build/code-server.version").read_text().strip()
+          if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+              raise SystemExit("build/code-server.version must contain a version such as 4.141.0")
+          expected = "v" + version
+          tag = os.environ["RELEASE_TAG"]
+          if tag and tag != expected:
+              raise SystemExit(f"Release tag must be {expected} to match build/code-server.version (got {tag})")
+          print(f"Building code-server {version}" + (f" for release {tag}" if tag else ""))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\n")
+          PY
+      - name: Derive image name from repository
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - name: Validate Compose configurations
+        run: |
+          CLOUDFLARE_TUNNEL_TOKEN=validation-only docker compose --env-file /dev/null config --quiet
+          docker compose --env-file .env.example -f compose.yaml -f compose.backup.yaml config --quiet
+          docker compose --env-file .env.example -f compose.yaml -f compose.build.yaml config --quiet
+          bash -n build/startup/entrypoint.sh build/tests/smoke.sh build/tests/backup-restore.sh build/backup/restore-home.sh
+          sh -n build/homebrew/homebrew.sh
+          python3 - <<'PY'
+          import json, subprocess
+          deployments = []
+          for project in ("isolation-a", "isolation-b"):
+              model = json.loads(subprocess.check_output([
+                  "docker", "compose", "--project-name", project, "--env-file", ".env.example",
+                  "-f", "compose.yaml", "-f", "compose.backup.yaml", "config", "--format", "json",
+              ], text=True))
+              backup = model["services"]["backup"]["environment"]
+              label = model["services"]["code-server"]["labels"]["docker-volume-backup.stop-during-backup"]
+              assert label == backup["BACKUP_STOP_DURING_BACKUP_LABEL"]
+              deployments.append((label, backup["AWS_S3_PATH"], backup["BACKUP_FILENAME"]))
+          assert all(left != right for left, right in zip(*deployments))
+          PY
+      - name: Build test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: CODE_SERVER_VERSION=${{ steps.version.outputs.version }}
+          load: true
+          tags: ${{ steps.image.outputs.name }}:test
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=gha,scope=container-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=container-${{ matrix.arch }}
+      - name: Test JWT validation, error pages, key rotation, and WebSockets
+        env:
+          TEST_IMAGE: ${{ steps.image.outputs.name }}:test
+        run: |
+          docker run --rm --entrypoint /usr/bin/python3 \
+            --mount type=bind,src="$GITHUB_WORKSPACE/build/tests/test_access_proxy.py",dst=/tmp/test_access_proxy.py,readonly \
+            "$TEST_IMAGE" /tmp/test_access_proxy.py
+      - name: Test full startup, Homebrew persistence, health, and service recovery
+        env:
+          TEST_IMAGE: ${{ steps.image.outputs.name }}:test
+        run: bash build/tests/smoke.sh "$TEST_IMAGE"
+      - name: Test backup and restore without S3
+        env:
+          TEST_IMAGE: ${{ steps.image.outputs.name }}:test
+        run: bash build/tests/backup-restore.sh "$TEST_IMAGE"
+
+  publish:
+    name: Publish multi-platform image
+    needs: test
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Derive image name from repository
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+      - name: Build and publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: CODE_SERVER_VERSION=${{ needs.test.outputs.code_server_version }}
+          push: true
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: |
+            type=gha,scope=container-amd64
+            type=gha,scope=container-arm64
+      - name: Published image
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          printf '%s\n' "Published image: $IMAGE_NAME" \
+            'Available image tags:' \
+            "$IMAGE_TAGS" >> "$GITHUB_STEP_SUMMARY"
