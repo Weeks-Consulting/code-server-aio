@@ -1,0 +1,23 @@
+# Optional overlay: docker compose -f compose.yaml -f compose.backup.yaml up -d
+services:
+  code-server:
+    labels:
+      docker-volume-backup.stop-during-backup: ${COMPOSE_PROJECT_NAME}-home
+
+  backup:
+    image: offen/docker-volume-backup:v2
+    restart: unless-stopped
+    environment:
+      TZ: ${BACKUP_TIMEZONE:-America/Chicago}
+      BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}
+      BACKUP_FILENAME: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-%Y-%m-%dT%H-%M-%S.tar.gz
+      BACKUP_STOP_DURING_BACKUP_LABEL: ${COMPOSE_PROJECT_NAME}-home
+      AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:?Set AWS_S3_BUCKET_NAME in .env}
+      AWS_S3_PATH: ${AWS_S3_PATH:-${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}/home}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-s3.amazonaws.com}
+      AWS_S3_BUCKET_LOOKUP: ${AWS_S3_BUCKET_LOOKUP:-auto}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in .env}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in .env}
+    volumes:
+      - code-server-home:/backup/code-server-home:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro

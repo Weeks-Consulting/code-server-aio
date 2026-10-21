@@ -1,0 +1,37 @@
+services:
+  code-server:
+    image: ${CODE_SERVER_IMAGE:-ghcr.io/your-github-user/code-server-cloudflare:latest}
+    privileged: true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 150s
+    environment:
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      REPAIR_HOME_OWNERSHIP: ${REPAIR_HOME_OWNERSHIP:-true}
+      HOMEBREW_INSTALL_TIMEOUT: ${HOMEBREW_INSTALL_TIMEOUT:-600}
+    volumes:
+      - code-server-home:/home
+      - docker-data:/var/lib/docker
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/container-healthcheck"]
+      interval: 30s
+      timeout: 15s
+      start_period: 12m
+      retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      code-server:
+        condition: service_started
+
+volumes:
+  code-server-home:
+  docker-data:

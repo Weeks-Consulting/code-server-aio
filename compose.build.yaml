@@ -1,0 +1,9 @@
+# Optional local builds: docker compose -f compose.yaml -f compose.build.yaml up -d --build
+services:
+  code-server:
+    image: code-server-cloudflare:local
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+      args:
+        CODE_SERVER_VERSION: ${CODE_SERVER_VERSION:?Set CODE_SERVER_VERSION in .env for local builds}
