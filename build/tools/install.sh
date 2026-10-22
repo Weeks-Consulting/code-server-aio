@@ -39,15 +39,24 @@ staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 base_url="https://raw.githubusercontent.com/$repository/refs/tags/$version"
 compose_files=(compose.yaml compose.backup.yaml compose.backup-local.yaml)
-for file in "${compose_files[@]}" .env.example; do
+deployment_files=("${compose_files[@]}")
+for file in "${deployment_files[@]}" .env.example; do
     curl --fail --silent --show-error --location --retry 3 \
         "$base_url/$file" --output "$staging/$file"
 done
+# Older releases do not include the launcher.
+launcher_status=$(curl --silent --show-error --location --retry 3 \
+    "$base_url/start.sh" --output "$staging/start.sh" --write-out '%{http_code}')
+case "$launcher_status" in
+    200) deployment_files+=(start.sh) ;;
+    404) printf 'Release %s does not include start.sh; use Docker Compose to launch.\n' "$version" ;;
+    *) echo "Unable to download launcher (HTTP $launcher_status)." >&2; exit 1 ;;
+esac
 image="ghcr.io/${repository,,}:${version#v}"
 sed "s|^CODE_SERVER_IMAGE=.*|CODE_SERVER_IMAGE=$image|" "$staging/.env.example" > "$staging/.env"
 
 mkdir -p -- "$directory"
-for file in "${compose_files[@]}" .env; do
+for file in "${deployment_files[@]}" .env; do
     if [[ -L $directory/$file || ( -e $directory/$file && ! -f $directory/$file ) ]]; then
         printf 'Expected a regular file: %s\n' "$directory/$file" >&2
         exit 1
@@ -80,7 +89,7 @@ if [[ -f $directory/.env ]]; then
         { notes = "" }
     ' "$directory/.env" "$staging/.env" > "$staging/env-additions"
 fi
-for file in "${compose_files[@]}"; do
+for file in "${deployment_files[@]}"; do
     if [[ -f $directory/$file ]]; then
         cp -p -- "$directory/$file" "$directory/$file.bak"
     fi
@@ -100,4 +109,8 @@ else
 fi
 printf '\nInstalled deployment files in %s (release %s).\n' "$directory" "$version"
 printf 'Edit %s/.env to configure Cloudflare Access and your tunnel before starting.\n' "$directory"
-printf 'Then run Docker Compose from that directory. No services have been started.\n'
+if [[ $launcher_status == 200 ]]; then
+    printf 'Then run sudo bash %s/start.sh to launch. No services have been started.\n' "$directory"
+else
+    printf 'Then run Docker Compose from that directory. No services have been started.\n'
+fi

@@ -20,16 +20,24 @@ S3 and local backup overlays from the latest stable GitHub release, and creates 
 with that release's GHCR image selected. Rerunning the installer refreshes the
 Compose files, saving their previous contents as `.bak` files. Existing `.env`
 values and comments are preserved; missing settings are appended with notes from
-the new release. `.env` is readable only by its owner. Services are not started
-or restarted automatically.
+the new release. `.env` is readable only by its owner. The installer does not start
+or restart services; start them with Docker Compose after configuring `.env`.
+All services use `restart: unless-stopped`: once deployed, Docker restarts them
+when they exit or the Docker daemon restarts, unless you explicitly stop them.
 
 To update, download and rerun the installer using the command above. Review any
 new `.env` settings before restarting. Your existing `CODE_SERVER_IMAGE` is also
 preserved: change it explicitly in `.env` to use a newer image release, then run
 `sudo docker compose up -d --pull always` with your usual Compose file options.
 
-To install a specific release or release candidate, add `--version v4.141.0` or
-`--version v4.141.0-rc.1`. Use `--directory /another/path` to change the destination.
+To install a specific release, pass its full tag, including the leading `v`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh -o /tmp/install-code-server.sh && sudo bash /tmp/install-code-server.sh --version v4.141.0
+```
+
+For a release candidate, use `--version v4.141.0-rc.1` instead.
+Use `--directory /another/path` to change the destination.
 The release's image must have finished publishing before you start the deployment.
 
 ```sh
@@ -37,10 +45,37 @@ cd /opt/code-server
 sudoedit .env
 ```
 
-Complete the configuration below, then run `sudo docker compose up -d --pull always`
+Complete the configuration below, then run `sudo bash /opt/code-server/start.sh --pull`.
+Releases that predate the launcher can use `sudo docker compose up -d --pull always`
 from `/opt/code-server`. To enable backups, configure the S3 settings and include
 `-f compose.yaml -f compose.backup.yaml`, or use `-f compose.yaml -f compose.backup-local.yaml`
 for local-folder backups as described below.
+
+### Launch options
+
+Run `bash start.sh` from a checkout, or `sudo bash /opt/code-server/start.sh` for
+an installed deployment. The launcher uses `.env` and Compose files beside itself
+and starts services in the background by default. It is included by the installer
+for releases that contain it.
+
+```sh
+sudo bash /opt/code-server/start.sh --backup local --pull
+bash start.sh --build --foreground
+bash start.sh --directory /another/deployment --project-name my-workspace
+```
+
+| Option | Purpose |
+| --- | --- |
+| `--directory PATH` | Use another deployment directory and its `.env`. |
+| `--backup none\|s3\|local` | Choose one backup mode; defaults to `none`. |
+| `--build` | Build locally using `compose.build.yaml`; requires a checkout. |
+| `--foreground` | Attach to logs instead of running in the background. |
+| `--pull` | Pull images before starting. |
+| `--project-name NAME` | Set the Compose project name. |
+| `--help` | Show usage. |
+
+Configure the selected backup mode in `.env` before starting. Use the same launch
+options when applying updates so the same services and project are selected.
 
 ## Setup
 

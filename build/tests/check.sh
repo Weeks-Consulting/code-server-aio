@@ -3,7 +3,8 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 
-for script in build/runtime/*.sh build/tools/*.sh build/tests/*.sh; do bash -n "$script"; done
+for script in start.sh build/runtime/*.sh build/tools/*.sh build/tests/*.sh; do bash -n "$script"; done
+python3 build/tests/test_start.py
 sh -n build/runtime/homebrew.sh
 
 # The base file must work with only the tunnel token set.
