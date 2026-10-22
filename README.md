@@ -71,7 +71,7 @@ The launcher always uses `.env` and Compose files beside itself, regardless of
 your current working directory. It starts services in the background by default
 and is included by the installer
 for releases that contain it. Installed deployments include only runtime Compose
-files, the launcher, and `.env`; build files and source code stay in the checkout.
+files, the launcher, the restore helper, and `.env`; build files and source code stay in the checkout.
 
 ```sh
 bash /opt/code-server/start.sh --backup local --pull
@@ -89,6 +89,40 @@ bash /another/deployment/start.sh --project-name my-workspace
 
 Configure the selected backup mode in `.env` before starting. Use the same launch
 options when applying updates so the same services and project are selected.
+
+### Backup and restore commands
+
+Run a backup immediately using the configured local or S3 destination:
+
+```sh
+bash start.sh backup --backup local
+bash start.sh backup --backup s3
+```
+
+Use the same `--project-name` as the running deployment, if you set one. Start
+the deployment with the matching `--backup` mode first so code-server has the
+label that allows the backup service to stop it while archiving and restart it
+afterward. The command waits for the backup to finish.
+
+List local `.tar.gz` archives with their sizes and modification times:
+
+```sh
+bash start.sh backups --backup local
+```
+
+This lists files in the configured `BACKUP_LOCAL_PATH`. To browse S3 or R2
+archives, use your storage provider's console or CLI.
+
+Restore a local or downloaded archive into a new or empty Docker volume:
+
+```sh
+bash start.sh restore --archive /path/to/backup.tar.gz --volume restored-home
+```
+
+Relative archive paths resolve from your current working directory. Restore
+refuses a non-empty target volume and does not switch or restart the deployment.
+Follow [the restore guide](docs/restore.md) to attach the restored volume. The
+installer includes the restore helper for releases that contain it.
 
 ## Setup
 
@@ -154,7 +188,7 @@ kept until you remove them; automatic pruning is not configured.
 | --- | --- | --- |
 | `BACKUP_TIMEZONE` | Optional; `America/Chicago`. | Timezone used by the backup schedule. Use an IANA timezone such as `America/Chicago` or `Etc/UTC`. The schedule follows that timezone, including its daylight-saving changes. |
 | `BACKUP_CRON_EXPRESSION` | Optional; `0 3 * * *`. | Five-field cron schedule: minute, hour, day of month, month, day of week. The default runs daily at 03:00 in `BACKUP_TIMEZONE`. Quote the value in `.env`, for example `BACKUP_CRON_EXPRESSION="0 3 * * *"`. |
-| `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Host folder receiving `.tar.gz` archives. Relative paths resolve beside the Compose files, so the installer's default is `/opt/code-server/backups`. Use an absolute path such as `/mnt/backups/code-server` to select another location. The folder is mounted at `/archive` in the backup container. S3 settings are not passed to the local backup container. |
+| `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Host folder receiving `.tar.gz` archives. Relative paths resolve beside the Compose files, so the installer's default is `/opt/code-server/backups`. Use an absolute path such as `/mnt/backups/code-server` to select another location. Compose creates the folder if it does not exist and mounts it at `/archive` in the backup container. S3 settings are not passed to the local backup container. |
 | `AWS_S3_BUCKET_NAME` | Required for S3 backups; no default. | Name of an existing S3 or S3-compatible bucket. Supply the bucket name alone, without `s3://`, an endpoint, or an object prefix. |
 | `BACKUP_ID` | Optional; Compose project name. | Identifies this deployment in archive names and in the default S3 prefix. Set a unique value, such as `devbox-home`, when multiple hosts share a bucket. Archive names are `<BACKUP_ID>-home-<timestamp>.tar.gz`; an empty value uses the Compose project name. It does not change the container stop label, which remains scoped to the Compose project. |
 | `AWS_S3_PATH` | Optional; `<BACKUP_ID or Compose project name>/home`. | Object-key prefix inside the bucket, such as `development/devbox/home`. An explicit value overrides the prefix derived from `BACKUP_ID`; an empty value selects the default. This controls where archives are stored, not the bucket addressing style. |

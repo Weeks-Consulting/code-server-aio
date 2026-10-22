@@ -20,6 +20,8 @@ class LauncherTests(unittest.TestCase):
         self.deployment.mkdir()
         self.script = self.deployment / "start.sh"
         self.script.write_bytes(SCRIPT.read_bytes())
+        (self.deployment / "restore-home.sh").write_bytes(
+            (SCRIPT.parent / "build/tools/restore-home.sh").read_bytes())
         for name in (".env", "compose.yaml",
                      "compose.backup.yaml", "compose.backup-local.yaml"):
             (self.deployment / name).touch()
@@ -87,6 +89,41 @@ class LauncherTests(unittest.TestCase):
     def test_docker_exit_status(self):
         self.env["DOCKER_EXIT"] = "17"
         self.assertEqual(self.run_launcher().returncode, 17)
+
+    def test_manual_backup(self):
+        for mode in ("s3", "local"):
+            with self.subTest(mode=mode):
+                result = self.run_launcher("backup", "--backup", mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads(self.log.read_text())
+                self.assertEqual(args[-6:], ["run", "--rm", "--no-deps", "--entrypoint", "backup", "backup"])
+
+    def test_list_local_backups(self):
+        result = self.run_launcher("backups", "--backup", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(self.log.read_text())
+        self.assertIn(str(self.deployment / "compose.backup-local.yaml"), args)
+        self.assertIn("find /archive", args[-1])
+        self.assertIn("--no-deps", args)
+
+    def test_restore_relative_to_caller(self):
+        archive = self.root / "saved backup.tar.gz"
+        archive.touch()
+        (self.deployment / ".env").unlink()
+        result = self.run_launcher("restore", "--archive", archive.name, "--volume", "new-home")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(self.log.read_text())
+        self.assertIn(f"type=bind,src={archive},dst=/backup.tar.gz,readonly", args)
+        self.assertIn("type=volume,src=new-home,dst=/restore", args)
+        self.assertIn("Refusing to restore into a non-empty volume", args[-1])
+
+    def test_invalid_commands(self):
+        for args in (("backup",), ("backups", "--backup", "s3"), ("restore",),
+                     ("backup", "--backup", "local", "--pull"),
+                     ("start", "--volume", "existing"), ("unknown",)):
+            with self.subTest(args=args):
+                self.assertNotEqual(self.run_launcher(*args).returncode, 0)
+                self.assertFalse(self.log.exists())
 
 
 if __name__ == "__main__":

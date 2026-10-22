@@ -39,7 +39,9 @@ assert all(left != right for left, right in zip(*deployments))
 local = model("compose.backup-local.yaml")
 backup = local["services"]["backup"]
 assert not any(key.startswith("AWS_") for key in backup["environment"])
-assert any(v["type"] == "bind" and v["target"] == "/archive" for v in backup["volumes"])
+archive_mount = next(v for v in backup["volumes"] if v["target"] == "/archive")
+assert archive_mount["type"] == "bind"
+assert archive_mount["bind"]["create_host_path"] is True
 assert backup["environment"]["BACKUP_STOP_DURING_BACKUP_LABEL"] == local["services"]["code-server"]["labels"]["docker-volume-backup.stop-during-backup"]
 PY
 echo 'Syntax and Compose checks passed.'

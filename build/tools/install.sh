@@ -62,6 +62,16 @@ case "$launcher_status" in
     404) printf 'Release %s does not include start.sh; use Docker Compose to launch.\n' "$version" ;;
     *) echo "Unable to download launcher (HTTP $launcher_status)." >&2; exit 1 ;;
 esac
+# Ship the runtime restore helper when present in the selected release.
+if [[ $launcher_status == 200 ]]; then
+    restore_status=$(curl --silent --show-error --location --retry 3 \
+        "$base_url/build/tools/restore-home.sh" --output "$staging/restore-home.sh" --write-out '%{http_code}')
+    case "$restore_status" in
+        200) deployment_files+=(restore-home.sh) ;;
+        404) printf 'Release %s does not include the restore helper.\n' "$version" ;;
+        *) echo "Unable to download restore helper (HTTP $restore_status)." >&2; exit 1 ;;
+    esac
+fi
 image="ghcr.io/${repository,,}:${version#v}"
 sed "s|^CODE_SERVER_IMAGE=.*|CODE_SERVER_IMAGE=$image|" "$staging/.env.example" > "$staging/.env"
 

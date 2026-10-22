@@ -19,3 +19,5 @@ services:
       - type: bind
         source: ${BACKUP_LOCAL_PATH:-./backups}
         target: /archive
+        bind:
+          create_host_path: true
