@@ -18,7 +18,9 @@ class LauncherTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.deployment = self.root / "deployment with spaces"
         self.deployment.mkdir()
-        for name in (".env", "compose.yaml", "compose.build.yaml",
+        self.script = self.deployment / "start.sh"
+        self.script.write_bytes(SCRIPT.read_bytes())
+        for name in (".env", "compose.yaml",
                      "compose.backup.yaml", "compose.backup-local.yaml"):
             (self.deployment / name).touch()
         self.log = self.root / "arguments"
@@ -35,27 +37,23 @@ class LauncherTests(unittest.TestCase):
 
     def run_launcher(self, *args):
         return subprocess.run(
-            ["bash", str(SCRIPT), "--directory", str(self.deployment), *args],
+            ["bash", str(self.script), *args],
             env=self.env, cwd=self.root, capture_output=True, text=True,
         )
 
     def test_modes(self):
         for mode, overlay in (("none", None), ("s3", "compose.backup.yaml"),
                               ("local", "compose.backup-local.yaml")):
-            for build in (False, True):
-                with self.subTest(mode=mode, build=build):
-                    args = ["--backup", mode]
-                    if build:
-                        args.append("--build")
-                    result = self.run_launcher(*args)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    expected = ["compose", "--project-directory", str(self.deployment),
-                                "--env-file", str(self.deployment / ".env"),
-                                "-f", str(self.deployment / "compose.yaml")]
-                    for file in (["compose.build.yaml"] if build else []) + ([overlay] if overlay else []):
-                        expected += ["-f", str(self.deployment / file)]
-                    expected += ["up", "-d"] + (["--build"] if build else [])
-                    self.assertEqual(json.loads(self.log.read_text()), expected)
+            with self.subTest(mode=mode):
+                result = self.run_launcher("--backup", mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = ["compose", "--project-directory", str(self.deployment),
+                            "--env-file", str(self.deployment / ".env"),
+                            "-f", str(self.deployment / "compose.yaml")]
+                if overlay:
+                    expected += ["-f", str(self.deployment / overlay)]
+                expected += ["up", "-d"]
+                self.assertEqual(json.loads(self.log.read_text()), expected)
 
     def test_foreground_pull_and_project(self):
         result = self.run_launcher("--foreground", "--pull", "--project-name", "example")
@@ -67,7 +65,7 @@ class LauncherTests(unittest.TestCase):
 
     def test_invalid_options(self):
         for args in (("--backup", "invalid"), ("--backup",), ("--unknown",),
-                     ("--directory", "--pull")):
+                     ("--directory", str(self.deployment)), ("--build",)):
             with self.subTest(args=args):
                 self.assertNotEqual(self.run_launcher(*args).returncode, 0)
                 self.assertFalse(self.log.exists())

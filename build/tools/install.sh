@@ -16,7 +16,17 @@ while (( $# )); do
             esac
             shift 2 ;;
         --help|-h)
-            echo 'Usage: bash install.sh [--version vX.Y.Z[-rc.N]] [--directory /opt/code-server] [--repository owner/repo]'
+            cat <<'HELP'
+Usage: bash install.sh [--version vX.Y.Z[-rc.N]] [--directory PATH] [--repository owner/repo]
+
+  --directory PATH   Installation directory (default: /opt/code-server)
+  --version TAG      Release tag (default: latest stable release)
+  --repository NAME  GitHub owner/repo (default: Weeks-Consulting/code-server-aio)
+  -h, --help         Show this help
+
+sudo is optional when installing into a directory owned and writable by the
+current user. Creating a new directory also requires a writable parent.
+HELP
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -110,7 +120,7 @@ fi
 printf '\nInstalled deployment files in %s (release %s).\n' "$directory" "$version"
 printf 'Edit %s/.env to configure Cloudflare Access and your tunnel before starting.\n' "$directory"
 if [[ $launcher_status == 200 ]]; then
-    printf 'Then run sudo bash %s/start.sh to launch. No services have been started.\n' "$directory"
+    printf 'Then run bash %s/start.sh to launch. No services have been started.\n' "$directory"
 else
     printf 'Then run Docker Compose from that directory. No services have been started.\n'
 fi

@@ -15,6 +15,18 @@ On a Linux machine with Docker Engine, the Docker Compose plugin, Bash, and curl
 curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh -o /tmp/install-code-server.sh && sudo bash /tmp/install-code-server.sh
 ```
 
+Use `--directory PATH` to choose the installation directory. `sudo` is optional
+when the directory is owned and writable by your current user. If it does not
+exist, its parent must be writable so the installer can create it. For example:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh -o /tmp/install-code-server.sh && bash /tmp/install-code-server.sh --directory "$HOME/code-server"
+```
+
+For this example, edit `$HOME/code-server/.env` with your usual editor and launch
+with `bash "$HOME/code-server/start.sh" --pull`. You can combine `--directory`
+with `--version` to select both the location and release.
+
 The installer creates `/opt/code-server`, downloads `compose.yaml` and the optional
 S3 and local backup overlays from the latest stable GitHub release, and creates a `.env`
 with that release's GHCR image selected. Rerunning the installer refreshes the
@@ -45,7 +57,7 @@ cd /opt/code-server
 sudoedit .env
 ```
 
-Complete the configuration below, then run `sudo bash /opt/code-server/start.sh --pull`.
+Complete the configuration below, then run `bash /opt/code-server/start.sh --pull`.
 Releases that predate the launcher can use `sudo docker compose up -d --pull always`
 from `/opt/code-server`. To enable backups, configure the S3 settings and include
 `-f compose.yaml -f compose.backup.yaml`, or use `-f compose.yaml -f compose.backup-local.yaml`
@@ -53,22 +65,23 @@ for local-folder backups as described below.
 
 ### Launch options
 
-Run `bash start.sh` from a checkout, or `sudo bash /opt/code-server/start.sh` for
-an installed deployment. The launcher uses `.env` and Compose files beside itself
-and starts services in the background by default. It is included by the installer
-for releases that contain it.
+Run `bash start.sh` from a checkout, or `bash /opt/code-server/start.sh` for
+an installed deployment. Keep `start.sh` in the same directory as `compose.yaml`.
+The launcher always uses `.env` and Compose files beside itself, regardless of
+your current working directory. It starts services in the background by default
+and is included by the installer
+for releases that contain it. Installed deployments include only runtime Compose
+files, the launcher, and `.env`; build files and source code stay in the checkout.
 
 ```sh
-sudo bash /opt/code-server/start.sh --backup local --pull
-bash start.sh --build --foreground
-bash start.sh --directory /another/deployment --project-name my-workspace
+bash /opt/code-server/start.sh --backup local --pull
+bash start.sh --foreground
+bash /another/deployment/start.sh --project-name my-workspace
 ```
 
 | Option | Purpose |
 | --- | --- |
-| `--directory PATH` | Use another deployment directory and its `.env`. |
 | `--backup none\|s3\|local` | Choose one backup mode; defaults to `none`. |
-| `--build` | Build locally using `compose.build.yaml`; requires a checkout. |
 | `--foreground` | Attach to logs instead of running in the background. |
 | `--pull` | Pull images before starting. |
 | `--project-name NAME` | Set the Compose project name. |
