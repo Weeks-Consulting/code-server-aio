@@ -1,9 +1,15 @@
 #!/bin/bash
 # Restore a downloaded archive into a new, empty Docker volume.
 set -euo pipefail
-archive=$(realpath "${1:?Usage: bash build/backup/restore-home.sh ARCHIVE.tar.gz EMPTY_VOLUME}")
+archive=${1:?Usage: bash build/tools/restore-home.sh ARCHIVE.tar.gz EMPTY_VOLUME}
 volume=${2:?Pass a new or empty target volume}
-test -f "$archive"
+if [ ! -f "$archive" ]; then
+    echo "Archive does not exist or is not a regular file: $archive" >&2; exit 1
+fi
+archive=$(realpath -- "$archive")
+case "$archive,$volume" in
+    *,*,*) echo "Archive paths and volume names must not contain commas" >&2; exit 1 ;;
+esac
 docker run --rm --network none \
     --mount "type=bind,src=$archive,dst=/backup.tar.gz,readonly" \
     --mount "type=volume,src=$volume,dst=/restore" \

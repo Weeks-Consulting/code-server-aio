@@ -8,7 +8,7 @@ Restore into a new, unused Docker volume. The helper refuses to overwrite a
 non-empty volume and preserves stored file ownership:
 
 ```sh
-bash build/backup/restore-home.sh /absolute/path/to/backup.tar.gz restored-home
+bash build/tools/restore-home.sh /absolute/path/to/backup.tar.gz restored-home
 ```
 
 Inspect the restored home directory before switching:
@@ -50,8 +50,7 @@ restored stack and restart with the original Compose file combination.
 Exercise archive creation and restoration locally without S3:
 
 ```sh
-just build
-bash build/tests/backup-restore.sh code-server-cloudflare:test
+just test-backup
 ```
 
 This verifies archive layout, hidden files, shared home directories, ownership,

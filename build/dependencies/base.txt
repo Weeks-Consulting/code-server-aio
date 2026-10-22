@@ -1,5 +1,0 @@
-ca-certificates
-curl
-git
-locales
-sudo

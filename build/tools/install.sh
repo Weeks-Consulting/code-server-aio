@@ -38,24 +38,13 @@ fi
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 base_url="https://raw.githubusercontent.com/$repository/refs/tags/$version"
-compose_files=(compose.yaml compose.backup.yaml)
-for file in compose.yaml compose.backup.yaml .env.example; do
+compose_files=(compose.yaml compose.backup.yaml compose.backup-local.yaml)
+for file in "${compose_files[@]}" .env.example; do
     curl --fail --silent --show-error --location --retry 3 \
         "$base_url/$file" --output "$staging/$file"
 done
-# Older releases did not include the local-backup overlay.
-local_status=$(curl --silent --show-error --location --retry 3 \
-    "$base_url/compose.backup-local.yaml" --output "$staging/compose.backup-local.yaml" \
-    --write-out '%{http_code}')
-case "$local_status" in
-    200) compose_files+=(compose.backup-local.yaml) ;;
-    404) printf 'Release %s does not include local-folder backups.\n' "$version" ;;
-    *) echo "Unable to download local-backup overlay (HTTP $local_status)." >&2; exit 1 ;;
-esac
 image="ghcr.io/${repository,,}:${version#v}"
-sed -e 's/^# Replace this placeholder.*$/# Published image selected during installation./' \
-    -e "s|^CODE_SERVER_IMAGE=.*|CODE_SERVER_IMAGE=$image|" \
-    "$staging/.env.example" > "$staging/.env"
+sed "s|^CODE_SERVER_IMAGE=.*|CODE_SERVER_IMAGE=$image|" "$staging/.env.example" > "$staging/.env"
 
 mkdir -p -- "$directory"
 for file in "${compose_files[@]}" .env; do

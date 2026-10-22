@@ -1,3 +1,0 @@
-haproxy
-python3
-python3-cryptography

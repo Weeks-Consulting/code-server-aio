@@ -12,9 +12,7 @@ The entire project has also been reviewed and tested by a real person.
 On a Linux machine with Docker Engine, the Docker Compose plugin, Bash, and curl:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/install/install.sh \
-  -o /tmp/install-code-server.sh
-sudo bash /tmp/install-code-server.sh
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh -o /tmp/install-code-server.sh && sudo bash /tmp/install-code-server.sh
 ```
 
 The installer creates `/opt/code-server`, downloads `compose.yaml` and the optional
@@ -25,7 +23,7 @@ values and comments are preserved; missing settings are appended with notes from
 the new release. `.env` is readable only by its owner. Services are not started
 or restarted automatically.
 
-To update, download and rerun the installer using the commands above. Review any
+To update, download and rerun the installer using the command above. Review any
 new `.env` settings before restarting. Your existing `CODE_SERVER_IMAGE` is also
 preserved: change it explicitly in `.env` to use a newer image release, then run
 `sudo docker compose up -d --pull always` with your usual Compose file options.
@@ -42,12 +40,16 @@ sudoedit .env
 Complete the configuration below, then run `sudo docker compose up -d --pull always`
 from `/opt/code-server`. To enable backups, configure the S3 settings and include
 `-f compose.yaml -f compose.backup.yaml`, or use `-f compose.yaml -f compose.backup-local.yaml`
-for local-folder backups as described below. Older releases may not include the local overlay.
+for local-folder backups as described below.
 
 ## Setup
 
+Anyone granted Cloudflare Access to this privileged development environment
+effectively has root access to the Docker host. Restrict the Access policy to
+specific trusted users.
+
 1. Edit the installer's `.env` (or copy `.env.example` when using a checkout) and set:
-   - `CODE_SERVER_IMAGE`: the published GHCR image (selected by the installer; replace the placeholder when using a checkout).
+   - `CODE_SERVER_IMAGE`: the published GHCR image (selected by the installer; defaults to the project image in a checkout).
    - `CLOUDFLARE_TUNNEL_TOKEN`: your remotely managed tunnel token.
    - `CF_ACCESS_TEAM_DOMAIN`: your `team.cloudflareaccess.com` hostname, without `https://`.
    - `CF_ACCESS_AUD`: the 64-character Application Audience tag from your Access application.
@@ -80,15 +82,18 @@ Setting backup variables alone does not enable them.
 
 | Property | Required / default | Description |
 | --- | --- | --- |
-| `CODE_SERVER_IMAGE` | Required for a published deployment. Compose's fallback is a placeholder image. | Full registry image reference to pull, such as `ghcr.io/weeks-consulting/code-server-aio:4.141.0` or `:4.141.0-rc.1`. The installer selects the requested release on first installation and preserves your choice on updates. `latest` follows stable releases. Ignored when `compose.build.yaml` selects the local image. |
-| `CODE_SERVER_VERSION` | Required for local builds; no default. | Upstream code-server version to install, such as `4.141.0`, without a leading `v`. Used by `compose.build.yaml` and `just build`; it does not change a prebuilt image. For an RC image of this project, the upstream version is still `4.141.0`, without the image's `-rc.N` suffix. CI gets its version separately from `build/code-server.version`. |
+| `CODE_SERVER_IMAGE` | Optional; `ghcr.io/weeks-consulting/code-server-aio:latest`. | Full registry image reference to pull, such as `ghcr.io/weeks-consulting/code-server-aio:4.141.0` or `:4.141.0-rc.1`. The installer selects the requested release on first installation and preserves your choice on updates. `latest` follows stable releases. Ignored when `compose.build.yaml` selects the local image. |
+| `CODE_SERVER_VERSION` | Optional; `build/code-server.version`. | Overrides the upstream code-server version for local builds, such as `4.141.0`, without a leading `v`. Used only by `compose.build.yaml`; it does not change a prebuilt image. The package must have a checksum in `build/code-server.sha256`, so normally update `build/code-server.version` instead. |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `http://code-server:8080`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
 | `CF_ACCESS_TEAM_DOMAIN` | Required for access; no default. | Cloudflare Access team hostname, such as `my-team.cloudflareaccess.com`. Supply only the hostname, without `https://`, a path, or a trailing slash. HAProxy's helper downloads signing keys from this team and checks that JWTs have its issuer. Missing or invalid configuration keeps the origin blocked with HTTP 503. |
 | `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration results in HTTP 503. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
-| `REPAIR_HOME_OWNERSHIP` | Optional; `true`. | Accepts exactly `true` or `false`. `true` recursively repairs ownership of `/home/cloud-user` and `/workspace` to `cloud-user` (UID/GID 10000) at startup. `false` repairs only those directories' owners, leaving their contents untouched; useful for large home directories. Other directories under `/home`, including Homebrew's directory, are outside this repair. Invalid values stop startup. |
+| `REPAIR_HOME_OWNERSHIP` | Optional; `false`. | Accepts exactly `true` or `false`. `true` recursively repairs ownership of `/home/cloud-user` to `cloud-user` (UID/GID 10000) at startup. `false` repairs only that directory's owner, preserving file owners required by nested containers. Other directories under `/home`, including Homebrew's directory, are outside this repair. Invalid values stop startup. |
 | `HOMEBREW_INSTALL_TIMEOUT` | Optional; `600`. | Positive integer in seconds limiting the first or retried Homebrew installation. After this timeout, the installer receives TERM, then KILL after another 30 seconds if needed. Failure stops container startup and keeps a marker for retry on the next start. An existing complete Homebrew installation is reused, so this timeout does not apply to normal subsequent starts. Increase it for slow downloads; if necessary, also increase Compose's health-check `start_period` beyond its current 12 minutes. |
 
 ### Optional backups
+
+The backup container controls the host through the Docker API. Mounting its
+Docker socket read-only does not restrict API operations.
 
 These properties apply when either backup overlay is included. S3 settings apply
 only to `compose.backup.yaml`; local backups need no S3 credentials. Backups stop
@@ -129,7 +134,7 @@ Signing keys refresh hourly, with retries every minute on failure. Startup block
 access until keys are fetched. The health check verifies supervised services,
 nested Docker, code-server, and HAProxy's rejection of unauthenticated requests.
 Cloudflared starts alongside the container so HAProxy can show its 503 setup page.
-Customize the error pages in `build/proxy/errors/` and rebuild.
+Customize `build/runtime/access-403.html` and `build/runtime/access-503.html` and rebuild.
 
 ## Operation and customization
 
@@ -142,10 +147,12 @@ docker compose down
 
 code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Docker
 group access. Supervisor manages the services; the container runs privileged for
-Docker-in-Docker. Startup repairs ownership of the home directory and `/workspace`.
-If a critical service exhausts its startup retries, Supervisor shuts down so
+Docker-in-Docker. Startup repairs the home directory owner; recursive repair is opt-in.
+If any supervised service exhausts its startup retries, Supervisor shuts down so
 Docker's restart policy can restart the container. Missing Access configuration
 reports unhealthy and keeps access blocked until corrected.
+
+Save projects under `/home/cloud-user`; `/workspace` is not provided.
 
 Named volumes persist all of `/home` (user files, settings, extensions, and shared
 installations such as `/home/linuxbrew`) and
@@ -160,27 +167,27 @@ when needed. Installation is limited to 600 seconds by default; set
 `HOMEBREW_INSTALL_TIMEOUT` to change it. Failure or timeout stops startup and
 retains a marker so incomplete installations are retried.
 
-Set `REPAIR_HOME_OWNERSHIP=false` to skip recursive ownership repair on large home
-directories. The home and workspace directory owners are still corrected.
+Recursive ownership repair defaults to disabled. Set `REPAIR_HOME_OWNERSHIP=true` only for an intentional migration: it changes ownership of all home contents, including nested containers' database files, which can prevent those containers from starting. The home directory owner is still corrected.
 
 If reusing the previous home-volume layout, move its existing contents into a
 `cloud-user/` subdirectory before restarting with this mount. Ownership repair
 remains scoped to `/home/cloud-user`, preserving ownership of other home directories.
 
-Add packages in `build/dependencies/*.txt`, one-time startup commands in `build/startup/entrypoint.sh`, and
-foreground services in `build/supervisor/supervisord.conf`.
-Dependency lists contain one Debian package name per line, grouped by subsystem.
+Add apt packages in `build/Dockerfile`, one-time startup commands in `build/runtime/entrypoint.sh`, and
+foreground services in `build/runtime/supervisord.conf`. Every supervised service is
+critical: the health check requires it to be running, and repeated startup failure
+restarts the container.
 
-Build files are grouped by purpose under `build/`: `startup`, `dependencies`,
-`supervisor`, `proxy`, `health`, `homebrew`, `backup`, `install`, and `tests`. The Dockerfile
-is `build/Dockerfile`; Compose files stay at the project root.
+Files shipped in the application image live in `build/runtime/`, including startup
+scripts, service configuration, and error pages. Build-only version and checksum
+files stay beside `build/Dockerfile`. Host installation and restore helpers live
+in `build/tools/`; tests stay in `build/tests/`. Compose files stay at the project root.
 
 ## Local development
 
-Configure the Cloudflare variables in `.env` as above. Local builds do not require
-`CODE_SERVER_IMAGE`. Set `CODE_SERVER_VERSION` in `.env` to the code-server release
-you want to install; local Compose and `just` builds require it. Docker has no
-default version. Direct Docker builds require `--build-arg CODE_SERVER_VERSION=...`.
+Builds read the code-server version from `build/code-server.version`. `just build`
+and `docker build -f build/Dockerfile .` need no `.env` or Cloudflare credentials.
+For Compose-based builds, configure `.env` as above; `CODE_SERVER_IMAGE` is not required.
 
 Without backups:
 
@@ -217,13 +224,13 @@ and bypass cached package layers. CI covers full startup, Homebrew persistence,
 service recovery, and a local backup/restore round trip.
 
 To publish, update `build/code-server.version` (for example, `4.141.0`) and publish
-a GitHub release with the matching tag, such as `v4.141.0`. CI uses this file;
-local builds use the version specified in `.env`. CI rejects invalid versions
+a GitHub release with the matching tag, such as `v4.141.0`. CI, `just build`, and
+Compose builds all read this file. CI rejects invalid versions
 and mismatched release tags before building. Manually triggered runs on tags
 also require a matching version. Pushing a tag alone does not publish.
 
 After both architectures pass, the release publishes
-`ghcr.io/<owner>/<repository>:4.141.0`, with provenance and an SBOM. Stable releases
+`ghcr.io/<owner>/<repository>:4.141.0`, by assembling the tested image digests. This Docker-load publication path does not generate BuildKit provenance or SBOM attestations. Stable releases
 also update `latest`; prereleases publish only the version tag. Image names are
 derived from the repository and lowercased automatically. Publishing uses
 `GITHUB_TOKEN`; no registry secret or naming variables are needed.
@@ -319,31 +326,25 @@ just actions-list    # List workflow jobs without running them
 ```
 
 Override the local image tag with `just image=my-image:test test`. Test recipes
-use isolated containers and temporary storage.
+use isolated containers and temporary storage. CI runs the same scripts from
+`build/tests/`, which can also be run directly, for example
+`bash build/tests/smoke.sh code-server-cloudflare:test`.
 
-Run the GitHub Actions test job locally with Docker running:
-
-```sh
-bash build/tests/actions.sh
-```
-
-This downloads the latest `act` into a temporary directory, runs the native amd64
+`just actions` downloads the pinned, checksum-verified `act` into a temporary directory, runs the native amd64
 or arm64 test job as a pull request (without publishing), and removes the binary
-afterward. Docker images and caches remain. Pass `--list` to list jobs without
-running them. Requires Linux, Bash, curl, and tar; initial tests need Internet access.
+afterward. Docker images and caches remain. Requires Linux, Bash, curl, and tar; initial tests need Internet access.
 The local runner bind-mounts the repository and a temporary test directory at
 matching host paths so sibling Docker containers can access test files and archives.
 
-Run JWT validation, key rotation, error-page, and WebSocket tests in isolation:
-
-```sh
-just build
-docker run --rm --entrypoint /usr/bin/python3 \
-  --mount type=bind,src="$(pwd)/build/tests/test_access_proxy.py",dst=/tmp/test_access_proxy.py,readonly \
-  code-server-cloudflare:test /tmp/test_access_proxy.py
-bash build/tests/smoke.sh code-server-cloudflare:test
-bash build/tests/backup-restore.sh code-server-cloudflare:test
-```
-
 The smoke test needs privileged Docker and Internet access for initial Homebrew
 installation. The restore test uses temporary volumes and local archives, without S3.
+
+## Dependency updates
+
+Code-server packages are verified against `build/code-server.sha256`. When updating `build/code-server.version`, update both architecture checksums from the upstream release metadata.
+
+Homebrew's installer commit is pinned in `build/homebrew-install.version`, with its checksum in `build/homebrew-install.sha256`. The Docker build downloads and verifies the script, then bundles it at `/usr/local/lib/homebrew-install.sh`. Startup runs that bundled script as `cloud-user` after `/home` is mounted; Homebrew itself still requires Internet access on first installation. Update both pin files together and rebuild to change the installer.
+
+Actions and service images are pinned to immutable revisions; update those pins deliberately and run the integration suite. The temporary act download is pinned and checked against `build/tests/act.sha256`. These pins do not freeze apt packages, Homebrew packages, or all transitive downloads.
+
+Release jobs push each native architecture image after its tests pass, then assemble the recorded registry digests into the published multi-platform image without rebuilding.

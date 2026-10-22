@@ -156,6 +156,31 @@ class AccessProxyTests(unittest.TestCase):
         self.assertEqual(self.status(None, "/healthz"), 403)
         self.assertEqual(self.status(None, headers={"Cf-Access-Authenticated-User-Email": "fake@example.com"}), 403)
 
+    def test_duplicate_token_headers(self):
+        token = self.token()
+        for values in ((token, token), (token, "garbage"), (token + ", " + token,)):
+            with self.subTest(values=len(values)):
+                connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=2)
+                try:
+                    connection.putrequest("GET", "/")
+                    for value in values:
+                        connection.putheader("Cf-Access-Jwt-Assertion", value)
+                    connection.endheaders()
+                    self.assertEqual(connection.getresponse().status, 403)
+                finally:
+                    connection.close()
+
+    def test_public_key_filters(self):
+        valid = jwk(self.key)
+        ignored = [{"kty": "EC"}, dict(valid, use="enc"), dict(valid, alg="RS512")]
+        self.assertEqual(proxy.public_keys({"keys": ignored + [valid]}), self.keys)
+        with self.assertRaises(ValueError):
+            proxy.public_keys({"keys": ignored})
+        small = jwk(rsa.generate_private_key(public_exponent=65537, key_size=1024))
+        for keys in ([small], [valid, small]):
+            with self.assertRaises(ValueError):
+                proxy.public_keys({"keys": keys})
+
     def test_not_before_in_past(self):
         self.assertEqual(self.status(self.token({"nbf": int(time.time()) - 30})), 200)
 
@@ -215,6 +240,31 @@ class AccessProxyTests(unittest.TestCase):
             proxy.refresh()
             fetch.assert_called_once_with(ISSUER + "/cdn-cgi/access/certs", timeout=20)
         self.assertEqual(self.status(self.token()), 200)
+
+    def test_refresh_prunes_only_after_success(self):
+        import io
+        with tempfile.TemporaryDirectory() as directory, unittest.mock.patch.object(proxy, "RUNTIME", Path(directory)), unittest.mock.patch.dict(os.environ, {
+            "CF_ACCESS_TEAM_DOMAIN": "test.cloudflareaccess.com", "CF_ACCESS_AUD": AUD,
+        }):
+            old = proxy.public_keys({"keys": [jwk(self.other_key)]})[0]
+            sentinel = proxy.RUNTIME / "manual.pem"
+            sentinel.write_text("preserve files not managed by the refresher")
+            document = json.dumps({"keys": [jwk(self.key)]}).encode()
+            with unittest.mock.patch.object(proxy.urllib.request, "urlopen", return_value=io.BytesIO(document)), unittest.mock.patch.object(proxy, "install", side_effect=RuntimeError("reload failed")):
+                with self.assertRaises(RuntimeError):
+                    proxy.refresh()
+            self.assertTrue(old.exists())
+            with unittest.mock.patch.object(proxy.urllib.request, "urlopen", return_value=io.BytesIO(document)), unittest.mock.patch.object(proxy, "install"):
+                proxy.refresh()
+            self.assertFalse(old.exists())
+            self.assertTrue(sentinel.exists())
+            self.assertEqual(len(list(proxy.RUNTIME.glob("*.pem"))), 2)
+
+    def test_socket_retry_backoff_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory, unittest.mock.patch.object(proxy, "RUNTIME", Path(directory)), unittest.mock.patch.object(proxy.sys, "argv", ["access-proxy.py"]), unittest.mock.patch.object(proxy, "refresh", side_effect=[FileNotFoundError("socket not ready")] * 12 + [None, KeyboardInterrupt]), unittest.mock.patch.object(proxy.time, "sleep") as sleep, unittest.mock.patch.object(proxy.sys, "stderr"):
+            with self.assertRaises(KeyboardInterrupt):
+                proxy.main()
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1] * 10 + [60, 60, proxy.REFRESH_SECONDS])
 
     def test_bootstrap_blocks_every_route(self):
         proxy.install(proxy.configuration())

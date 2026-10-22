@@ -3,7 +3,7 @@
 set -euo pipefail
 image=${1:?Pass the application image}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-restore_script="$script_dir/../backup/restore-home.sh"
+restore_script="$script_dir/../tools/restore-home.sh"
 project_dir=$(cd -- "$script_dir/../.." && pwd)
 prefix="code-server-restore-$$"
 source_volume="${prefix}_code-server-home"

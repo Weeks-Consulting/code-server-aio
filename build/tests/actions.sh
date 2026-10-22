@@ -19,8 +19,10 @@ trap 'rm -rf "$act_dir"' EXIT
 # Share temporary test data at the same absolute path in both environments.
 mkdir "$act_dir/tmp"
 curl --fail --silent --show-error --location --retry 3 \
-    "https://github.com/nektos/act/releases/latest/download/act_Linux_${asset_arch}.tar.gz" \
+    "https://github.com/nektos/act/releases/download/v0.2.89/act_Linux_${asset_arch}.tar.gz" \
     --output "$act_dir/act.tar.gz"
+expected=$(awk -v name="act_Linux_${asset_arch}.tar.gz" '$2 == name {print $1}' "$project_dir/build/tests/act.sha256")
+printf '%s  %s\n' "$expected" "$act_dir/act.tar.gz" | sha256sum --check --strict -
 tar -xzf "$act_dir/act.tar.gz" -C "$act_dir" act
 
 cd "$project_dir"

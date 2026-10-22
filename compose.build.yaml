@@ -6,4 +6,5 @@ services:
       context: .
       dockerfile: build/Dockerfile
       args:
-        CODE_SERVER_VERSION: ${CODE_SERVER_VERSION:?Set CODE_SERVER_VERSION in .env for local builds}
+        # Empty uses build/code-server.version.
+        CODE_SERVER_VERSION: ${CODE_SERVER_VERSION:-}

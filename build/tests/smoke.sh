@@ -15,11 +15,7 @@ trap cleanup EXIT
 wait_ready() {
     local deadline=$((SECONDS + 720))
     until docker exec "$name" /bin/bash -ec '
-        /usr/bin/supervisorctl status | grep -q "dockerd .*RUNNING"
-        /usr/bin/supervisorctl status | grep -q "code-server .*RUNNING"
-        /usr/bin/supervisorctl status | grep -q "haproxy .*RUNNING"
-        /usr/bin/supervisorctl status | grep -q "access-keys .*RUNNING"
-        /usr/bin/supervisorctl status | grep -q "service-events .*RUNNING"
+        /usr/bin/supervisorctl status
         /usr/bin/docker info >/dev/null 2>&1
         /usr/bin/curl --fail --silent http://127.0.0.1:8081/healthz >/dev/null
         test "$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/)" = 503
@@ -59,19 +55,28 @@ wait_ready
 docker logs "$name" 2>&1 | grep 'Critical service dockerd entered FATAL' >/dev/null
 docker exec "$name" /bin/bash -ec '
     touch /home/cloud-user/.ownership-sentinel
-    chown 0:0 /home/cloud-user/.ownership-sentinel
+    chown 999:999 /home/cloud-user/.ownership-sentinel
     # A user-installed Python must never replace Debian Python for infrastructure.
-    printf "#!/bin/sh\nexit 86\n" > /home/linuxbrew/.linuxbrew/bin/python3
-    chmod +x /home/linuxbrew/.linuxbrew/bin/python3
+    for helper in python3 containerd runc iptables docker-proxy; do
+        printf "#!/bin/sh\nexit 86\n" > "/home/linuxbrew/.linuxbrew/bin/$helper"
+        chmod +x "/home/linuxbrew/.linuxbrew/bin/$helper"
+    done
 '
 docker rm -f "$name" >/dev/null
 
-# Reuse the populated bind mount with no network and recursive repair disabled.
+# Reuse the populated bind mount offline; ownership repair defaults to nonrecursive.
 docker run -d --name "$name" --privileged --init --network none \
-    -e REPAIR_HOME_OWNERSHIP=false --mount "type=bind,src=$home_dir,dst=/home" "$image" >/dev/null
+    --mount "type=bind,src=$home_dir,dst=/home" "$image" >/dev/null
 wait_ready
 docker exec "$name" /bin/bash -ec '
-    test "$(stat -c %u:%g /home/cloud-user/.ownership-sentinel)" = 0:0
+    test "$(stat -c %u:%g /home/cloud-user/.ownership-sentinel)" = 999:999
+    pid=$(/usr/bin/supervisorctl pid dockerd)
+    daemon_path=$(tr "\0" "\n" < "/proc/$pid/environ" | sed -n "s/^PATH=//p")
+    test "$daemon_path" = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    for helper in containerd runc iptables docker-proxy; do
+        resolved=$(PATH="$daemon_path" command -v "$helper" || true)
+        case "$resolved" in /home/*) exit 1 ;; esac
+    done
     test ! -f /home/linuxbrew/.homebrew-installing
     /usr/bin/sudo -H -u cloud-user /bin/bash --login -ec "brew --version"
     # The health check must detect missing Access configuration.
@@ -92,11 +97,19 @@ p.install(p.configuration("https://test.cloudflareaccess.com","a"*64,[key],int(t
 if docker logs "$name" 2>&1 | grep 'Installing Homebrew' >/dev/null; then
     echo 'Offline startup attempted to reinstall Homebrew' >&2; exit 1
 fi
-# A stalled first-install download must time out and retain its retry marker.
+# Validate timeout settings even when Homebrew is already installed.
+docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOUT=invalid \
+    --entrypoint /bin/bash "$image" -ec '
+        mkdir -p /home/linuxbrew/.linuxbrew/bin
+        touch /home/linuxbrew/.linuxbrew/bin/brew
+        chmod +x /home/linuxbrew/.linuxbrew/bin/brew
+        if /usr/local/bin/entrypoint.sh --help > /tmp/result 2>&1; then exit 1; fi
+        grep -q "HOMEBREW_INSTALL_TIMEOUT must be" /tmp/result
+    '
+# A stalled bundled installer must time out and retain its retry marker.
 docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOUT=1 \
     --entrypoint /bin/bash "$image" -c '
-        printf "#!/bin/bash\nsleep 60\n" > /usr/bin/curl
-        chmod +x /usr/bin/curl
+        printf "#!/bin/bash\nsleep 60\n" > /usr/local/lib/homebrew-install.sh
         /usr/local/bin/entrypoint.sh --help
         result=$?
         test "$result" -eq 124 && test -f /home/linuxbrew/.homebrew-installing

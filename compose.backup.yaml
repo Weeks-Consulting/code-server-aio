@@ -5,7 +5,7 @@ services:
       docker-volume-backup.stop-during-backup: ${COMPOSE_PROJECT_NAME}-home
 
   backup:
-    image: offen/docker-volume-backup:v2
+    image: offen/docker-volume-backup:v2@sha256:6630d1f122f42ada84566550e47647d2e7488ac3775176ee654b64e489ab6e40
     restart: unless-stopped
     environment:
       TZ: ${BACKUP_TIMEZONE:-America/Chicago}
@@ -20,4 +20,5 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in .env}
     volumes:
       - code-server-home:/backup/code-server-home:ro
+      # :ro does not restrict Docker API access; this container controls the host.
       - /var/run/docker.sock:/var/run/docker.sock:ro

@@ -34,16 +34,17 @@ def settings():
     return "https://" + domain, audience
 
 
+def number(value):
+    """Decode a base64url JWK integer."""
+    return int.from_bytes(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)), "big")
+
+
 def public_keys(document):
     """Convert RSA signing JWKs to immutable PEM files for HAProxy."""
     paths = []
     for key in document["keys"]:
         if key.get("kty") != "RSA" or key.get("use", "sig") != "sig" or key.get("alg", "RS256") != "RS256":
             continue
-
-        def number(value):
-            return int.from_bytes(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)), "big")
-
         public = rsa.RSAPublicNumbers(number(key["e"]), number(key["n"])).public_key()
         if public.key_size < 2048:
             raise ValueError("Refusing an RSA signing key smaller than 2048 bits")
@@ -68,6 +69,7 @@ defaults
     mode http
     log global
     option httplog
+    timeout http-request 10s
     timeout connect 5s
     timeout client 1h
     timeout server 1h
@@ -134,6 +136,9 @@ def refresh():
         document = json.loads(response.read(1024 * 1024))
     keys = public_keys(document)
     install(configuration(issuer, audience, keys, int(time.time()) + MAX_KEY_AGE_SECONDS))
+    for path in RUNTIME.glob("*.pem"):
+        if re.fullmatch(r"[a-f0-9]{64}\.pem", path.name) and path not in keys:
+            path.unlink()
     print(f"Access signing keys refreshed ({len(keys)} keys)", flush=True)
 
 
@@ -142,13 +147,17 @@ def main():
     if sys.argv[1:] == ["--init"]:
         install(configuration(), reload=False)
         return
+    startup_retries = 0
     while True:
         try:
             refresh()
         except Exception as error:
             print(f"Access key refresh failed; access remains restricted: {error}", file=sys.stderr, flush=True)
-            time.sleep(60)
+            startup_retries += 1
+            socket_not_ready = isinstance(error, (FileNotFoundError, ConnectionRefusedError))
+            time.sleep(1 if socket_not_ready and startup_retries <= 10 else 60)
         else:
+            startup_retries = 0
             time.sleep(REFRESH_SECONDS)
 
 

@@ -1,9 +1,4 @@
-.git
-.agents
-.aws
-.codex
-.env
-.env.*
-**/__pycache__
-**/*.pyc
-backups
+# The image only copies files from build/; keep secrets and backups out of the context.
+*
+!build/
+build/tests/

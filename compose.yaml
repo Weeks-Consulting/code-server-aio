@@ -1,6 +1,6 @@
 services:
   code-server:
-    image: ${CODE_SERVER_IMAGE:-ghcr.io/your-github-user/code-server-cloudflare:latest}
+    image: ${CODE_SERVER_IMAGE:-ghcr.io/weeks-consulting/code-server-aio:latest}
     privileged: true
     init: true
     restart: unless-stopped
@@ -8,7 +8,7 @@ services:
     environment:
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
       CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
-      REPAIR_HOME_OWNERSHIP: ${REPAIR_HOME_OWNERSHIP:-true}
+      REPAIR_HOME_OWNERSHIP: ${REPAIR_HOME_OWNERSHIP:-false}
       HOMEBREW_INSTALL_TIMEOUT: ${HOMEBREW_INSTALL_TIMEOUT:-600}
     volumes:
       - code-server-home:/home
@@ -23,7 +23,7 @@ services:
       retries: 3
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:latest@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
     command: tunnel --no-autoupdate run
     restart: unless-stopped
     environment:
