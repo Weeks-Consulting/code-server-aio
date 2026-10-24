@@ -27,6 +27,10 @@ for backup in "" compose.backup.yaml compose.backup-local.yaml; do
     done
 done
 
+# Validate the test-only RustFS override without starting containers.
+docker compose --env-file .env.example -f compose.yaml -f compose.backup.yaml \
+    -f build/tests/compose.backup-s3.yaml config --quiet
+
 # Backup stop labels, S3 prefixes, and archive names are scoped to the Compose project.
 python3 - <<'PY'
 import json, os, subprocess

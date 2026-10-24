@@ -557,6 +557,12 @@ use isolated containers and temporary storage. CI runs the same scripts from
 `build/tests/`, which can also be run directly, for example
 `sh build/tests/smoke.sh code-server-cloudflare:test`.
 
+`just test-backup` exercises both local archives and S3 uploads to a disposable,
+digest-pinned RustFS server. The S3 test checks application stop/restart, the object
+prefix and filename, encryption, and a restore with numeric ownership preserved.
+It uses temporary credentials and storage with no published ports or real S3 account.
+Run it directly with `sh build/tests/backup-s3.sh code-server-cloudflare:test`.
+
 `just actions` downloads the pinned, checksum-verified `act` into a temporary directory, runs the native amd64
 or arm64 test job as a pull request (without publishing), and removes the binary
 afterward. Docker images and caches remain. Supports Debian Linux and macOS on

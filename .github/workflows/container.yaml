@@ -141,10 +141,12 @@ jobs:
         env:
           TEST_IMAGE: ${{ steps.image.outputs.name }}:test
         run: sh build/tests/smoke.sh "$TEST_IMAGE"
-      - name: Test backup and restore without S3
+      - name: Test local and RustFS S3 backup and restore
         env:
           TEST_IMAGE: ${{ steps.image.outputs.name }}:test
-        run: sh build/tests/backup-restore.sh "$TEST_IMAGE"
+        run: |
+          sh build/tests/backup-restore.sh "$TEST_IMAGE"
+          sh build/tests/backup-s3.sh "$TEST_IMAGE"
 
       - name: Export tested image for publishing
         if: needs.source.outputs.publish == 'true'

@@ -29,9 +29,10 @@ test-proxy: build
 test-smoke: build
     sh build/tests/smoke.sh {{quote(image)}}
 
-# Test backup and restore using temporary volumes and local archives.
+# Test local and RustFS S3 backup/restore using temporary volumes.
 test-backup: build
     sh build/tests/backup-restore.sh {{quote(image)}}
+    sh build/tests/backup-s3.sh {{quote(image)}}
 
 # Run the native-architecture GitHub Actions test job with temporary act.
 actions:

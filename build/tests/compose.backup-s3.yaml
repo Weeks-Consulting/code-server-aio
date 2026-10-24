@@ -1,0 +1,16 @@
+# Test-only override, used with compose.yaml and compose.backup.yaml.
+services:
+  backup:
+    environment:
+      AWS_ENDPOINT_PROTO: http
+
+  rustfs:
+    # RustFS 1.0.3, pinned like the production backup image.
+    image: rustfs/rustfs@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${AWS_ACCESS_KEY_ID:?Test access key required}
+      RUSTFS_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:?Test secret key required}
+      RUSTFS_CONSOLE_ENABLE: "false"
+    tmpfs:
+      - /data:mode=1777
