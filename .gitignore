@@ -4,3 +4,4 @@
 __pycache__/
 backups/
 CODE_REVIEW.md
+.test-tmp.*/

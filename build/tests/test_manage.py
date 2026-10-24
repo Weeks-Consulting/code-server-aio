@@ -42,7 +42,7 @@ class LauncherTests(unittest.TestCase):
 
     def run_launcher(self, *args):
         return subprocess.run(
-            ["bash", str(self.script), *args],
+            ["sh", str(self.script), *args],
             env=self.env, cwd=self.root, capture_output=True, text=True,
         )
 
@@ -178,7 +178,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(args[args.index("--user") + 1], "0:0")
         self.assertIn(f"ARCHIVE_UID={os.getuid()}", args)
         self.assertIn(f"ARCHIVE_GID={os.getgid()}", args)
-        self.assertIn(f"type=bind,src={archive},dst=/backup.tar.gz,readonly", args)
+        self.assertIn(f"type=bind,src={archive.resolve()},dst=/backup.tar.gz,readonly", args)
         self.assertIn("type=volume,src=new-home,dst=/restore", args)
         self.assertIn("Original volume backup complete; replacing volume contents.", args[-1])
 

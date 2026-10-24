@@ -1,4 +1,4 @@
-set shell := ["bash", "-euo", "pipefail", "-c"]
+set shell := ["sh", "-eu", "-c"]
 
 image := "code-server-cloudflare:test"
 
@@ -6,33 +6,37 @@ image := "code-server-cloudflare:test"
 default:
     @just --list
 
-# Build the local test image.
+# Install host build/test dependencies with Homebrew or Debian apt.
+install:
+    sh build/tools/install-deps.sh
+
+# Build with BuildKit and load the image into Docker for the integration tests.
 build:
-    docker build -f build/Dockerfile -t {{quote(image)}} .
+    docker buildx build --load -f build/Dockerfile -t {{quote(image)}} .
 
 # Check shell syntax and all Compose file combinations without using .env.
 check:
-    bash build/tests/check.sh
+    sh build/tests/check.sh
 
 # Build once and run all local checks and integration tests.
 test: check test-proxy test-smoke test-backup
 
 # Test JWT validation, key rotation, error pages, and WebSocket reloads.
 test-proxy: build
-    bash build/tests/proxy.sh {{quote(image)}}
+    sh build/tests/proxy.sh {{quote(image)}}
 
 # Test startup, Homebrew persistence, health, and service recovery.
 test-smoke: build
-    bash build/tests/smoke.sh {{quote(image)}}
+    sh build/tests/smoke.sh {{quote(image)}}
 
 # Test backup and restore using temporary volumes and local archives.
 test-backup: build
-    bash build/tests/backup-restore.sh {{quote(image)}}
+    sh build/tests/backup-restore.sh {{quote(image)}}
 
 # Run the native-architecture GitHub Actions test job with temporary act.
 actions:
-    bash build/tests/actions.sh
+    sh build/tests/actions.sh
 
 # List GitHub Actions jobs without running them.
 actions-list:
-    bash build/tests/actions.sh --list
+    sh build/tests/actions.sh --list

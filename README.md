@@ -9,10 +9,22 @@ The entire project has also been reviewed and tested by a real person.
 
 ## Install
 
-On a Linux machine with Docker Engine, the Docker Compose plugin, Bash, and curl:
+Supported hosts are Debian Linux and macOS. Start with a working Docker
+installation. The deployment installer checks for curl, Python 3, GnuPG, and
+Docker Compose, and installs missing runtime packages using apt on Debian or
+Homebrew on macOS. It also installs missing CA certificates on Debian. Package
+installation uses sudo on Debian when needed; Homebrew must already be available
+on macOS. The installer downloads a published image configuration, so no local
+build tools or source checkout are needed.
+
+On macOS, keep the deployment, checkout, and backup archives in a folder shared
+with Docker, such as your home directory. Use `--directory "$HOME/code-server"`
+without `sudo` as shown below.
+
+Install the latest published release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | sudo bash -s --
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | sudo sh -s --
 ```
 
 Use `--directory PATH` to choose the installation directory. `sudo` is optional
@@ -20,12 +32,25 @@ when the directory is owned and writable by your current user. If it does not
 exist, its parent must be writable so the installer can create it. For example:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | bash -s -- --directory "$HOME/code-server"
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | sh -s -- --directory "$HOME/code-server"
 ```
 
 For this example, edit `$HOME/code-server/.env` with your usual editor and launch
-with `bash "$HOME/code-server/manage" --pull`. You can combine `--directory`
+with `sh "$HOME/code-server/manage" --pull`. You can combine `--directory`
 with `--version` to select both the location and release.
+
+Preview the dependency commands and deployment changes before installing:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | sh -s -- --dry-run --directory "$HOME/code-server"
+```
+
+`--dry-run` installs no packages, downloads no release files, and leaves the
+deployment untouched. It reports existing files that would be backed up and
+whether `.env` would be created or preserved, without displaying its secrets.
+Without `--version`, it reports that the latest release would be resolved during
+installation. Omit `--dry-run` to apply the changes. On macOS, run without sudo
+so Homebrew can install missing dependencies.
 
 The installer creates `/opt/code-server`, downloads `compose.yaml` and the optional
 S3 and local backup overlays from the latest stable GitHub release, and creates a `.env`
@@ -45,14 +70,14 @@ when they exit or the Docker daemon restarts, unless you explicitly stop them.
 To update, download and rerun the installer using the command above. Review any
 new `.env` settings before restarting. Your existing `CODE_SERVER_IMAGE` is also
 preserved: change it explicitly in `.env` to use a newer image release, then run
-`sudo bash /opt/code-server/manage --pull` with your usual launch options.
+`sudo sh /opt/code-server/manage --pull` with your usual launch options.
 For an installation without `sudo`, run the launcher as the installing user
 without `sudo`, using that installation's path.
 
 To install a specific release, pass its full tag, including the leading `v`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | sudo bash -s -- --version v4.141.0
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/main/build/tools/install.sh | sudo sh -s -- --version v4.141.0
 ```
 
 For a project revision, use `--version v4.141.0-1` instead.
@@ -64,7 +89,7 @@ cd /opt/code-server
 sudoedit .env
 ```
 
-Complete the configuration below, then run `sudo bash /opt/code-server/manage --pull`
+Complete the configuration below, then run `sudo sh /opt/code-server/manage --pull`
 for the default installation with `sudo`.
 Releases that predate the launcher can use `sudo docker compose up -d --pull always`
 from `/opt/code-server`. To enable backups, configure the S3 settings and include
@@ -73,9 +98,9 @@ for local-folder backups as described below.
 
 ### Launch options
 
-Run `bash manage` from a checkout, or `sudo bash /opt/code-server/manage` for
+Run `sh manage` from a checkout, or `sudo sh /opt/code-server/manage` for
 the default installation with `sudo`. For an installation without `sudo`, run
-`bash /path/to/installation/manage` as the same user that installed it.
+`sh /path/to/installation/manage` as the same user that installed it.
 Keep `manage` in the same directory as `compose.yaml`.
 The launcher always uses `.env` and Compose files beside itself, regardless of
 your current working directory. It starts services in the background by default
@@ -84,9 +109,9 @@ for releases that contain it. Installed deployments include only runtime Compose
 files, the launcher, the restore helper, and `.env`; build files and source code stay in the checkout.
 
 ```sh
-sudo bash /opt/code-server/manage --backup local --pull
-bash manage --foreground
-bash /another/deployment/manage --project-name my-workspace
+sudo sh /opt/code-server/manage --backup local --pull
+sh manage --foreground
+sh /another/deployment/manage --project-name my-workspace
 ```
 
 | Option | Purpose |
@@ -105,23 +130,23 @@ options when applying updates so the same services and project are selected.
 Stop the deployment and remove its containers and networks while keeping all volumes:
 
 ```sh
-bash manage stop
+sh manage stop
 ```
 
 Use `sudo` if installed with `sudo`, and pass the same `--project-name` if you set one.
 This also removes the project's optional backup container. You can include the same
 `--backup local` or `--backup s3` option used to start it. Start the deployment again
-with `bash manage` and your usual options.
+with `sh manage` and your usual options.
 
 ### Backup and restore commands
 
 Run a backup immediately using the configured local or S3 destination:
 
-The examples below use `bash manage`; add `sudo` if you installed with `sudo`.
+The examples below use `sh manage`; add `sudo` if you installed with `sudo`.
 
 ```sh
-bash manage backup --backup local
-bash manage backup --backup s3
+sh manage backup --backup local
+sh manage backup --backup s3
 ```
 
 Use the same `--project-name` as the running deployment, if you set one. Start
@@ -132,7 +157,7 @@ afterward. The command waits for the backup to finish.
 List local `.tar.gz.gpg` archives (and legacy `.tar.gz` archives) with their sizes and modification times:
 
 ```sh
-bash manage backups --backup local
+sh manage backups --backup local
 ```
 
 This lists files in the configured `BACKUP_LOCAL_PATH`. To browse S3 or R2
@@ -142,7 +167,7 @@ Stop the deployment, then restore a local or downloaded archive into its origina
 home volume (replace `code-server_code-server-home` with its actual name):
 
 ```sh
-bash manage restore --archive /path/to/backup.tar.gz.gpg --volume code-server_code-server-home
+sh manage restore --archive /path/to/backup.tar.gz.gpg --volume code-server_code-server-home
 ```
 
 Relative archive paths resolve from your current working directory. Restore
@@ -173,12 +198,12 @@ specific trusted users.
 3. Start the services:
 
    ```sh
-   sudo bash /opt/code-server/manage --pull
+   sudo sh /opt/code-server/manage --pull
    ```
 
    This command assumes the default installation with `sudo`. If you installed
-   without `sudo`, run `bash /path/to/installation/manage --pull` as the same
-   user that installed it. From a checkout, use `bash manage --pull`.
+   without `sudo`, run `sh /path/to/installation/manage --pull` as the same
+   user that installed it. From a checkout, use `sh manage --pull`.
 
 Find the AUD under **Zero Trust → Access controls → Applications → Configure →
 Additional settings**. Open your public hostname and sign in through Access.
@@ -308,7 +333,19 @@ scripts, service configuration, and error pages. Build-only version and checksum
 files stay beside `build/Dockerfile`. Host installation and restore helpers live
 in `build/tools/`; tests stay in `build/tests/`. Compose files stay at the project root.
 
-## Local development
+## Building from source
+
+Use a source checkout with a working Docker installation including Compose and
+Buildx. Run these commands from the checkout, including from zsh:
+
+```sh
+just install         # Install host build and test dependencies
+just build           # Build the local test image
+```
+
+`just install` prepares a development machine using Homebrew on macOS or apt on
+Debian. It does not install or launch a deployment. To deploy a published release,
+use the [deployment installer](#install).
 
 Builds read the code-server version from `build/code-server.version`. `just build`
 and `docker build -f build/Dockerfile .` need no `.env` or Cloudflare credentials.
@@ -397,6 +434,8 @@ or empty, including when refreshing an existing installation. When using a check
 `manage --backup local` or `manage --backup s3` generates it before starting services;
 manual backup commands also initialize it if necessary. Existing nonempty keys are
 preserved. Generated keys are never printed, and `.env` is saved with mode `600`.
+The initializer uses Python 3 and a persistent `.env.lock` sidecar to serialize
+concurrent launches without replacing an existing key.
 You can set your own passphrase in `.env` before installation or startup.
 
 **Save `GPG_PASSPHRASE` separately in a password manager or another secure location.**
@@ -407,15 +446,15 @@ with your usual launch options after changing the key. Existing plaintext archiv
 remain unchanged.
 
 For direct Compose use, first set a passphrase in `.env` or generate one with
-`bash build/tools/backup-key.sh .env` from a checkout (`bash backup-key.sh .env`
+`sh build/tools/backup-key.sh .env` from a checkout (`sh backup-key.sh .env`
 in an installed deployment). Compose refuses to start a backup service without a key.
 Use the same key when recovering on a replacement host. Restore needs `gpg` and `python3` installed
-on the Docker host (on Debian/Ubuntu: `sudo apt-get install gpg python3`); backup creation
+on the Docker host, both checked and installed by the deployment installer; backup creation
 needs no host GPG installation. See Offen's [encryption documentation](https://offen.github.io/docker-volume-backup/how-tos/encrypt-backups.html).
 
 ## Optional local backups
 
-With `bash manage --backup local`, new archives belong to the effective user running
+With `sh manage --backup local`, new archives belong to the effective user running
 `manage` (`id -u` and `id -g`). If that user is root, root owns the files.
 The launcher does not inspect sudo environment variables.
 Scheduled backups retain that ownership configuration until the backup service
@@ -495,11 +534,12 @@ helper backs up the original volume before replacing its contents in place.
 
 ## Tests
 
-With `just` and `shellcheck` installed, run these commands from the repository:
+Complete the [build setup](#building-from-source) before running tests.
+
+Run these commands from the repository, including from zsh:
 
 ```sh
 just                 # List commands
-just build           # Build the local test image
 just check           # Check shell syntax and Compose configurations
 just test            # Build once and run all local tests
 just test-proxy      # Build and run only the proxy tests
@@ -512,16 +552,30 @@ just actions-list    # List workflow jobs without running them
 Override the local image tag with `just image=my-image:test test`. Test recipes
 use isolated containers and temporary storage. CI runs the same scripts from
 `build/tests/`, which can also be run directly, for example
-`bash build/tests/smoke.sh code-server-cloudflare:test`.
+`sh build/tests/smoke.sh code-server-cloudflare:test`.
 
 `just actions` downloads the pinned, checksum-verified `act` into a temporary directory, runs the native amd64
 or arm64 test job as a pull request (without publishing), and removes the binary
-afterward. Docker images and caches remain. Requires Linux, Bash, curl, and tar; initial tests need Internet access.
-The local runner bind-mounts the repository and a temporary test directory at
-matching host paths so sibling Docker containers can access test files and archives.
+afterward. Docker images and caches remain. Supports Debian Linux and macOS on
+amd64/x86_64 and arm64. Initial tests need Internet access.
+The local runner mounts the repository and temporary test storage at paths
+also accessible to sibling Docker containers.
+On macOS, it uses the active Docker CLI endpoint for the host connection and
+`/var/run/docker.sock` inside the Linux runner. Temporary test storage uses a
+disposable Docker volume to preserve Linux ownership. The local run uses the
+mounted checkout without a GitHub token and disables GitHub cache and build-record
+uploads; GitHub-hosted runs keep those features.
 
 The smoke test needs privileged Docker and Internet access for initial Homebrew
-installation. The restore test requires host `gpg` and uses temporary volumes and encrypted local archives, without S3.
+installation. On macOS it uses named volumes to preserve Linux UID/GID ownership;
+on Linux it also exercises an empty home bind mount. Temporary bind-mounted test
+files are created in ignored `.test-tmp.*` directories under the checkout, which
+must be shared with Docker. The restore test uses temporary volumes and encrypted
+local archives, without S3.
+
+Host scripts are checked as POSIX `sh` and tested on Debian and macOS in CI.
+Bash is still used to check the container's Linux runtime scripts and CI release
+logic; the version bundled with either host is sufficient.
 
 ## Dependency updates
 

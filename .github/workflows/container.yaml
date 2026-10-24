@@ -77,6 +77,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        # The local act wrapper already bind-mounts the working checkout.
+        if: ${{ !env.ACT }}
         with:
           ref: ${{ needs.source.outputs.ref }}
           persist-credentials: false
@@ -107,8 +109,13 @@ jobs:
           echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Install local runner test dependencies
+        if: ${{ env.ACT }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck python3 gnupg
       - name: Check shell syntax and Compose configurations
-        run: bash build/tests/check.sh
+        run: sh build/tests/check.sh
       - name: Build test image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -124,20 +131,20 @@ jobs:
           tags: ${{ steps.image.outputs.name }}:test
           pull: true
           no-cache: ${{ needs.source.outputs.rebuild == 'true' }}
-          cache-from: type=gha,scope=container-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=container-${{ matrix.arch }}
+          cache-from: ${{ !env.ACT && format('type=gha,scope=container-{0}', matrix.arch) || '' }}
+          cache-to: ${{ !env.ACT && format('type=gha,mode=max,scope=container-{0}', matrix.arch) || '' }}
       - name: Test JWT validation, error pages, key rotation, and WebSockets
         env:
           TEST_IMAGE: ${{ steps.image.outputs.name }}:test
-        run: bash build/tests/proxy.sh "$TEST_IMAGE"
+        run: sh build/tests/proxy.sh "$TEST_IMAGE"
       - name: Test full startup, Homebrew persistence, health, and service recovery
         env:
           TEST_IMAGE: ${{ steps.image.outputs.name }}:test
-        run: bash build/tests/smoke.sh "$TEST_IMAGE"
+        run: sh build/tests/smoke.sh "$TEST_IMAGE"
       - name: Test backup and restore without S3
         env:
           TEST_IMAGE: ${{ steps.image.outputs.name }}:test
-        run: bash build/tests/backup-restore.sh "$TEST_IMAGE"
+        run: sh build/tests/backup-restore.sh "$TEST_IMAGE"
 
       - name: Export tested image for publishing
         if: needs.source.outputs.publish == 'true'
@@ -160,9 +167,46 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  check-debian:
+    name: Host scripts (Debian sh)
+    needs: source
+    runs-on: ubuntu-24.04
+    container: debian:13
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+          persist-credentials: false
+      - name: Install host check dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash python3 shellcheck docker-cli docker-compose
+      - name: Check host scripts with Debian sh
+        run: sh build/tests/check.sh
+
+  check-macos:
+    name: Host scripts (macOS sh)
+    needs: source
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+          persist-credentials: false
+      - name: Install host check dependencies
+        run: |
+          brew install python shellcheck docker docker-compose
+          mkdir -p "$RUNNER_TEMP/docker-config/cli-plugins"
+          ln -s "$(brew --prefix)/bin/docker-compose" "$RUNNER_TEMP/docker-config/cli-plugins/docker-compose"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+      - name: Check host scripts with macOS sh
+        run: sh build/tests/check.sh
+
   push:
     name: Push tested image (${{ matrix.arch }})
-    needs: [source, test]
+    needs: [source, test, check-debian, check-macos]
     if: needs.source.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     strategy:

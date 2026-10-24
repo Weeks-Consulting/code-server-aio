@@ -1,43 +1,56 @@
-#!/bin/bash
+#!/bin/sh
 # Initialize a deployment's backup passphrase without executing its .env file.
-set -euo pipefail
-env_file=${1:?Pass the deployment .env file}
-[[ -f $env_file && ! -L $env_file ]] || {
-    echo 'Backup key initialization requires a regular .env file.' >&2; exit 1;
-}
-# Serialize initializers before inspecting the current file, so simultaneous
-# launches cannot replace each other's newly generated recovery key.
-exec {key_lock}< "$env_file"
-flock --exclusive "$key_lock"
-chmod 600 -- "$env_file"
-# Compose uses the last assignment. Recognize missing and explicitly empty values,
-# including export, quoted empty strings, and trailing comments.
-pattern='^[[:space:]]*(export[[:space:]]+)?GPG_PASSPHRASE[[:space:]]*='
-if awk -v pattern="$pattern" '
-    $0 ~ pattern {
-        value = $0
-        sub(pattern, "", value)
-        sub(/[[:space:]]+#.*$/, "", value)
-        sub(/^[[:space:]]+/, "", value)
-        sub(/[[:space:]]+$/, "", value)
-    }
-    END { exit !(value != "" && value != "\042\042" && value != "\047\047" && value !~ /^#/) }
-' "$env_file"; then
-    exit 0
-fi
-umask 077
-# 256 bits from the OS CSPRNG; hexadecimal is safe in Compose .env syntax.
-key=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
-[[ $key =~ ^[a-f0-9]{64}$ ]] || { echo 'Unable to generate backup key.' >&2; exit 1; }
-temporary=$(mktemp "${env_file}.XXXXXXXX")
-trap 'rm -f -- "$temporary"' EXIT
-# Preserve ownership when an administrator refreshes a user-owned deployment.
-cp -p -- "$env_file" "$temporary"
-chmod 600 -- "$temporary"
-awk -v pattern="$pattern" -v key="$key" '
-    $0 ~ pattern { print "GPG_PASSPHRASE=" key; found = 1; next }
-    { print }
-    END { if (!found) print "\nGPG_PASSPHRASE=" key }
-' "$env_file" > "$temporary"
-mv -- "$temporary" "$env_file"
-echo 'Generated backup encryption key in .env. Save it separately in a password manager; it is required for recovery.'
+set -eu
+command -v python3 >/dev/null || { echo 'Install python3 to initialize backup encryption.' >&2; exit 1; }
+exec python3 - "${1:?Pass the deployment .env file}" <<'PYTHON'
+import fcntl
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+if path.is_symlink() or not path.is_file():
+    sys.exit("Backup key initialization requires a regular .env file.")
+# Lock a stable sidecar: replacing .env atomically must not replace the lock inode.
+# Keep the sidecar after unlocking so waiting initializers all use the same lock.
+lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+with os.fdopen(lock, "w") as guard:
+    fcntl.flock(guard, fcntl.LOCK_EX)
+    if path.is_symlink() or not path.is_file():
+        sys.exit("Backup key initialization requires a regular .env file.")
+    path.chmod(0o600)
+    contents = path.read_text()
+    pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?GPG_PASSPHRASE[ \t]*=")
+    value = ""
+    for line in contents.splitlines():
+        match = pattern.match(line)
+        if match:
+            value = re.sub(r"\s+#.*$", "", line[match.end():]).strip()
+    if value not in ("", '""', "''") and not value.startswith("#"):
+        sys.exit(0)
+    key = secrets.token_hex(32)
+    lines = contents.splitlines(keepends=True)
+    found = any(pattern.match(line) for line in lines)
+    updated = "".join("GPG_PASSPHRASE=" + key + "\n" if pattern.match(line) else line
+                      for line in lines)
+    if not found:
+        updated += "\nGPG_PASSPHRASE=" + key + "\n"
+    owner = path.stat()
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as output:
+            current = os.fstat(output.fileno())
+            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+                os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(output.fileno(), stat.S_IRUSR | stat.S_IWUSR)
+            output.write(updated)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+print("Generated backup encryption key in .env. Save it separately in a password manager; it is required for recovery.")
+PYTHON

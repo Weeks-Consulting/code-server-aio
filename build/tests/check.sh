@@ -1,14 +1,15 @@
-#!/bin/bash
+#!/bin/sh
 # Check shell syntax and Compose configurations without using .env.
-set -euo pipefail
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
+set -eu
+cd -- "$(dirname -- "$0")/../.."
 
-scripts=(manage build/runtime/*.sh build/tools/*.sh build/tests/*.sh)
-for script in "${scripts[@]}"; do bash -n "$script"; done
+for script in manage build/tools/*.sh build/tests/*.sh; do sh -n "$script"; done
+for script in build/runtime/*.sh; do bash -n "$script"; done
 command -v shellcheck >/dev/null || { echo 'Install shellcheck to run checks.' >&2; exit 1; }
-shellcheck --severity=style "${scripts[@]}"
+shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runtime/*.sh
 python3 build/tests/test_manage.py
 python3 build/tests/test_release.py
+python3 build/tests/test_actions.py
 python3 build/tests/test_backup_key.py
 sh -n build/runtime/homebrew.sh
 
@@ -19,9 +20,9 @@ export GPG_PASSPHRASE=validation-only
 CLOUDFLARE_TUNNEL_TOKEN=validation-only docker compose --env-file /dev/null config --quiet
 for backup in "" compose.backup.yaml compose.backup-local.yaml; do
     for build in "" compose.build.yaml; do
-        files=(-f compose.yaml)
-        for file in $build $backup; do files+=(-f "$file"); done
-        docker compose --env-file .env.example "${files[@]}" config --quiet
+        set -- -f compose.yaml
+        for file in $build $backup; do set -- "$@" -f "$file"; done
+        docker compose --env-file .env.example "$@" config --quiet
     done
 done
 
@@ -63,7 +64,8 @@ assert "chmod 600" in backup["labels"]["docker-volume-backup.copy-post"]
 assert not any(key.startswith("AWS_") for key in backup["environment"])
 archive_mount = next(v for v in backup["volumes"] if v["target"] == "/archive")
 assert archive_mount["type"] == "bind"
-assert archive_mount["bind"]["create_host_path"] is True
+# Compose 5 may omit this field when it has the default value (true).
+assert archive_mount.get("bind", {}).get("create_host_path", True) is True
 assert backup["environment"]["BACKUP_STOP_DURING_BACKUP_LABEL"] == local["services"]["code-server"]["labels"]["docker-volume-backup.stop-during-backup"]
 PY
 echo 'Syntax and Compose checks passed.'
