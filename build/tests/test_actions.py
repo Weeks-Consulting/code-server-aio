@@ -29,6 +29,7 @@ class ActionsTests(unittest.TestCase):
                 tests.mkdir(parents=True)
                 script = tests / "actions.sh"
                 script.write_bytes((ROOT / "build/tests/actions.sh").read_bytes())
+                (tests / "act.version").write_bytes((ROOT / "build/tests/act.version").read_bytes())
                 log = root / "arguments.json"
                 executable = (f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
                               f"pathlib.Path({str(log)!r}).write_text(json.dumps(dict(args=sys.argv[1:], host=os.environ.get('DOCKER_HOST'))))\n").encode()

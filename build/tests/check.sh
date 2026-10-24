@@ -10,6 +10,7 @@ shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runti
 python3 build/tests/test_manage.py
 python3 build/tests/test_release.py
 python3 build/tests/test_actions.py
+python3 build/tests/test_dependencies.py
 python3 build/tests/test_backup_key.py
 sh -n build/runtime/homebrew.sh
 

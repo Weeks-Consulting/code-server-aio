@@ -340,6 +340,9 @@ Buildx. Run these commands from the checkout, including from zsh:
 
 ```sh
 just install         # Install host build and test dependencies
+just version         # Print repository dependency versions without hashes (offline)
+just outdated        # Check for outdated pins without changing files
+just upgrade         # Look up latest versions, then confirm updates
 just build           # Build the local test image
 ```
 
@@ -583,6 +586,16 @@ Code-server packages are verified against `build/code-server.sha256`. When updat
 
 Homebrew's installer commit is pinned in `build/homebrew-install.version`, with its checksum in `build/homebrew-install.sha256`. The Docker build downloads and verifies the script, then bundles it at `/usr/local/lib/homebrew-install.sh`. Startup runs that bundled script as `cloud-user` after `/home` is mounted; Homebrew itself still requires Internet access on first installation. Update both pin files together and rebuild to change the installer.
 
-Actions and service images are pinned to immutable revisions; update those pins deliberately and run the integration suite. The temporary act download is pinned and checked against `build/tests/act.sha256`. These pins do not freeze apt packages, Homebrew packages, or all transitive downloads.
+Actions and service images are pinned to immutable revisions; update those pins deliberately and run the integration suite. The temporary act download is pinned and checked against `build/tests/act.sha256`.
 
 Release jobs push each native architecture image after its tests pass, then assemble the recorded registry digests into the published multi-platform image without rebuilding.
+
+`just version` reports repository versions without hashes, including code-server, act, the Homebrew installer, GitHub Actions, cloudflared, and the backup image.
+
+`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. It updates code-server and act to the latest stable GitHub releases, including checksums for every supported architecture, the Homebrew installer commit and checksum, GitHub Actions commit pins and version comments, and service image digests on their existing `latest`/`v2` tracks. GitHub asset SHA-256 metadata is used when available; otherwise assets are downloaded and hashed. Set `GH_TOKEN` or `GITHUB_TOKEN` if needed for GitHub API rate limits. Lookup failures and a declined or unanswered prompt leave files unchanged. Review `git diff` and run `just test` afterward; rebuilding/redeploying is a separate step.
+
+GitHub Actions remain pinned to full 40-character commit SHAs in `uses:`. During `just upgrade`, the latest stable release of each Action is resolved to its commit SHA; approval updates that hash and the adjacent release-version comment in every workflow occurrence. The version comment is informational; the commit SHA selects the code that runs. Actions are included in the same confirmation prompt as the other dependency upgrades.
+
+`just version`, `just outdated`, and `just upgrade` hide commit SHAs and image digests by default; the Homebrew installer is labeled as a pinned commit because it has no release version. `just outdated` checks the same upstream sources as `just upgrade`, displays current and latest versions with update status, and reports whether updates are available. It never prompts or changes files, and skips package/installer downloads needed only for checksum updates. It requires Python 3 and Internet access. A completed check exits successfully whether or not updates are available; lookup failures exit with an error.
+
+Add `--hashes` to any dependency command to include commit SHAs and image digests: `just version --hashes`, `just outdated --hashes`, or `just upgrade --hashes`. Hash changes are still detected and reported as available updates when hashes are hidden.

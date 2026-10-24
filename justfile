@@ -40,3 +40,18 @@ actions:
 # List GitHub Actions jobs without running them.
 actions-list:
     sh build/tests/actions.sh --list
+
+# Print repository dependency versions without hashes (offline).
+[positional-arguments]
+version *args:
+    python3 build/tools/dependencies.py version "$@"
+
+# Look up upstream versions and confirm before updating pins and checksums.
+[positional-arguments]
+upgrade *args:
+    python3 build/tools/dependencies.py upgrade "$@"
+
+# Check upstream dependency versions without prompting or changing files.
+[positional-arguments]
+outdated *args:
+    python3 build/tools/dependencies.py outdated "$@"

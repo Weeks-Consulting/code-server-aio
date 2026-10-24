@@ -26,6 +26,8 @@ case "$asset_os" in
     *) echo 'This script requires Linux or macOS.' >&2; exit 1 ;;
 esac
 
+act_version=$(cat "$project_dir/build/tests/act.version")
+
 act_dir=$(mktemp -d "$project_dir/.test-tmp.XXXXXXXX")
 test_volume=
 cleanup() {
@@ -39,7 +41,7 @@ mkdir "$act_dir/tmp"
 test_tmp="$act_dir/tmp"
 temp_mount="$test_tmp:$test_tmp"
 curl --fail --silent --show-error --location --retry 3 \
-    "https://github.com/nektos/act/releases/download/v0.2.89/act_${asset_os}_${asset_arch}.tar.gz" \
+    "https://github.com/nektos/act/releases/download/v${act_version}/act_${asset_os}_${asset_arch}.tar.gz" \
     --output "$act_dir/act.tar.gz"
 expected=$(awk -v name="act_${asset_os}_${asset_arch}.tar.gz" '$2 == name {print $1}' "$project_dir/build/tests/act.sha256")
 python3 - "$act_dir/act.tar.gz" "$expected" <<'PY'
