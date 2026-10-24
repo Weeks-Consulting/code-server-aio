@@ -6,8 +6,11 @@ services:
 
   backup:
     image: offen/docker-volume-backup:v2@sha256:6630d1f122f42ada84566550e47647d2e7488ac3775176ee654b64e489ab6e40
+    # Root reads files belonging to every archived UID/GID.
+    user: "0:0"
     restart: unless-stopped
     environment:
+      GPG_PASSPHRASE: ${GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
       TZ: ${BACKUP_TIMEZONE:-America/Chicago}
       BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}
       BACKUP_FILENAME: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-%Y-%m-%dT%H-%M-%S.tar.gz

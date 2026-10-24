@@ -87,8 +87,8 @@ class AccessProxyTests(unittest.TestCase):
         cls.directory.cleanup()
 
     @staticmethod
-    def response(token=None, path="/", headers=None):
-        connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=2)
+    def response(token=None, path="/", headers=None, timeout=2):
+        connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=timeout)
         request_headers = {} if headers is None else dict(headers)
         if token is not None:
             request_headers["Cf-Access-Jwt-Assertion"] = token
@@ -187,7 +187,7 @@ class AccessProxyTests(unittest.TestCase):
     def test_stale_keys_deny_all(self):
         proxy.install(proxy.configuration(ISSUER, AUD, self.keys, int(time.time()) - 1))
         self.wait_status(self.token(), 503)
-        self.assert_error_page(503, "Access validation is not ready", self.token())
+        self.assert_error_page(503, "Service is not ready", self.token())
 
     def assert_error_page(self, expected, title, token=None):
         status, headers, body = self.response(token)
@@ -266,11 +266,23 @@ class AccessProxyTests(unittest.TestCase):
                 proxy.main()
             self.assertEqual([call.args[0] for call in sleep.call_args_list], [1] * 10 + [60, 60, proxy.REFRESH_SECONDS])
 
+    def test_pending_backend_shows_startup_page(self):
+        config = proxy.configuration(ISSUER, AUD, self.keys, int(time.time()) + 3600)
+        config = config.replace("server code_server 127.0.0.1:8081", "server code_server 127.0.0.1:1")
+        proxy.install(config)
+        # HAProxy retries refused backend connections before generating its 503.
+        status, headers, body = self.response(self.token(), timeout=10)
+        self.assertEqual(status, 503)
+        self.assertIn("Service is not ready", body)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertIn('http-equiv="refresh" content="5"', body)
+        self.assertEqual(self.status(None), 403)
+
     def test_bootstrap_blocks_every_route(self):
         proxy.install(proxy.configuration())
         self.assertEqual(self.status(self.token()), 503)
         self.assertEqual(self.status(None, "/healthz"), 503)
-        self.assert_error_page(503, "Access validation is not ready")
+        self.assert_error_page(503, "Service is not ready")
 
 
 if __name__ == "__main__":

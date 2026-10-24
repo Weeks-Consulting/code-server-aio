@@ -6,9 +6,22 @@ services:
 
   backup:
     image: offen/docker-volume-backup:v2@sha256:6630d1f122f42ada84566550e47647d2e7488ac3775176ee654b64e489ab6e40
+    # Root reads all archived owners; local copy hooks set the host file owner.
+    user: "0:0"
     restart: unless-stopped
+    labels:
+      docker-volume-backup.exec-label: ${COMPOSE_PROJECT_NAME}-local-home
+      docker-volume-backup.copy-pre: >-
+        /bin/sh -ec 'chmod 700 /archive;
+        chown ${LOCAL_BACKUP_UID:-0}:${LOCAL_BACKUP_GID:-0} /archive'
+      docker-volume-backup.copy-post: >-
+        /bin/sh -ec 'file="/archive/$${COMMAND_RUNTIME_ARCHIVE_FILEPATH##*/}";
+        chown ${LOCAL_BACKUP_UID:-0}:${LOCAL_BACKUP_GID:-0} "$$file";
+        chmod 600 "$$file"'
     environment:
+      GPG_PASSPHRASE: ${GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
       TZ: ${BACKUP_TIMEZONE:-America/Chicago}
+      EXEC_LABEL: ${COMPOSE_PROJECT_NAME}-local-home
       BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}
       BACKUP_FILENAME: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-%Y-%m-%dT%H-%M-%S.tar.gz
       BACKUP_STOP_DURING_BACKUP_LABEL: ${COMPOSE_PROJECT_NAME}-home

@@ -9,6 +9,12 @@ prefix="code-server-restore-$$"
 source_volume="${prefix}_code-server-home"
 app_name="$prefix-app"
 archive_dir=$(mktemp -d)
+command -v gpg >/dev/null || { echo 'Install gpg to run encrypted backup/restore tests.' >&2; exit 1; }
+# Generate a disposable key through the same initializer as deployed installations.
+touch "$archive_dir/.env"
+bash "$script_dir/../tools/backup-key.sh" "$archive_dir/.env"
+GPG_PASSPHRASE=$(sed -n 's/^GPG_PASSPHRASE=//p' "$archive_dir/.env")
+export GPG_PASSPHRASE
 cleanup() {
     docker rm -f "$app_name" >/dev/null 2>&1 || true
     docker volume rm "$source_volume" "${prefix}_docker-data" "$prefix-restored" "$prefix-relative" >/dev/null 2>&1 || true
@@ -26,6 +32,8 @@ docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/data
         echo saved-settings > /data/cloud-user/.config/sentinel
         echo saved-brew > /data/linuxbrew/sentinel
         chown -R 10000:10000 /data
+        touch /data/low-uid
+        chown 1:13 /data/low-uid
     '
 # Exercise the actual local Compose overlay, with no S3 settings in the container.
 # A lightweight stand-in verifies the labeled application is stopped and restarted.
@@ -34,35 +42,88 @@ docker run -d --name "$app_name" \
     --mount "type=volume,src=$source_volume,dst=/home" \
     --entrypoint /usr/bin/sleep "$image" infinity >/dev/null
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
-BACKUP_LOCAL_PATH="$archive_dir" docker compose --project-directory "$project_dir" \
+LOCAL_BACKUP_UID=$(id -u) LOCAL_BACKUP_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" docker compose --project-directory "$project_dir" \
     --project-name "$prefix" --env-file "$project_dir/.env.example" \
     -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-local.yaml" \
     run --rm --no-deps --entrypoint backup backup
 test "$(docker inspect -f '{{.State.Running}}' "$app_name")" = true
 test "$(docker inspect -f '{{.State.StartedAt}}' "$app_name")" != "$started_before"
 echo 'PASS: Local backup stopped and restarted the labeled application.'
-archive=$(find "$archive_dir" -maxdepth 1 -name '*.tar.gz' -print -quit)
+archive=$(find "$archive_dir" -maxdepth 1 -name '*.tar.gz.gpg' -print -quit)
 test -n "$archive"
-mv "$archive" "$archive_dir/restore-test.tar.gz"
-tar -tzf "$archive_dir/restore-test.tar.gz"
-RESTORE_IMAGE="$image" bash "$restore_script" "$archive_dir/restore-test.tar.gz" "$prefix-restored"
+test "$(stat -c %u:%g "$archive")" = "$(id -u):$(id -g)"
+test "$(stat -c %a "$archive")" = 600
+test "$(stat -c %a "$archive_dir")" = 700
+test "$(stat -c %u:%g "$archive_dir")" = "$(id -u):$(id -g)"
+echo 'PASS: Local archive belongs to the invoking user with mode 600.'
+mv "$archive" "$archive_dir/restore-test.tar.gz.gpg"
+if tar -tzf "$archive_dir/restore-test.tar.gz.gpg" 2>/dev/null; then
+    echo 'Offen produced an unencrypted archive.' >&2; exit 1
+fi
+docker volume create "$prefix-restored" >/dev/null
+docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data" \
+    --entrypoint /bin/bash "$image" -ec 'echo original > /data/original; ln -s original /data/link; chown 1:13 /data/original'
+# A wrong or missing key must fail before changing the original volume.
+if GPG_PASSPHRASE=wrong-key RESTORE_IMAGE="$image" bash "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
+    echo 'Encrypted restore accepted the wrong key.' >&2; exit 1
+fi
+if GPG_PASSPHRASE='' RESTORE_IMAGE="$image" bash "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
+    echo 'Encrypted restore accepted a missing key.' >&2; exit 1
+fi
+docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
+    --entrypoint /bin/bash "$image" -ec 'grep -qx original /data/original; test -L /data/link'
+# Invalid input must leave neither a rollback directory nor a claimed backup path.
+printf 'not a gzip archive' > "$archive_dir/corrupt.tar.gz"
+if RESTORE_IMAGE="$image" bash "$restore_script" "$archive_dir/corrupt.tar.gz" "$prefix-restored" > "$archive_dir/failed-restore.log" 2>&1; then
+    echo 'Restore accepted a corrupt archive.' >&2; exit 1
+fi
+test -z "$(find "$archive_dir" -type d -name 'pre-restore.*' -print -quit)"
+if grep -q 'Original volume backup:' "$archive_dir/failed-restore.log"; then
+    echo 'Failed validation advertised a nonexistent rollback.' >&2; exit 1
+fi
+docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
+    --entrypoint /bin/bash "$image" -ec 'grep -qx original /data/original; test -L /data/link'
+echo 'PASS: Failed validation leaves no rollback directory or misleading path.'
+# Exercise installed-launcher dotenv parsing without an inherited key.
+cp "$project_dir/manage" "$archive_dir/manage"
+cp "$restore_script" "$archive_dir/restore-home.sh"
+env -u GPG_PASSPHRASE RESTORE_IMAGE="$image" bash "$archive_dir/manage" restore \
+    --archive "$archive_dir/restore-test.tar.gz.gpg" --volume "$prefix-restored"
 docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
     --entrypoint /bin/bash "$image" -ec '
         grep -qx saved-settings /data/cloud-user/.config/sentinel
         grep -qx saved-brew /data/linuxbrew/sentinel
         test "$(stat -c %u:%g /data/cloud-user/.config/sentinel)" = 10000:10000
     '
-if refusal_output=$(RESTORE_IMAGE="$image" bash "$restore_script" "$archive_dir/restore-test.tar.gz" "$prefix-restored" 2>&1); then
-    echo 'Restore overwrote a populated volume' >&2; exit 1
-fi
-if ! grep -Fxq 'Refusing to restore into a non-empty volume' <<< "$refusal_output"; then
-    printf 'Restore failed for an unexpected reason:\n%s\n' "$refusal_output" >&2
-    exit 1
-fi
-echo 'PASS: Restore correctly refused a non-empty volume (expected safety check).'
+rollback=$(find "$archive_dir" -name original-home.tar.gz -print -quit)
+test -n "$rollback"
+test "$(stat -c %u:%g "$rollback")" = "$(id -u):$(id -g)"
+test "$(stat -c %a "$rollback")" = 600
+test "$(stat -c %u:%g "$(dirname -- "$rollback")")" = "$(id -u):$(id -g)"
+test "$(stat -c %a "$(dirname -- "$rollback")")" = 700
+# The caller can read rollback archives without another privileged host command.
+tar -tzf "$rollback" >/dev/null
+echo 'PASS: Rollback archive belongs to the effective caller with mode 600.'
+docker run --rm --network none --mount "type=bind,src=$rollback,dst=/rollback.tar.gz,readonly" \
+    --entrypoint /bin/bash "$image" -ec '
+        mkdir /verify
+        tar --numeric-owner -xzf /rollback.tar.gz -C /verify
+        grep -qx original /verify/backup/code-server-home/original
+        test "$(readlink /verify/backup/code-server-home/link)" = original
+    '
+docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
+    --entrypoint /bin/bash "$image" -ec 'test ! -e /data/original; test "$(stat -c %u:%g /data/low-uid)" = 1:13'
+# The rollback archive uses the same format and can restore the original contents.
+RESTORE_IMAGE="$image" bash "$restore_script" "$rollback" "$prefix-restored"
+docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
+    --entrypoint /bin/bash "$image" -ec 'grep -qx original /data/original; test "$(stat -c %u:%g /data/original)" = 1:13; test -L /data/link'
+test -z "$(find "$archive_dir" -mindepth 2 -type d -name 'pre-restore.*' -print -quit)"
+test "$(find "$archive_dir" -maxdepth 1 -type d -name 'pre-restore.*' | wc -l)" -eq 2
+echo 'PASS: In-place restore preserved numeric owners and created a usable rollback archive.'
 docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/backup/code-server-home,readonly" \
     --mount "type=bind,src=$archive_dir,dst=/archive" --entrypoint /bin/bash "$image" \
     -ec 'tar -C / -czf /archive/relative.tar.gz backup/code-server-home'
+docker volume create "$prefix-relative" >/dev/null
 RESTORE_IMAGE="$image" bash "$restore_script" "$archive_dir/relative.tar.gz" "$prefix-relative"
 docker run --rm --network none --mount "type=volume,src=$prefix-relative,dst=/data,readonly" \
     --entrypoint /bin/bash "$image" -ec 'grep -qx saved-settings /data/cloud-user/.config/sentinel'

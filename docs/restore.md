@@ -1,57 +1,77 @@
 # Restoring a backup
 
-For local backups, select the desired `.tar.gz` archive from `BACKUP_LOCAL_PATH`.
-For S3 backups, download it from your bucket using the console or your S3 client.
-Use the configured `AWS_S3_PATH`; old backups keep their original filenames and locations.
+For local backups, select a `.tar.gz.gpg` archive (or a legacy `.tar.gz` archive) from `BACKUP_LOCAL_PATH`.
+For S3 backups, download it using your storage provider's console or CLI.
+Use the configured `AWS_S3_PATH`; older backups keep their original locations.
 
-Restore into a new, unused Docker volume. The helper refuses to overwrite a
-non-empty volume and preserves stored file ownership:
+For encrypted archives, install `gpg` and `python3` on the Docker host (`sudo apt-get install gpg python3`
+on Debian/Ubuntu). Put the **original** `GPG_PASSPHRASE` in the deployment's `.env`;
+`manage restore` reads it without executing the file. An exported `GPG_PASSPHRASE`
+can override it to restore an archive encrypted with an older key. Do not generate a
+new key for recovery: it cannot decrypt old backups. On a replacement host, recover
+the original key from your password manager first.
 
-```sh
-bash build/tools/restore-home.sh /absolute/path/to/backup.tar.gz restored-home
-```
+The helper decrypts into a private temporary directory and removes the plaintext
+on exit. A missing or incorrect key stops restoration before any volume changes.
+Legacy plaintext `.tar.gz` archives need no key or host GPG installation.
 
-Inspect the restored home directory before switching:
+Restore replaces the contents of the original home volume. The helper first
+extracts the requested archive into temporary container storage, then creates
+and verifies a compressed backup of the original volume before removing any data.
+A helper container explicitly runs as root (`--user 0:0`) to extract numeric
+UID/GID values and preserve file ownership, permissions, and symlinks in the volume.
+The host command itself can run as any user with Docker access.
+Allow space for the extracted archive and the rollback backup.
 
-```sh
-docker run --rm -v restored-home:/restore:ro debian:13-slim \
-  ls -la /restore/cloud-user
-```
+1. Identify the home volume before stopping the deployment:
 
-The archive layout is `/backup/code-server-home/`, containing the entire `/home`
-tree. Archives made before the `/home` mount change need their user files moved
-into `cloud-user/` after restoration. Homebrew binaries should be restored onto
-the same CPU architecture.
+   ```sh
+   docker compose ps -q code-server | xargs docker inspect --format '{{range .Mounts}}{{if eq .Destination "/home"}}{{.Name}}{{end}}{{end}}'
+   ```
 
-To switch safely, first stop the existing stack using the same Compose files
-used to start it. Keep its original home volume for rollback. Create
-`compose.restore.yaml` with:
+   Use your usual Compose project name and file options for this command and `down`.
+2. Stop the stack with `bash manage stop` (and your usual `--project-name`, if set),
+   or `docker compose down` using those same Compose options. Do not use
+   `down -v`, which deletes volumes. Stop any other containers using the home volume.
+3. Run the launcher with the actual volume name:
 
-```yaml
-volumes:
-  code-server-home:
-    external: true
-    name: restored-home
-```
+   ```sh
+   bash manage restore --archive /absolute/path/to/backup.tar.gz.gpg --volume code-server_code-server-home
+   ```
 
-Start with the restore override added last; include build/backup overlays if used:
+   For the default installation with `sudo`, use
+   `sudo bash /opt/code-server/manage restore ...`. Otherwise, run as the user
+   that installed the deployment. The standalone helper accepts the same archive
+   and volume as positional arguments: `bash build/tools/restore-home.sh ARCHIVE VOLUME`
+   (installed deployments have `restore-home.sh` beside `manage`). For encrypted
+   archives, the standalone helper requires an exported `GPG_PASSPHRASE`; it does
+   not read `.env`. When using `sudo`, the launcher reads `.env` as root; to use an
+   exported older key, pass it with `sudo --preserve-env=GPG_PASSPHRASE bash ...`.
+4. Restart with your usual `manage` options and verify files, extensions,
+   Homebrew, and sign-in. The volume name stays unchanged; no Compose override is needed.
 
-```sh
-docker compose -f compose.yaml -f compose.restore.yaml up -d
-# Local development with backups:
-docker compose -f compose.yaml -f compose.build.yaml -f compose.backup.yaml \
-  -f compose.restore.yaml up -d --build
-```
+The target volume must already exist and have no running containers attached.
+Relative archive paths resolve from your current working directory. Keep the stack
+stopped throughout restoration; the helper does not restart it automatically.
 
-Verify files, extensions, Homebrew, and sign-in before deleting any old volume.
-Keep using the restore override for subsequent commands. To roll back, stop the
-restored stack and restart with the original Compose file combination.
+The helper prints the rollback archive path after verifying it and before replacing
+volume contents. Failed extraction leaves no empty rollback directory. It saves
+`original-home.tar.gz` in a new private `pre-restore.*` directory beside the input
+archive. This emergency rollback is **unencrypted**, with mode `600` inside a
+mode `700` directory. Both belong to the effective user running `manage restore`
+(or the standalone helper), so that user can read and copy the rollback archive.
+If the command runs as root, root owns these files; sudo environment variables are
+ignored. This host-file ownership does not change the UID/GID values inside the archive.
+Keep it protected until the restored deployment is verified, then remove it. If
+replacement fails, keep the stack stopped and restore that rollback archive using
+the same command and volume. Each restore creates another rollback backup. When restoring
+a rollback archive, the new `pre-restore.*` directory is placed beside the previous
+one rather than nested inside it. A failed replacement keeps the verified rollback.
 
-Exercise archive creation and restoration locally without S3:
+The archive layout is `backup/code-server-home/` (optionally with a leading `/`),
+containing the entire `/home` tree. Numeric file ownership and symlinks are preserved.
+Archives made before the `/home` mount change need their user files moved into
+`cloud-user/` after restoration. Restore Homebrew onto the same CPU architecture.
 
-```sh
-just test-backup
-```
-
-This verifies archive layout, hidden files, shared home directories, ownership,
-and refusal to overwrite data. It does not verify your S3 credentials or uploads.
+Run `just test-backup` to exercise archive creation, in-place restoration, rollback
+contents, hidden files, shared home directories, and ownership without S3.

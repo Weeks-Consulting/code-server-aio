@@ -106,12 +106,45 @@ docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOU
         if /usr/local/bin/entrypoint.sh --help > /tmp/result 2>&1; then exit 1; fi
         grep -q "HOMEBREW_INSTALL_TIMEOUT must be" /tmp/result
     '
-# A stalled bundled installer must time out and retain its retry marker.
-docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOUT=1 \
-    --entrypoint /bin/bash "$image" -c '
-        printf "#!/bin/bash\nsleep 60\n" > /usr/local/lib/homebrew-install.sh
-        /usr/local/bin/entrypoint.sh --help
-        result=$?
-        test "$result" -eq 124 && test -f /home/linuxbrew/.homebrew-installing
-    '
+# A deliberately paused installer must leave the proxy available and backend closed.
+docker rm -f "$name" >/dev/null
+cat > "$home_dir/paused-installer.sh" <<'INSTALL'
+#!/bin/bash
+while [ ! -f /home/linuxbrew/continue-setup ]; do sleep 1; done
+mkdir -p /home/linuxbrew/.linuxbrew/bin
+printf '%s\n' '#!/bin/bash' 'echo fake-brew' > /home/linuxbrew/.linuxbrew/bin/brew
+chmod +x /home/linuxbrew/.linuxbrew/bin/brew
+INSTALL
+docker run -d --name "$name" --privileged --init --network none --tmpfs /home:mode=755,exec \
+    --mount "type=bind,src=$home_dir/paused-installer.sh,dst=/usr/local/lib/homebrew-install.sh,readonly" \
+    -e HOMEBREW_INSTALL_TIMEOUT=600 "$image" >/dev/null
+deadline=$((SECONDS + 60))
+until docker exec "$name" test -f /home/linuxbrew/.homebrew-installing; do
+    if (( SECONDS > deadline )); then docker logs "$name"; exit 1; fi
+    sleep 1
+done
+docker exec "$name" /bin/bash -ec '
+    test "$(curl -s -o /tmp/startup-page -w "%{http_code}" http://127.0.0.1:8080/)" = 503
+    grep -q "Service is not ready" /tmp/startup-page
+    grep -q http-equiv= /tmp/startup-page
+    if curl --fail --silent http://127.0.0.1:8081/healthz; then exit 1; fi
+    if /usr/local/bin/container-healthcheck; then exit 1; fi
+    touch /home/linuxbrew/continue-setup
+'
+wait_ready
+# A stalled installer must time out, retain the retry marker, and stop Supervisor.
+docker rm -f "$name" >/dev/null
+mkdir "$home_dir/timeout-home"
+printf '#!/bin/bash\nsleep 60\n' > "$home_dir/timeout-installer.sh"
+docker run -d --name "$name" --privileged --init --network none \
+    --mount "type=bind,src=$home_dir/timeout-home,dst=/home" \
+    --mount "type=bind,src=$home_dir/timeout-installer.sh,dst=/usr/local/lib/homebrew-install.sh,readonly" \
+    -e HOMEBREW_INSTALL_TIMEOUT=1 "$image" >/dev/null
+deadline=$((SECONDS + 90))
+until [[ $(docker inspect -f '{{.State.Running}}' "$name") == false ]]; do
+    if (( SECONDS > deadline )); then docker logs "$name"; exit 1; fi
+    sleep 1
+done
+docker logs "$name" 2>&1 | grep 'Workspace initialization failed (124)' >/dev/null
+test -f "$home_dir/timeout-home/linuxbrew/.homebrew-installing"
 echo 'Full-container smoke tests passed.'

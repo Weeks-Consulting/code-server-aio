@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch a checkout or installed deployment with explicit Compose options.
+# Manage a checkout or installed deployment with explicit Compose options.
 set -euo pipefail
 
 directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -8,27 +8,29 @@ foreground=false
 pull=false
 project=
 action=start
+action_given=false
 archive=
 volume=
 caller_directory=$PWD
-if (( $# )) && [[ $1 != -* ]]; then action=$1; shift; fi
 usage() {
     cat <<'HELP'
-Usage: bash start.sh [start|backup|backups|restore] [OPTIONS]
+Usage: bash manage [start|stop|backup|backups|restore] [OPTIONS]
 
   start              Start services (default)
+  stop               Stop and remove project containers and networks; keep volumes
   backup             Run a backup now; requires --backup s3 or local
   backups            List local backup archives; requires --backup local
-  restore            Restore --archive FILE into --volume NEW_OR_EMPTY_VOLUME
+  restore            Back up and restore --archive FILE into --volume ORIGINAL_VOLUME
 
   --backup MODE      none (default), s3, or local
   --foreground       Attach to logs instead of starting in the background
   --pull             Pull images before starting
   --project-name NAME  Override the Compose project name
-  --archive FILE     Downloaded .tar.gz archive to restore
-  --volume NAME      New or empty Docker volume to restore into
+  --archive FILE     Downloaded .tar.gz.gpg (or legacy .tar.gz) archive to restore
+  --volume NAME      Existing home volume to back up and replace
   -h, --help         Show this help
 
+Command and options may appear in any order.
 Keep this script beside compose.yaml and configure .env there before starting.
 HELP
 }
@@ -36,7 +38,9 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 while (( $# )); do
     case "$1" in
         --backup|--project-name|--archive|--volume)
-            (( $# >= 2 )) && [[ -n $2 && $2 != --* ]] || fail "Missing value for $1"
+            if (( $# < 2 )) || [[ -z $2 || $2 == --* ]]; then
+                fail "Missing value for $1"
+            fi
             case "$1" in
                 --backup) backup=$2 ;;
                 --project-name) project=$2 ;;
@@ -47,10 +51,14 @@ while (( $# )); do
         --foreground) foreground=true; shift ;;
         --pull) pull=true; shift ;;
         -h|--help) usage; exit 0 ;;
-        *) fail "Unknown option: $1 (use --help)" ;;
+        start|stop|backup|backups|restore)
+            if $action_given; then fail 'Specify only one command'; fi
+            action=$1; action_given=true; shift ;;
+        -*) fail "Unknown option: $1 (use --help)" ;;
+        *) fail "Unknown command: $1 (use --help)" ;;
     esac
 done
-case "$action" in start|backup|backups|restore) ;; *) fail "Unknown command: $action" ;; esac
+case "$action" in start|stop|backup|backups|restore) ;; *) fail "Unknown command: $action" ;; esac
 case "$backup" in none|s3|local) ;; *) fail 'Backup mode must be none, s3, or local' ;; esac
 if [[ $action != start ]] && { $foreground || $pull; }; then
     fail '--foreground and --pull are only supported by the start command'
@@ -62,6 +70,24 @@ if [[ $action == restore ]]; then
     helper="$directory/restore-home.sh"
     [[ -f $helper ]] || helper="$directory/build/tools/restore-home.sh"
     [[ -f $helper ]] || fail 'Restore helper is missing; reinstall this release.'
+    if [[ $archive == *.gpg && -z ${GPG_PASSPHRASE:-} ]]; then
+        [[ -r $directory/.env ]] || fail 'Restore requires GPG_PASSPHRASE or the original .env encryption key.'
+        # Let Compose parse dotenv quoting and interpolation; never source .env.
+        command -v python3 >/dev/null || fail 'Install python3 to read the restore key from .env.'
+        unset GPG_PASSPHRASE
+        settings=$(docker compose --project-directory "$directory" --env-file "$directory/.env" \
+            -f - config --format json <<'COMPOSE'
+services:
+  restore-key:
+    image: unused
+    environment:
+      GPG_PASSPHRASE: ${GPG_PASSPHRASE:?Restore requires the original GPG_PASSPHRASE in .env}
+COMPOSE
+        )
+        GPG_PASSPHRASE=$(printf '%s\n' "$settings" | python3 -c \
+            'import json, sys; print(json.load(sys.stdin)["services"]["restore-key"]["environment"]["GPG_PASSPHRASE"], end="")')
+        export GPG_PASSPHRASE
+    fi
     exec bash "$helper" "$archive" "$volume"
 fi
 [[ -z $archive && -z $volume ]] || fail '--archive and --volume are only supported by restore'
@@ -69,27 +95,45 @@ fi
 [[ $action != backups || $backup == local ]] || fail 'backups requires --backup local; use your storage provider to list S3 archives'
 cd -- "$directory"
 [[ -f .env ]] || fail 'Configure .env in the deployment directory before starting.'
+[[ -r .env ]] || fail 'Cannot read .env. If installed as root, run manage with sudo.'
 command=(docker compose --project-directory "$PWD" --env-file "$PWD/.env")
 [[ -z $project ]] || command+=(--project-name "$project")
 files=(compose.yaml)
 case "$backup" in
     s3) files+=(compose.backup.yaml) ;;
-    local) files+=(compose.backup-local.yaml) ;;
+    local)
+        files+=(compose.backup-local.yaml)
+        # Backup files belong to the effective user running this command.
+        LOCAL_BACKUP_UID=$(id -u)
+        LOCAL_BACKUP_GID=$(id -g)
+        export LOCAL_BACKUP_UID LOCAL_BACKUP_GID
+        [[ $LOCAL_BACKUP_UID =~ ^[0-9]+$ && $LOCAL_BACKUP_GID =~ ^[0-9]+$ ]] ||
+            fail 'Local backup UID and GID must be numeric'
+        ;;
 esac
 for file in "${files[@]}"; do
     [[ -f $file ]] || fail "Required Compose file is missing: $PWD/$file"
     command+=(-f "$PWD/$file")
 done
+if [[ $backup != none && ( $action == start || $action == backup ) ]]; then
+    key_helper="$directory/backup-key.sh"
+    [[ -f $key_helper ]] || key_helper="$directory/build/tools/backup-key.sh"
+    [[ -f $key_helper ]] || fail 'Backup key helper is missing; reinstall this release.'
+    bash "$key_helper" "$directory/.env"
+    # The persisted deployment key takes precedence over a stale shell override.
+    unset GPG_PASSPHRASE
+fi
 case "$action" in
     start)
         command+=(up)
         if ! $foreground; then command+=(-d); fi
         if $pull; then command+=(--pull always); fi
         ;;
+    stop) command+=(down --remove-orphans) ;;
     backup) command+=(run --rm --no-deps --entrypoint backup backup) ;;
     backups)
         command+=(run --rm --no-deps --entrypoint /bin/sh backup -ec
-            'find /archive -maxdepth 1 -type f -name "*.tar.gz" -exec ls -lh {} \;')
+            'find /archive -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \) -exec ls -lh {} \;')
         ;;
 esac
 exec "${command[@]}"

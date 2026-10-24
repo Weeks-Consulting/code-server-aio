@@ -3,9 +3,17 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 
-for script in start.sh build/runtime/*.sh build/tools/*.sh build/tests/*.sh; do bash -n "$script"; done
-python3 build/tests/test_start.py
+scripts=(manage build/runtime/*.sh build/tools/*.sh build/tests/*.sh)
+for script in "${scripts[@]}"; do bash -n "$script"; done
+command -v shellcheck >/dev/null || { echo 'Install shellcheck to run checks.' >&2; exit 1; }
+shellcheck --severity=style "${scripts[@]}"
+python3 build/tests/test_manage.py
+python3 build/tests/test_release.py
+python3 build/tests/test_backup_key.py
 sh -n build/runtime/homebrew.sh
+
+# Configuration checks use a disposable passphrase, never a deployment key.
+export GPG_PASSPHRASE=validation-only
 
 # The base file must work with only the tunnel token set.
 CLOUDFLARE_TUNNEL_TOKEN=validation-only docker compose --env-file /dev/null config --quiet
@@ -19,13 +27,21 @@ done
 
 # Backup stop labels, S3 prefixes, and archive names are scoped to the Compose project.
 python3 - <<'PY'
-import json, subprocess
+import json, os, subprocess
 
 def model(overlay, project="code-server"):
     return json.loads(subprocess.check_output([
         "docker", "compose", "--project-name", project, "--env-file", ".env.example",
         "-f", "compose.yaml", "-f", overlay, "config", "--format", "json",
     ], text=True))
+
+# Both destinations fail closed when encryption is not configured.
+for overlay in ("compose.backup.yaml", "compose.backup-local.yaml"):
+    result = subprocess.run([
+        "docker", "compose", "--env-file", ".env.example", "-f", "compose.yaml",
+        "-f", overlay, "config", "--quiet",
+    ], env={**os.environ, "GPG_PASSPHRASE": ""}, capture_output=True, text=True)
+    assert result.returncode != 0 and "GPG_PASSPHRASE" in result.stderr
 
 deployments = []
 for project in ("isolation-a", "isolation-b"):
@@ -38,6 +54,12 @@ assert all(left != right for left, right in zip(*deployments))
 
 local = model("compose.backup-local.yaml")
 backup = local["services"]["backup"]
+assert backup["environment"]["GPG_PASSPHRASE"] == "validation-only"
+assert model("compose.backup.yaml")["services"]["backup"]["environment"]["GPG_PASSPHRASE"] == "validation-only"
+assert backup["environment"]["EXEC_LABEL"] == backup["labels"]["docker-volume-backup.exec-label"]
+assert "chown 0:0" in backup["labels"]["docker-volume-backup.copy-post"]
+assert "chmod 700 /archive" in backup["labels"]["docker-volume-backup.copy-pre"]
+assert "chmod 600" in backup["labels"]["docker-volume-backup.copy-post"]
 assert not any(key.startswith("AWS_") for key in backup["environment"])
 archive_mount = next(v for v in backup["volumes"] if v["target"] == "/archive")
 assert archive_mount["type"] == "bind"

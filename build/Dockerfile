@@ -10,6 +10,7 @@ COPY build/code-server.version build/code-server.sha256 /tmp/
 RUN version=${CODE_SERVER_VERSION:-$(cat /tmp/code-server.version)} && \
     printf '%s\n' "$version" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+' && \
     apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -61,6 +62,7 @@ WORKDIR /home/cloud-user
 EXPOSE 8080
 
 COPY --chmod=755 build/runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY build/runtime/start-code-server.sh /usr/local/lib/start-code-server.sh
 COPY build/runtime/supervisord.conf /etc/supervisor/supervisord.conf
 COPY build/runtime/access-proxy.py /usr/local/lib/access-proxy.py
 COPY build/runtime/access-403.html build/runtime/access-503.html /etc/haproxy/errors/
