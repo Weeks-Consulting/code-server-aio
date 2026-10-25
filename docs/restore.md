@@ -11,22 +11,21 @@ can override it to restore an archive encrypted with an older key. Do not genera
 new key for recovery: it cannot decrypt old backups. On a replacement host, recover
 the original key from your password manager first.
 
-The helper decrypts into a private temporary directory beside the archive and
-removes the plaintext on normal exit and catchable termination signals. SIGKILL,
-an OOM kill, or power loss can leave a `.decrypt.*` directory containing plaintext.
-After an interrupted restore, check beside the archive and remove that specific
-directory once you have confirmed no restore is still using it. The helper does
-not automatically delete other restores' temporary directories. On macOS, place the archive in a folder shared with
-Docker; the helper also writes its rollback archive there. A missing or incorrect key stops restoration before any volume changes.
-Legacy plaintext `.tar.gz` archives need no key or host GPG installation.
+The helper streams decryption directly into a private staging directory on the target
+home volume. It writes no intermediate plaintext archive. On macOS, place the archive
+in a folder shared with Docker; the rollback is saved beside it. A missing or incorrect
+key stops restoration before replacing original files. Legacy plaintext `.tar.gz`
+archives need no key or host GPG installation unless you choose to encrypt the rollback.
 
-Restore replaces the contents of the original home volume. The helper first
-extracts the requested archive into temporary container storage, then creates
-and verifies a compressed backup of the original volume before removing any data.
-A helper container explicitly runs as root (`--user 0:0`) to extract numeric
-UID/GID values and preserve file ownership, permissions, and symlinks in the volume.
-The host command itself can run as any user with Docker access.
-Allow space for the extracted archive and the rollback backup.
+Restore replaces the contents of the original home volume. The helper first extracts
+and validates the requested archive in staging, then creates and verifies a rollback
+backup before removing original entries. Staged files move into place on the same
+filesystem. Allow free space on the volume for one extracted home tree, plus space
+beside the archive for the compressed rollback. The helper container runs as root
+(`--user 0:0`) to preserve numeric ownership, permissions, and symlinks; the host
+command can run as any user with Docker access. Catchable termination cleans staging;
+SIGKILL or power loss can leave a `.restore-staging-*` directory on the home volume.
+Inspect and remove that specific directory before restarting after an interrupted restore.
 
 1. Identify the home volume before stopping the deployment:
 
@@ -61,8 +60,9 @@ stopped throughout restoration; the helper does not restart it automatically.
 
 The helper prints the rollback archive path after verifying it and before replacing
 volume contents. Failed extraction leaves no empty rollback directory. It saves
-`original-home.tar.gz` in a new private `pre-restore.*` directory beside the input
-archive. This emergency rollback is **unencrypted**, with mode `600` inside a
+`original-home.tar.gz.gpg` when `GPG_PASSPHRASE` is available, otherwise
+`original-home.tar.gz`, in a new private `pre-restore.*` directory beside the input
+archive. The rollback uses the supplied key for encryption and has mode `600` inside a
 mode `700` directory. Both belong to the effective user running `manage restore`
 (or the standalone helper), so that user can read and copy the rollback archive.
 If the command runs as root, root owns these files; sudo environment variables are

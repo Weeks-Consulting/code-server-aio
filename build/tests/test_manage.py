@@ -58,7 +58,7 @@ class LauncherTests(unittest.TestCase):
                             "-f", str(self.deployment / "compose.yaml")]
                 if overlay:
                     expected += ["-f", str(self.deployment / overlay)]
-                expected += ["up", "-d"]
+                expected += ["up", "--remove-orphans", "-d"]
                 self.assertEqual(json.loads(self.log.read_text()), expected)
 
     def test_stop_preserves_volumes_and_does_not_generate_key(self):
@@ -94,7 +94,7 @@ class LauncherTests(unittest.TestCase):
         args = json.loads(self.log.read_text())
         self.assertIn("example", args)
         self.assertNotIn("-d", args)
-        self.assertEqual(args[-3:], ["up", "--pull", "always"])
+        self.assertEqual(args[-4:], ["up", "--remove-orphans", "--pull", "always"])
 
     def test_release_warning_is_best_effort(self):
         # Exercise the full launcher, replacing only the upstream network response.
@@ -119,7 +119,7 @@ class LauncherTests(unittest.TestCase):
                 result = self.run_launcher("--pull")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual("differs from latest release" in result.stderr, warn)
-                self.assertEqual(json.loads(self.log.read_text())[-4:], ["up", "-d", "--pull", "always"])
+                self.assertEqual(json.loads(self.log.read_text())[-5:], ["up", "--remove-orphans", "-d", "--pull", "always"])
 
     def test_upgrade_updates_only_image_and_does_not_start_services(self):
         (self.root / "sitecustomize.py").write_text(
@@ -152,6 +152,68 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(dotenv.read_text(), expected)
                 for key in overrides:
                     self.env.pop(key)
+
+    def test_upgrade_defaults_comments_and_shared_lock(self):
+        import fcntl
+        (self.root / "sitecustomize.py").write_text(
+            "import io, urllib.request\n"
+            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\"}')\n")
+        self.env["PYTHONPATH"] = str(self.root)
+        dotenv = self.deployment / ".env"
+        for value in ('', "''", 'ghcr.io/example/fork:1.0.0\t# pinned'):
+            with self.subTest(value=value):
+                dotenv.write_text('CODE_SERVER_IMAGE=' + value + '\n')
+                owner = dotenv.stat()
+                result = self.run_launcher('upgrade')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(':9.0.0', dotenv.read_text())
+                self.assertEqual((dotenv.stat().st_uid, dotenv.stat().st_gid), (owner.st_uid, owner.st_gid))
+                guard = (self.deployment / '.env.lock').stat()
+                self.assertEqual((guard.st_uid, guard.st_gid), (owner.st_uid, owner.st_gid))
+        dotenv.write_text('CODE_SERVER_IMAGE=\n')
+        with (self.deployment / '.env.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen(['sh', str(self.script), 'upgrade'], env=self.env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    process.wait(timeout=0.3)
+                dotenv.write_text('CODE_SERVER_IMAGE=\nGPG_PASSPHRASE=newly-generated\n')
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertIn('GPG_PASSPHRASE=newly-generated', dotenv.read_text())
+
+    @unittest.skipUnless(os.geteuid() == 0, 'requires root to model sudo ownership')
+    def test_upgrade_preserves_another_users_file_and_lock(self):
+        (self.root / 'sitecustomize.py').write_text(
+            "import io, urllib.request\n"
+            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\"}')\n")
+        self.env['PYTHONPATH'] = str(self.root)
+        dotenv = self.deployment / '.env'
+        dotenv.write_text('CODE_SERVER_IMAGE=\n')
+        os.chown(dotenv, 65534, 65534)
+        result = self.run_launcher('upgrade')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in (dotenv, self.deployment / '.env.lock'):
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (65534, 65534))
+        result = subprocess.run(['sh', str(self.deployment / 'backup-key.sh'), str(dotenv)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((dotenv.stat().st_uid, dotenv.stat().st_gid), (65534, 65534))
+
+    def test_start_without_pull_skips_network(self):
+        (self.root / "sitecustomize.py").write_text(
+            "import pathlib, urllib.request\n"
+            f"def fail(*a, **k): pathlib.Path({str(self.root / 'network-called')!r}).touch(); raise OSError('offline')\n"
+            "urllib.request.urlopen = fail\n")
+        self.env['PYTHONPATH'] = str(self.root)
+        self.env['TEST_MODEL'] = json.dumps({'services': {'code-server': {
+            'image': 'ghcr.io/example/app:1.0.0'}}})
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / 'network-called').exists())
 
     def test_upgrade_rejects_custom_registry_and_launch_options(self):
         dotenv = self.deployment / ".env"
@@ -241,15 +303,13 @@ class LauncherTests(unittest.TestCase):
         archive = self.root / "saved backup.tar.gz"
         archive.touch()
         (self.deployment / ".env").unlink()
+        # This test checks launcher argument forwarding; the Docker integration
+        # test exercises extraction, rollback encryption, and replacement.
+        (self.deployment / "restore-home.sh").write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGUMENT_LOG"\n')
         result = self.run_launcher("restore", "--archive", archive.name, "--volume", "new-home")
         self.assertEqual(result.returncode, 0, result.stderr)
-        args = json.loads(self.log.read_text())
-        self.assertEqual(args[args.index("--user") + 1], "0:0")
-        self.assertIn(f"ARCHIVE_UID={os.getuid()}", args)
-        self.assertIn(f"ARCHIVE_GID={os.getgid()}", args)
-        self.assertIn(f"type=bind,src={archive.resolve()},dst=/backup.tar.gz,readonly", args)
-        self.assertIn("type=volume,src=new-home,dst=/restore", args)
-        self.assertIn("Original volume backup complete; replacing volume contents.", args[-1])
+        self.assertEqual(self.log.read_text().splitlines(), [str(archive), "new-home"])
 
     def test_invalid_commands(self):
         for args in (("backup",), ("backups", "--backup", "s3"), ("restore",),

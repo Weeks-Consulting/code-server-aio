@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import socket
@@ -192,7 +193,8 @@ def main():
     RUNTIME.mkdir(mode=0o755, parents=True, exist_ok=True)
     if sys.argv[1:] == ["--init"]:
         require_haproxy()
-        allowed_identities()
+        account = pwd.getpwnam("haproxy")
+        os.chown(RUNTIME, account.pw_uid, account.pw_gid)
         install(configuration(), reload=False)
         return
     startup_retries = 0

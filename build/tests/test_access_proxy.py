@@ -7,6 +7,7 @@ import http.server
 import importlib.util
 import json
 import os
+import pwd
 from pathlib import Path
 import socket
 import subprocess
@@ -135,6 +136,40 @@ class AccessProxyTests(unittest.TestCase):
     def setUp(self):
         proxy.install(proxy.configuration(ISSUER, AUD, self.keys, int(time.time()) + 3600))
         self.wait_status(self.token(), 200)
+
+    def test_unprivileged_helper_can_validate_and_reload(self):
+        account = pwd.getpwnam('haproxy')
+        os.chown(proxy.RUNTIME, account.pw_uid, account.pw_gid)
+        os.chown(proxy.RUNTIME / 'master.sock', account.pw_uid, account.pw_gid)
+        fresh_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        code = f"""
+import importlib.util, io, json, subprocess
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('proxy', '/usr/local/lib/access-proxy.py')
+proxy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proxy)
+proxy.RUNTIME = Path({str(proxy.RUNTIME)!r})
+proxy.settings = lambda: ({ISSUER!r}, {AUD!r})
+proxy.urllib.request.urlopen = lambda *a, **k: io.BytesIO({json.dumps({'keys': [jwk(fresh_key)]}).encode()!r})
+try:
+    proxy.refresh()
+except subprocess.CalledProcessError as error:
+    print(error.stderr.decode())
+    raise
+"""
+        def demote():
+            os.setgroups([])
+            os.setgid(account.pw_gid)
+            os.setuid(account.pw_uid)
+        try:
+            result = subprocess.run(['/usr/bin/python3', '-c', code], preexec_fn=demote, cwd='/',
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.wait_status(self.token(key=fresh_key), 200)
+        finally:
+            os.chown(proxy.RUNTIME, 0, 0)
+            os.chown(proxy.RUNTIME / 'master.sock', 0, 0)
+            proxy.public_keys({'keys': [jwk(self.key)]})
 
     def test_valid_tokens(self):
         for audience in [AUD, [AUD], ["other", AUD]]:

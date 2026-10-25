@@ -44,11 +44,16 @@ wait_ready() {
     done
 }
 docker run -d --name "$name" --privileged --init --restart unless-stopped \
+    --env CF_ACCESS_ALLOWED_EMAILS="invalid identity" \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready
 docker exec "$name" /bin/bash -ec '
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
     /usr/bin/sudo -H -u cloud-user /bin/bash --login -ec "command -v brew; brew --version"
+    helper=$(/usr/bin/supervisorctl pid access-keys)
+    helper_uid=$(id -u haproxy)
+    grep -q "^Uid:[[:space:]]*$helper_uid" "/proc/$helper/status"
+    test "$(stat -c %U /run/access-proxy/master.sock)" = haproxy
     pid=$(/usr/bin/supervisorctl pid code-server)
     grep -q "^Uid:[[:space:]]*10000" "/proc/$pid/status"
 '

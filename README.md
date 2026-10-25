@@ -169,7 +169,10 @@ logic; the version bundled with either host is sufficient.
 
 `just version` reports repository versions without hashes, including code-server, act, the Homebrew installer, GitHub Actions, cloudflared, and the backup image.
 
-`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. It updates code-server and act to the latest stable GitHub releases, including checksums for every supported architecture, the Homebrew installer commit and checksum, GitHub Actions commit pins and version comments, and service image digests on their existing `latest`/`v2` tracks. GitHub asset SHA-256 metadata is used when available; otherwise assets are downloaded and hashed. Set `GH_TOKEN` or `GITHUB_TOKEN` if needed for GitHub API rate limits. Lookup failures and a declined or unanswered prompt leave files unchanged. Review `git diff` and run `just test` afterward; rebuilding/redeploying is a separate step.
+`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. It updates code-server and act to the latest stable GitHub releases, including checksums for every supported architecture, the Homebrew installer commit and checksum, GitHub Actions commit pins and version comments, and service, Debian build, CI, and restore image digests on their existing tag tracks.
+Homebrew installer updates include a compare link before confirmation. Files are
+staged before replacement; write failures attempt to restore previous contents. A
+process or host crash during replacement can still require recovery using Git. GitHub asset SHA-256 metadata is used when available; otherwise assets are downloaded and hashed. Set `GH_TOKEN` or `GITHUB_TOKEN` if needed for GitHub API rate limits. Lookup failures and a declined or unanswered prompt leave files unchanged. Review `git diff` and run `just test` afterward; rebuilding/redeploying is a separate step.
 
 GitHub Actions remain pinned to full 40-character commit SHAs in `uses:`. During `just upgrade`, the latest stable release of each Action is resolved to its commit SHA; approval updates that hash and the adjacent release-version comment in every workflow occurrence. The version comment is informational; the commit SHA selects the code that runs. Actions are included in the same confirmation prompt as the other dependency upgrades.
 
@@ -284,7 +287,7 @@ home volume (replace `code-server_code-server-home` with its actual name):
 
 Relative archive paths resolve from your current working directory. Restore
 requires an existing volume with no running containers attached. Before replacing
-its contents, it saves a rollback `.tar.gz` in a private `pre-restore.*` directory
+its contents, it saves a rollback `.tar.gz.gpg` (or `.tar.gz` when no key is supplied) in a private `pre-restore.*` directory
 beside the input archive and prints the path. The rollback file and directory belong
 to the effective user running `manage`, including root when run as root. A root helper
 container preserves archived numeric UID/GID values when restoring the volume.
@@ -497,11 +500,12 @@ rebuild, use **Actions → Build and publish container → Run workflow** and en
 release source, bypasses the build cache, and applies the same tests and latest-release
 checks as the weekly rebuild. Every Monday at 08:17 UTC
 (03:17 in Chicago during daylight saving time, 02:17 during standard time), the
-scheduled build checks out the latest stable GitHub release tag, refreshes the
-Debian base image and packages, and bypasses cached package layers. It republishes
+scheduled build checks out the latest stable GitHub release tag, uses the pinned
+Debian base image and refreshes its packages, and bypasses cached package layers. It republishes
 that release's version tag and `latest` only after both architectures pass all tests.
-The build fails without publishing if no stable release exists, its tag is invalid,
-or the latest release changes during testing. CI covers full startup, Homebrew persistence,
+The build fails without publishing if no stable release exists or its tag is invalid.
+If the latest release changes during testing, the older release receives only its
+version tag; `latest` is kept for the current release. CI covers full startup, Homebrew persistence,
 service recovery, and a local backup/restore round trip.
 
 To publish, update `build/code-server.version` (for example, `4.141.0`) and publish
@@ -665,5 +669,13 @@ updates. Installer reruns preserve existing digest pins and warn that they were 
 verify and set a new digest instead if you want to keep deploying verified bytes.
 Verification requires `gh` and may require GHCR authentication; it is an
 explicit deployment check. Restrict package publishing to trusted maintainers.
-`manage start` also warns when a version-tagged GHCR image differs from its repository's
-latest stable release, with a short, best-effort check that stays quiet offline.
+`manage start --pull` also warns when a version-tagged GHCR image differs from its repository's
+latest stable release, with a best-effort check that stays quiet on network errors. Starts without
+`--pull` skip the network check.
+
+Release deployment checksums have GitHub artifact provenance. To verify their origin
+with GitHub CLI before using them, download `SHA256SUMS` from the selected release and
+run `gh attestation verify SHA256SUMS --repo Weeks-Consulting/code-server-aio`.
+Checksums downloaded from the same release verify file integrity; independent
+provenance verification also verifies the publishing repository and workflow.
+Older releases without checksums remain installable with a warning.

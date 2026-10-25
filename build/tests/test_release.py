@@ -80,6 +80,25 @@ class ReleaseTests(unittest.TestCase):
                 else:
                     self.assertNotEqual(result.returncode, 0)
 
+    def test_only_current_stable_release_moves_latest(self):
+        block = WORKFLOW.split('      - name: Publish attested image tags\n', 1)[1]
+        block = textwrap.dedent(block.split('        run: |\n', 1)[1].split('\n  release-assets:', 1)[0])
+        command = ["bash", "-euo", "pipefail", "-c",
+                   'gh() { printf "%s\\n" "$LATEST_TAG"; }\n'
+                   'docker() { printf "%s\\n" "$@"; }\n' + block]
+        for latest, prerelease, moves_latest in (
+                ('v2.0.0', 'false', True), ('v3.0.0', 'false', False),
+                ('v2.0.0', 'true', False)):
+            with self.subTest(latest=latest, prerelease=prerelease):
+                with tempfile.NamedTemporaryFile() as summary:
+                    result, _ = self.run_script(command, 'v2.0.0', LATEST_TAG=latest,
+                                                PRERELEASE=prerelease, IMAGE='ghcr.io/example/app',
+                                                DIGEST='sha256:' + 'a' * 64, GH_REPO='example/app',
+                                                GITHUB_STEP_SUMMARY=summary.name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('ghcr.io/example/app:2.0.0', result.stdout)
+                self.assertEqual('ghcr.io/example/app:latest' in result.stdout, moves_latest)
+
 
 if __name__ == "__main__":
     unittest.main()

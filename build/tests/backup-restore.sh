@@ -102,14 +102,16 @@ docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/da
         grep -qx saved-brew /data/linuxbrew/sentinel
         test "$(stat -c %u:%g /data/cloud-user/.config/sentinel)" = 10000:10000
     '
-rollback=$(find "$archive_dir" -name original-home.tar.gz -print -quit)
+rollback=$(find "$archive_dir" -name original-home.tar.gz.gpg -print -quit)
 test -n "$rollback"
 assert_metadata "$rollback" 600
 assert_metadata "$(dirname -- "$rollback")" 700
 # The caller can read rollback archives without another privileged host command.
-tar -tzf "$rollback" >/dev/null
+printf '%s\n' "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
+    --output "$archive_dir/rollback-check.tar.gz" --decrypt "$rollback"
+tar -tzf "$archive_dir/rollback-check.tar.gz" >/dev/null
 echo 'PASS: Rollback archive belongs to the effective caller with mode 600.'
-docker run --rm --network none --mount "type=bind,src=$rollback,dst=/rollback.tar.gz,readonly" \
+docker run --rm --network none --mount "type=bind,src=$archive_dir/rollback-check.tar.gz,dst=/rollback.tar.gz,readonly" \
     --entrypoint /bin/sh "$image" -ec '
         mkdir /verify
         tar --numeric-owner -xzf /rollback.tar.gz -C /verify
@@ -129,7 +131,7 @@ docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/back
     --mount "type=bind,src=$archive_dir,dst=/archive" --entrypoint /bin/sh "$image" \
     -ec 'tar -C / -czf /archive/relative.tar.gz backup/code-server-home'
 docker volume create "$prefix-relative" >/dev/null
-RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/relative.tar.gz" "$prefix-relative"
+GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/relative.tar.gz" "$prefix-relative"
 docker run --rm --network none --mount "type=volume,src=$prefix-relative,dst=/data,readonly" \
     --entrypoint /bin/sh "$image" -ec 'grep -qx saved-settings /data/cloud-user/.config/sentinel'
 echo 'Backup/restore round trip passed.'

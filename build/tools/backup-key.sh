@@ -18,6 +18,10 @@ if path.is_symlink() or not path.is_file():
 # Lock a stable sidecar: replacing .env atomically must not replace the lock inode.
 # Keep the sidecar after unlocking so waiting initializers all use the same lock.
 lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+owner = path.stat()
+lock_owner = os.fstat(lock)
+if (lock_owner.st_uid, lock_owner.st_gid) != (owner.st_uid, owner.st_gid):
+    os.fchown(lock, owner.st_uid, owner.st_gid)
 with os.fdopen(lock, "w") as guard:
     fcntl.flock(guard, fcntl.LOCK_EX)
     if path.is_symlink() or not path.is_file():

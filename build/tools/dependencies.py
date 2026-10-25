@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect repository pins and prepare an interactive, all-or-nothing upgrade plan."""
+"""Inspect repository pins and prepare an interactive upgrade plan with rollback on write failure."""
 import argparse
 import hashlib
 import json
@@ -7,23 +7,48 @@ import os
 from pathlib import Path
 import re
 import sys
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+import tempfile
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTION = re.compile(r'uses: ([\w-]+/[\w-]+)@([a-f0-9]{40}) # (\S+)')
-IMAGE = re.compile(r'([\w/-]+):([\w.-]+)@sha256:([a-f0-9]{64})')
+IMAGE = re.compile(r'(?<![\w./:-])([\w./-]+(?::[0-9]+)?):([\w.-]+)@sha256:([a-f0-9]{64})')
 WORKFLOW = '.github/workflows/container.yaml'
-COMPOSE = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', 'build/tests/actions.sh')
+COMPOSE = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
+           'build/tests/actions.sh', 'build/Dockerfile', 'build/tools/restore-home.sh', WORKFLOW)
 
 
-def fetch(url, headers=None):
+class SafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        redirected = super().redirect_request(request, fp, code, message, headers, newurl)
+        if redirected is not None and (urlsplit(request.full_url).scheme, urlsplit(request.full_url).netloc) != (urlsplit(newurl).scheme, urlsplit(newurl).netloc):
+            redirected.remove_header('Authorization')
+        return redirected
+
+
+OPENER = build_opener(SafeRedirectHandler())
+
+
+def request(url, headers=None):
     headers = {'User-Agent': 'code-server-aio-dependencies', **(headers or {})}
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if token and url.startswith('https://api.github.com/'):
         headers['Authorization'] = f'Bearer {token}'
-    with urlopen(Request(url, headers=headers), timeout=60) as response:
+    return OPENER.open(Request(url, headers=headers), timeout=60)
+
+
+def fetch(url, headers=None):
+    with request(url, headers) as response:
         return response.read()
+
+
+def checksum(url):
+    digest = hashlib.sha256()
+    with request(url) as response:
+        while block := response.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def github(repo, endpoint):
@@ -45,15 +70,33 @@ def asset_checksums(release, names):
         if digest:
             digest = checked(digest, r'sha256:[a-f0-9]{64}')[7:]
         else:
-            digest = hashlib.sha256(fetch(asset['browser_download_url'])).hexdigest()
+            digest = checksum(asset['browser_download_url'])
         lines.append(f'{digest}  {name}\n')
     return ''.join(lines)
 
 
 def image_digest(repo, tag):
-    token = json.loads(fetch('https://auth.docker.io/token?service=registry.docker.io&scope='
-                             + quote(f'repository:{repo}:pull')))['token']
-    manifest = fetch(f'https://registry-1.docker.io/v2/{repo}/manifests/{tag}', {
+    first, separator, rest = repo.partition('/')
+    if separator and ('.' in first or ':' in first or first == 'localhost'):
+        registry, repository = first, rest
+    else:
+        registry, repository = 'registry-1.docker.io', repo if separator else 'library/' + repo
+    if registry in ('docker.io', 'index.docker.io'):
+        registry = 'registry-1.docker.io'
+    # Only supported registries may receive authentication requests. Fail rather
+    # than silently resolving an unknown registry's image against Docker Hub.
+    authentication = {
+        'registry-1.docker.io': ('https://auth.docker.io/token', 'registry.docker.io'),
+        'ghcr.io': ('https://ghcr.io/token', 'ghcr.io'),
+        'quay.io': ('https://quay.io/v2/auth', 'quay.io'),
+    }
+    if registry not in authentication:
+        raise ValueError('Unsupported image registry: ' + registry)
+    endpoint, service = authentication[registry]
+    token = json.loads(fetch(endpoint + '?service=' + service + '&scope='
+                             + quote(f'repository:{repository}:pull')))
+    token = token.get('token') or token['access_token']
+    manifest = fetch(f'https://{registry}/v2/{repository}/manifests/{tag}', {
         'Authorization': f'Bearer {token}',
         'Accept': ', '.join(('application/vnd.oci.image.index.v1+json',
                              'application/vnd.docker.distribution.manifest.list.v2+json',
@@ -61,6 +104,44 @@ def image_digest(repo, tag):
                              'application/vnd.docker.distribution.manifest.v2+json')),
     })
     return hashlib.sha256(manifest).hexdigest()
+
+
+def apply_edits(root, edits):
+    """Stage every write first; restore originals if a replacement fails.
+
+    A process/host crash during replacement still requires reviewing git diff;
+    multiple paths cannot be committed atomically with filesystem rename.
+    """
+    staged, backups, replaced = {}, {}, []
+
+    def stage(path, content):
+        fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                os.fchmod(output.fileno(), path.stat().st_mode & 0o777)
+                output.write(content)
+        except BaseException:
+            os.unlink(temporary)
+            raise
+        return temporary
+
+    try:
+        for name, content in edits.items():
+            path = root / name
+            backups[name] = stage(path, path.read_bytes())
+            staged[name] = stage(path, content.encode())
+        try:
+            for name, temporary in staged.items():
+                os.replace(temporary, root / name)
+                replaced.append(name)
+        except OSError:
+            for name in reversed(replaced):
+                os.replace(backups[name], root / name)
+            raise
+    finally:
+        for temporary in (*staged.values(), *backups.values()):
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def inventory(root):
@@ -71,9 +152,13 @@ def inventory(root):
     }
     for repo, sha, tag in ACTION.findall((root / WORKFLOW).read_text()):
         result[repo] = f'{tag} @ {sha}'
-    for file in COMPOSE:
-        for repo, tag, digest in IMAGE.findall((root / file).read_text()):
-            result[repo] = f'{tag} @ sha256:{digest}'
+    images = [pin for file in COMPOSE for pin in IMAGE.findall((root / file).read_text())]
+    tracks = {}
+    for repo, tag, digest in images:
+        tracks.setdefault(repo, set()).add(tag)
+    for repo, tag, digest in images:
+        label = repo + ':' + tag if len(tracks[repo]) > 1 else repo
+        result[label] = f'{tag} @ sha256:{digest}'
     return result
 
 
@@ -114,13 +199,14 @@ def plan(root, prepare=True):
         edits[WORKFLOW] = workflow
     resolved = {}
     for file in COMPOSE:
-        content = (root / file).read_text()
+        content = edits.get(file, (root / file).read_text())
         for repo, tag, digest in IMAGE.findall(content):
             key = (repo, tag)
             if key not in resolved:
                 resolved[key] = image_digest(repo, tag)
             new_digest = resolved[key]
-            latest[repo] = f'{tag} @ sha256:{new_digest}'
+            label = repo if repo in current else repo + ':' + tag
+            latest[label] = f'{tag} @ sha256:{new_digest}'
             content = content.replace(f'{repo}:{tag}@sha256:{digest}', f'{repo}:{tag}@sha256:{new_digest}')
         if content != (root / file).read_text():
             edits[file] = content
@@ -159,6 +245,9 @@ def main():
     if args.command == 'outdated':
         print('Outdated repository pins found. Run just upgrade to review and apply updates.')
         return
+    if current.get('Homebrew installer') != latest.get('Homebrew installer'):
+        print('Review installer changes: https://github.com/Homebrew/install/compare/'
+              + current['Homebrew installer'] + '...' + latest['Homebrew installer'])
     print('\nFiles to update:\n' + '\n'.join(f'  {path}' for path in sorted(edits)))
     try:
         answer = input('Update these repository pins? [y/N] ')
@@ -167,8 +256,7 @@ def main():
     if answer.strip().lower() not in ('y', 'yes'):
         print('Cancelled; no files changed.')
         return
-    for file, content in edits.items():
-        (ROOT / file).write_text(content)
+    apply_edits(ROOT, edits)
     print('Updated repository pins. Run just test and review git diff before committing. Rebuild/redeploy to apply.')
 
 

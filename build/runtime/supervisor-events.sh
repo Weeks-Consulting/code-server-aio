@@ -1,6 +1,6 @@
 #!/bin/bash
 # Exit Supervisor when any service exhausts its startup retries.
-set -euo pipefail
+set -euf -o pipefail
 export LC_ALL=C
 
 while true; do

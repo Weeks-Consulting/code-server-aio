@@ -48,6 +48,22 @@ fi
 if [ -n "$version" ] && printf '%s\n' "$version" | LC_ALL=C grep -Eqv '^v[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$'; then
     echo "Expected a release tag such as v4.141.0 or v4.141.0-1; got: $version" >&2; exit 1
 fi
+case "$directory" in /*) ;; *) directory="$PWD/$directory" ;; esac
+# Root must not write through paths controlled by another user, including ancestors.
+if [ "$(id -u)" -eq 0 ]; then
+    candidate=$directory
+    while :; do
+        if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+            if [ -L "$candidate" ] || [ "$(find "$candidate" -maxdepth 0 -user root ! -perm -020 ! -perm -002 -print)" != "$candidate" ]; then
+                echo "Root installation requires root-owned directories without group/world write access: $candidate" >&2
+                exit 1
+            fi
+        fi
+        parent=$(dirname -- "$candidate")
+        [ "$parent" != "$candidate" ] || break
+        candidate=$parent
+    done
+fi
 for file in compose.yaml compose.backup.yaml compose.backup-local.yaml manage restore-home.sh backup-key.sh .env; do
     if [ -L "$directory/$file" ] || { [ -e "$directory/$file" ] && [ ! -f "$directory/$file" ]; }; then
         printf 'Expected a regular file: %s\n' "$directory/$file" >&2; exit 1
@@ -142,7 +158,7 @@ if $dry_run; then
     else
         printf 'Would use release %s from %s.\n' "$version" "$repository"
     fi
-    printf 'Would create deployment directory: %s\n' "$directory"
+    if [ ! -d "$directory" ]; then printf 'Would create deployment directory: %s\n' "$directory"; fi
     for file in compose.yaml compose.backup.yaml compose.backup-local.yaml manage restore-home.sh backup-key.sh; do
         if [ -f "$directory/$file" ]; then
             printf 'Would save %s/%s as %s.bak before replacing it.\n' "$directory" "$file" "$file"
@@ -271,7 +287,11 @@ if [ -f "$directory/.env" ]; then
 fi
 for file in $deployment_files; do
     if [ -f "$directory/$file" ]; then
-        cp -p -- "$directory/$file" "$directory/$file.bak"
+        if [ -d "$directory/$file.bak" ]; then
+            printf 'Backup destination must not be a directory: %s.bak\n' "$directory/$file" >&2
+            exit 1
+        fi
+        mv -f -- "$directory/$file" "$directory/$file.bak"
     fi
     mode=644
     case "$file" in manage|*.sh) mode=755 ;; esac

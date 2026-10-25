@@ -1,103 +1,164 @@
 #!/bin/sh
-# Back up and restore an existing, stopped deployment's home volume in place.
+# Stream an archive into volume-local staging and preserve a verified rollback.
 set -eu
-archive=${1:?Usage: sh restore-home.sh ARCHIVE.tar.gz[.gpg] EXISTING_VOLUME}
-volume=${2:?Pass the original deployment home volume}
-if [ ! -f "$archive" ]; then
-    echo "Archive does not exist or is not a regular file: $archive" >&2; exit 1
-fi
 command -v python3 >/dev/null || { echo 'Install python3 to restore backups.' >&2; exit 1; }
-archive=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$archive")
-case "$archive,$volume" in
-    *,*,*) echo "Archive paths and volume names must not contain commas" >&2; exit 1 ;;
-esac
-decryption_directory=
-rollback_directory=
-cleanup() {
-    if [ -n "$decryption_directory" ]; then rm -rf -- "$decryption_directory"; fi
-    # Remove only an empty directory. A verified rollback must survive failures.
-    if [ -n "$rollback_directory" ]; then rmdir -- "$rollback_directory" 2>/dev/null || true; fi
-}
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+exec python3 - "$@" <<'PYTHON'
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import uuid
 
-# Decrypt into a private temporary directory before any volume changes.
-# Keep the key out of argv and remove plaintext on success or failure.
-case "$archive" in *.gpg)
-    [ -n "${GPG_PASSPHRASE:-}" ] || {
-        echo 'Encrypted restore requires the original GPG_PASSPHRASE (manage reads it from .env).' >&2; exit 1;
-    }
-    command -v gpg >/dev/null || { echo 'Install gpg on the Docker host to restore encrypted backups.' >&2; exit 1; }
-    encrypted_archive=$archive
-    # Stay beside the archive so Docker can access the plaintext on macOS too.
-    decryption_directory=$(mktemp -d "$(dirname -- "$archive")/.decrypt.XXXXXXXX")
-    chmod 700 "$decryption_directory"
-    printf '%s\n' "$GPG_PASSPHRASE" | gpg --homedir "$decryption_directory" --batch \
-        --pinentry-mode loopback --passphrase-fd 0 \
-        --output "$decryption_directory/home.tar.gz" --decrypt "$archive"
-    chmod 600 "$decryption_directory/home.tar.gz"
-    archive="$decryption_directory/home.tar.gz"
-;;
-esac
-# Inspect first: Docker's volume mount would otherwise create a misspelled volume.
-docker volume inspect "$volume" >/dev/null
-running_containers=$(docker ps -q --filter "volume=$volume")
-if [ -n "$running_containers" ]; then
-    echo "Stop all containers using $volume before restoring (use docker compose down)." >&2
-    exit 1
-fi
-# Archive ownership follows the effective caller; owners inside the volume are
-# restored independently by a root helper. Never infer identity from sudo variables.
-archive_uid=$(id -u)
-archive_gid=$(id -g)
-case "$archive_uid:$archive_gid" in
-    *[!0-9:]*|:*|*:) echo 'Backup UID and GID must be numeric.' >&2; exit 1 ;;
-esac
-rollback_source=${encrypted_archive:-$archive}
-rollback_parent=$(dirname -- "$rollback_source")
-case "${rollback_source##*/}" in
-    original-home.tar.gz|original-home.tar.gz.gpg)
-        # Also flatten rollback directories produced by older helper versions.
-        while printf '%s\n' "${rollback_parent##*/}" | LC_ALL=C grep -Eq '^pre-restore\.[[:alnum:]]{8}$'; do
-            rollback_parent=$(dirname -- "$rollback_parent")
-        done
-        ;;
-esac
-rollback_directory=$(mktemp -d "$rollback_parent/pre-restore.XXXXXXXX")
-docker run --rm --network none --user 0:0 \
-    --env "ARCHIVE_UID=$archive_uid" --env "ARCHIVE_GID=$archive_gid" \
-    --env "ROLLBACK_ARCHIVE_PATH=$rollback_directory/original-home.tar.gz" \
-    --mount "type=bind,src=$archive,dst=/backup.tar.gz,readonly" \
-    --mount "type=bind,src=$rollback_directory,dst=/rollback" \
-    --mount "type=volume,src=$volume,dst=/backup/code-server-home,readonly" \
-    --mount "type=volume,src=$volume,dst=/restore" \
-    --entrypoint /bin/sh "${RESTORE_IMAGE:-debian:13-slim}" -euc '
-        umask 077
-        # Incomplete archives are never presented as usable rollback backups.
-        trap "rm -f -- /rollback/.original-home.tar.gz.partial" EXIT
-        # Fully validate and extract before touching the original volume.
-        # Offen currently records absolute names; older archives may be relative.
-        tar --list --gzip --file /backup.tar.gz > /tmp/members
-        if grep -Fx /backup/code-server-home /tmp/members >/dev/null; then
-            member=/backup/code-server-home
-        else
-            member=backup/code-server-home
-        fi
-        mkdir /staged
-        tar --extract --gzip --numeric-owner --same-owner --file /backup.tar.gz \
-            --directory /staged --strip-components=2 "$member"
-        # Keep the same layout as scheduled backups so this archive can be restored too.
-        tar --create --gzip --numeric-owner --file /rollback/.original-home.tar.gz.partial \
-            --directory / backup/code-server-home
-        tar --list --gzip --file /rollback/.original-home.tar.gz.partial >/dev/null
-        chown "$ARCHIVE_UID:$ARCHIVE_GID" /rollback/.original-home.tar.gz.partial
-        chmod 600 /rollback/.original-home.tar.gz.partial
-        mv -- /rollback/.original-home.tar.gz.partial /rollback/original-home.tar.gz
-        printf "Original volume backup: %s\n" "$ROLLBACK_ARCHIVE_PATH"
-        echo "Original volume backup complete; replacing volume contents."
-        find /restore -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-        cp -a /staged/. /restore/
-    '
-printf 'Restored %s. Restart the deployment with its usual launch options.\n' "$volume"
+
+def interrupted(signum, frame):
+    raise SystemExit(128 + signum)
+
+
+for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, interrupted)
+
+
+def run(*arguments, **kwargs):
+    return subprocess.run(arguments, check=True, **kwargs)
+
+
+if len(sys.argv) != 3:
+    sys.exit('Usage: sh restore-home.sh ARCHIVE.tar.gz[.gpg] EXISTING_VOLUME')
+archive = Path(sys.argv[1]).resolve()
+volume = sys.argv[2]
+if not archive.is_file():
+    sys.exit('Archive does not exist or is not a regular file: ' + str(archive))
+if ',' in str(archive) or ',' in volume:
+    sys.exit('Archive paths and volume names must not contain commas')
+key = os.environ.get('GPG_PASSPHRASE', '')
+encrypted = archive.name.endswith('.gpg')
+if encrypted and not key:
+    sys.exit('Encrypted restore requires the original GPG_PASSPHRASE (manage reads it from .env).')
+if key and not shutil.which('gpg'):
+    sys.exit('Install gpg on the Docker host to restore encrypted backups or encrypt rollback backups.')
+run('docker', 'volume', 'inspect', volume, stdout=subprocess.DEVNULL)
+if subprocess.check_output(['docker', 'ps', '-q', '--filter', 'volume=' + volume]).strip():
+    sys.exit('Stop all containers using ' + volume + ' before restoring (use docker compose down).')
+parent = archive.parent
+if archive.name in ('original-home.tar.gz', 'original-home.tar.gz.gpg'):
+    import re
+    while re.fullmatch(r'pre-restore\.[A-Za-z0-9_]{8}', parent.name):
+        parent = parent.parent
+rollback = Path(tempfile.mkdtemp(prefix='pre-restore.', dir=parent))
+os.chmod(rollback, 0o700)
+name = 'original-home.tar.gz' + ('.gpg' if key else '')
+partial = rollback / ('.' + name + '.partial')
+stage = '.restore-staging-' + uuid.uuid4().hex
+image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad')
+base = ['docker', 'run', '--rm', '--network', 'none', '--user', '0:0',
+        '--mount', 'type=volume,src=' + volume + ',dst=/restore',
+        '--env', 'STAGE=' + stage, '--entrypoint', '/bin/sh', image, '-euc']
+
+
+def helper(script, **kwargs):
+    return subprocess.Popen(base[:-4] + ['-i'] + base[-4:] + [script], **kwargs)
+
+
+# Keys travel over an inherited pipe, never argv or a plaintext disk file.
+def gpg(arguments, **kwargs):
+    reader, writer = os.pipe()
+    try:
+        os.write(writer, (key + '\n').encode())
+    finally:
+        os.close(writer)
+    try:
+        return subprocess.Popen(['gpg', '--homedir', gpg_home, '--batch', '--yes',
+                                 '--pinentry-mode', 'loopback', '--passphrase-fd', str(reader),
+                                 *arguments], pass_fds=(reader,), **kwargs)
+    finally:
+        os.close(reader)
+
+
+def finish(processes):
+    statuses = [process.wait() for process in processes]
+    if any(statuses):
+        raise RuntimeError('Restore stream failed (exit codes: ' + str(statuses) + ')')
+
+
+try:
+    with tempfile.TemporaryDirectory(prefix='restore-gpg-') as gpg_home:
+        # GNU tar rejects traversal and directory symlink attacks. The entire
+        # archive is isolated under a new directory until layout validation.
+        extract = '''
+            umask 077
+            mkdir -- "/restore/$STAGE"
+            tar -xzp --numeric-owner --same-owner -f - -C "/restore/$STAGE"
+            root="/restore/$STAGE"
+            test -d "$root/backup" && test ! -L "$root/backup"
+            test -d "$root/backup/code-server-home" && test ! -L "$root/backup/code-server-home"
+            test "$(find "$root" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+            test "$(find "$root/backup" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
+        '''
+        if encrypted:
+            decrypt = gpg(['--decrypt', str(archive)], stdout=subprocess.PIPE)
+            try:
+                extraction = helper(extract, stdin=decrypt.stdout)
+            except BaseException:
+                decrypt.stdout.close()
+                decrypt.wait()
+                raise
+            decrypt.stdout.close()
+            finish([extraction, decrypt])
+        else:
+            with archive.open('rb') as source:
+                finish([helper(extract, stdin=source)])
+        # Exclude staging from the rollback while preserving scheduled-backup layout.
+        backup_script = '''
+            tar -czp --numeric-owner --exclude="./$STAGE" \
+                --transform="flags=rh;s,^\\.,backup/code-server-home," -f - -C /restore .
+        '''
+        with partial.open('xb') as output:
+            os.chmod(partial, 0o600)
+            backup = helper(backup_script, stdout=subprocess.PIPE)
+            if key:
+                encryption = gpg(['--symmetric', '--cipher-algo', 'AES256'],
+                                 stdin=backup.stdout, stdout=output)
+                backup.stdout.close()
+                finish([encryption, backup])
+            else:
+                shutil.copyfileobj(backup.stdout, output, length=1024 * 1024)
+                backup.stdout.close()
+                finish([backup])
+        # Verify the completed rollback before modifying the original entries.
+        verify_script = 'tar -tzf - >/dev/null'
+        if key:
+            decrypt = gpg(['--decrypt', str(partial)], stdout=subprocess.PIPE)
+            verification = helper(verify_script, stdin=decrypt.stdout)
+            decrypt.stdout.close()
+            finish([verification, decrypt])
+        else:
+            with partial.open('rb') as source:
+                finish([helper(verify_script, stdin=source)])
+        partial.rename(rollback / name)
+        print('Original volume backup: ' + str(rollback / name), flush=True)
+        print('Original volume backup complete; replacing volume contents.', flush=True)
+        finish([helper('''
+            find /restore -mindepth 1 -maxdepth 1 ! -name "$STAGE" -exec rm -rf -- {} +
+            source="/restore/$STAGE/backup/code-server-home"
+            # Preserve metadata of the home volume root as well as its entries.
+            chown --reference="$source" /restore
+            chmod --reference="$source" /restore
+            find "$source" -mindepth 1 -maxdepth 1 -exec mv -t /restore -- {} +
+            touch -r "$source" /restore
+        ''')])
+    print('Restored ' + volume + '. Restart the deployment with its usual launch options.')
+except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+    sys.exit('Restore failed: ' + str(error))
+finally:
+    # A verified rollback survives all failures. An interrupted replacement may
+    # leave staging after SIGKILL; never remove other restores' staging trees.
+    subprocess.run(base + ['rm -rf -- "/restore/$STAGE"'], check=False)
+    partial.unlink(missing_ok=True)
+    try:
+        rollback.rmdir()
+    except OSError:
+        pass
+PYTHON

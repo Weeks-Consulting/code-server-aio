@@ -23,6 +23,7 @@ class DependencyTests(unittest.TestCase):
         for name in ('build', '.github'):
             shutil.copytree(ROOT / name, self.root / name)
         for name in deps.COMPOSE:
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / name, self.root / name)
 
     def upstream(self, repo, endpoint):
@@ -150,19 +151,55 @@ class DependencyTests(unittest.TestCase):
                             self.assertIn('c' * 40, text)
                             self.assertIn('sha256:' + 'd' * 64, text)
                     else:
-                        self.assertNotRegex(text, r'[a-f0-9]{40}')
+                        if command != 'upgrade':
+                            self.assertNotRegex(text, r'[a-f0-9]{40}')
                         self.assertNotIn('sha256:', text)
                     if command != 'version':
                         self.assertIn('(update available)', text)
 
     def test_checksum_fallback_and_invalid_metadata(self):
         release = {'assets': [{'name': 'archive', 'browser_download_url': 'https://example.org/archive'}]}
-        with patch.object(deps, 'fetch', return_value=b'archive'):
+        with patch.object(deps, 'request', return_value=io.BytesIO(b'archive')):
             self.assertEqual(deps.asset_checksums(release, ['archive']),
                              hashlib.sha256(b'archive').hexdigest() + '  archive\n')
         release['assets'][0]['digest'] = 'invalid'
         with self.assertRaises(ValueError):
             deps.asset_checksums(release, ['archive'])
+
+    def test_redirect_strips_bearer_on_other_host(self):
+        from urllib.request import Request
+        handler = deps.SafeRedirectHandler()
+        request = Request('https://api.github.com/start', headers={'Authorization': 'Bearer private'})
+        same = handler.redirect_request(request, None, 302, 'Found', {}, 'https://api.github.com/end')
+        other = handler.redirect_request(request, None, 302, 'Found', {}, 'https://example.org/end')
+        self.assertEqual(same.get_header('Authorization'), 'Bearer private')
+        self.assertIsNone(other.get_header('Authorization'))
+
+    def test_registry_resolution_and_official_images(self):
+        for repository, host, path in (
+            ('debian', 'registry-1.docker.io', 'library/debian'),
+            ('ghcr.io/example/app', 'ghcr.io', 'example/app'),
+            ('quay.io/example/app', 'quay.io', 'example/app'),
+        ):
+            with self.subTest(repository=repository), patch.object(
+                    deps, 'fetch', side_effect=[b'{"token":"private"}', b'manifest']) as fetch:
+                self.assertEqual(deps.image_digest(repository, 'latest'), hashlib.sha256(b'manifest').hexdigest())
+                self.assertEqual(fetch.call_args.args[0], f'https://{host}/v2/{path}/manifests/latest')
+        self.assertEqual(deps.IMAGE.findall('ghcr.io/example/app:latest@sha256:' + 'a' * 64)[0][0],
+                         'ghcr.io/example/app')
+
+    def test_failed_replacement_rolls_back_previous_files(self):
+        first, second = 'build/tests/act.version', 'build/code-server.version'
+        before = {name: (self.root / name).read_bytes() for name in (first, second)}
+        replace = deps.os.replace
+        def fail_second(source, target):
+            if target == self.root / second:
+                raise OSError('simulated replace failure')
+            replace(source, target)
+        with patch.object(deps.os, 'replace', side_effect=fail_second):
+            with self.assertRaises(OSError):
+                deps.apply_edits(self.root, {first: 'changed', second: 'changed'})
+        self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
 
 
 if __name__ == '__main__':

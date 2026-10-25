@@ -139,6 +139,31 @@ class BackupKeyTests(unittest.TestCase):
         self.assertIn("Release checksum missing or incorrect", result.stderr)
         self.assertFalse(deployment.exists())
 
+    def test_installer_replaces_backup_symlink_without_following_it(self):
+        command, env, deployment = self.installer_fixture()
+        deployment.mkdir()
+        victim = self.directory / 'victim'
+        victim.write_text('preserve-me')
+        (deployment / 'manage').write_text('old-launcher')
+        (deployment / 'manage.bak').symlink_to(victim)
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_text(), 'preserve-me')
+        self.assertFalse((deployment / 'manage.bak').is_symlink())
+        self.assertEqual((deployment / 'manage.bak').read_text(), 'old-launcher')
+
+    def test_root_installer_rejects_untrusted_directory(self):
+        command, env, deployment = self.installer_fixture()
+        deployment.mkdir(mode=0o777)
+        deployment.chmod(0o777)
+        mock_id = self.directory / 'bin/id'
+        mock_id.write_text('#!/bin/sh\necho 0\n')
+        mock_id.chmod(0o755)
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Root installation requires root-owned directories', result.stderr)
+        self.assertFalse((deployment / '.env').exists())
+
     def test_installer_updates_existing_image(self):
         command, env, deployment = self.installer_fixture()
         deployment.mkdir()

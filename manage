@@ -109,12 +109,22 @@ if [ "$action" = upgrade ]; then
     fi
     command -v python3 >/dev/null || fail 'Install python3 to upgrade the image version.'
     python3 - "$directory/.env" <<'PYUPGRADE'
-import json, os, pathlib, re, sys, tempfile, urllib.request
+import fcntl, json, os, pathlib, re, sys, tempfile, urllib.request
 
 path = pathlib.Path(sys.argv[1])
 try:
     if path.is_symlink():
         raise ValueError("Expected a regular .env file, not a symlink")
+    lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    owner = path.stat()
+    lock_owner = os.fstat(lock)
+    if (lock_owner.st_uid, lock_owner.st_gid) != (owner.st_uid, owner.st_gid):
+        os.fchown(lock, owner.st_uid, owner.st_gid)
+    guard = os.fdopen(lock, "w")
+    fcntl.flock(guard, fcntl.LOCK_EX)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Expected a regular .env file")
+    owner = path.stat()
     original = path.read_text()
     pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
     matches = list(pattern.finditer(original))
@@ -128,8 +138,9 @@ try:
                 raise ValueError("Invalid CODE_SERVER_IMAGE quoting")
             image = value[1:end]
         else:
-            image = value.split(" #", 1)[0].strip()
-    match = re.fullmatch(r"ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+)(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?", image)
+            image = re.split(r"\s+#", value, 1)[0].strip()
+    image = image or "ghcr.io/weeks-consulting/code-server-aio:latest"
+    match = re.fullmatch(r"ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+)(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?", image)
     if not match:
         raise ValueError("CODE_SERVER_IMAGE must name a ghcr.io/owner/repo image")
     repository = match[1]
@@ -150,6 +161,10 @@ try:
     descriptor, temporary = tempfile.mkstemp(prefix=".env-upgrade-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w") as output:
+            current = os.fstat(output.fileno())
+            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+                os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(output.fileno(), 0o600)
             output.write(updated)
         os.replace(temporary, path)
     finally:
@@ -193,12 +208,12 @@ fi
 case "$action" in
     start)
         # Best effort only: respect custom images/digests and remain usable offline.
-        if command -v python3 >/dev/null && model=$("$@" config --format json 2>/dev/null); then
+        if $pull && command -v python3 >/dev/null && model=$("$@" config --format json 2>/dev/null); then
             printf '%s\n' "$model" | python3 -c '
 import json, re, sys, urllib.request
 try:
     image = json.load(sys.stdin)["services"]["code-server"]["image"]
-    match = re.fullmatch(r"ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-[1-9]\d*)?)", image)
+    match = re.fullmatch(r"ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-[1-9]\d*)?)", image)
     if match:
         request = urllib.request.Request("https://api.github.com/repos/" + match[1] + "/releases/latest", headers={"User-Agent": "code-server-aio-manage"})
         with urllib.request.urlopen(request, timeout=2) as response:
@@ -209,7 +224,7 @@ except Exception:
     pass
 ' || true
         fi
-        set -- "$@" up
+        set -- "$@" up --remove-orphans
         if ! $foreground; then set -- "$@" -d; fi
         if $pull; then set -- "$@" --pull always; fi
         ;;
