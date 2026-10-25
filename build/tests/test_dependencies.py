@@ -88,6 +88,33 @@ class DependencyTests(unittest.TestCase):
         self.assertIn('Outdated repository pins found', output.getvalue())
         self.assertIn('latest: 99.0.0', output.getvalue())
 
+    def test_outdated_shows_only_changed_pins(self):
+        current = {'current-package': '1.0.0', 'old-package': '1.0.0',
+                   'image': 'latest @ sha256:' + 'a' * 64}
+        for hashes in (False, True):
+            for changed in (False, True):
+                with self.subTest(hashes=hashes, changed=changed):
+                    latest = dict(current)
+                    if changed:
+                        latest['old-package'] = '2.0.0'
+                        latest['image'] = 'latest @ sha256:' + 'b' * 64
+                    output = io.StringIO()
+                    with patch('sys.argv', ['dependencies.py', 'outdated'] + (['--hashes'] if hashes else [])), \
+                            patch.object(deps, 'plan', return_value=(current, latest, {'pin': 'new'} if changed else {})), \
+                            contextlib.redirect_stdout(output):
+                        deps.main()
+                    text = output.getvalue()
+                    self.assertNotIn('current-package:', text)
+                    self.assertNotIn('(current)', text)
+                    if changed:
+                        self.assertIn('old-package: 1.0.0', text)
+                        self.assertIn('latest: 2.0.0', text)
+                        self.assertIn('image: latest', text)
+                    else:
+                        self.assertIn('All repository pins are current.', text)
+                        self.assertNotIn('old-package:', text)
+                        self.assertNotIn('image:', text)
+
     def test_version_hides_all_hashes_and_needs_no_network(self):
         output = io.StringIO()
         with patch.object(deps, 'ROOT', self.root), \

@@ -83,7 +83,7 @@ docker exec "$name" /bin/bash -ec '
 '
 docker rm -f "$name" >/dev/null
 
-# Reuse the populated home offline; ownership repair defaults to nonrecursive.
+# Reuse the populated home offline; startup must preserve existing file owners.
 docker run -d --name "$name" --privileged --init --network none \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready

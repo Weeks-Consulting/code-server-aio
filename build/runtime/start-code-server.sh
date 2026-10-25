@@ -24,15 +24,10 @@ while true; do
     sleep 0.1
 done
 
-# Bind mounts on /home may be empty; create the home before repairing ownership.
+# Bind mounts on /home may be empty; create a writable home for cloud-user.
+# Leave existing contents alone so nested containers retain their file owners.
 mkdir -p /home/cloud-user
-
-# Repair ownership for both named volumes and bind mounts.
-case "${REPAIR_HOME_OWNERSHIP:-false}" in
-    true) /usr/bin/chown -R cloud-user:cloud-user /home/cloud-user ;;
-    false) /usr/bin/chown cloud-user:cloud-user /home/cloud-user ;;
-    *) echo "REPAIR_HOME_OWNERSHIP must be true or false" >&2; exit 1 ;;
-esac
+/usr/bin/chown cloud-user:cloud-user /home/cloud-user
 
 # Install after /home is mounted so an empty bind mount also works.
 if [ ! -x /home/linuxbrew/.linuxbrew/bin/brew ] || [ -f /home/linuxbrew/.homebrew-installing ]; then

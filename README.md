@@ -2,13 +2,13 @@
 
 Deploy a complete, browser-based development environment with code-server and Docker-in-Docker using Docker Compose. Run each instance on its own dedicated VM, which is the isolation boundary, and access it remotely through Cloudflare Tunnel, with authentication enforced through Cloudflare Access policies and local token validation.
 
+See [Install](#install) for published releases, [Build](#build) for development and
+the complete [Just command list](#just-commands), and [Deploy](#deploy) to run services.
+
 ## AI disclosure
 
 AI tools assisted with the development, documentation, and review of this project.
 The entire project has also been reviewed and tested by a real person.
-
-See [Install](#install) for published releases, [Build](#build) for development and
-the complete [Just command list](#just-commands), and [Deploy](#deploy) to run services.
 
 ## Install
 
@@ -110,7 +110,7 @@ All available recipes are listed here:
 just                 # List commands
 just install         # Install host build and test dependencies
 just version         # Print repository dependency versions without hashes (offline)
-just outdated        # Check for outdated pins without changing files
+just outdated        # List only outdated pins without changing files
 just upgrade         # Look up latest versions, then confirm updates
 just build           # Build the local test image
 just check           # Check shell syntax and Compose configurations
@@ -173,7 +173,7 @@ logic; the version bundled with either host is sufficient.
 
 GitHub Actions remain pinned to full 40-character commit SHAs in `uses:`. During `just upgrade`, the latest stable release of each Action is resolved to its commit SHA; approval updates that hash and the adjacent release-version comment in every workflow occurrence. The version comment is informational; the commit SHA selects the code that runs. Actions are included in the same confirmation prompt as the other dependency upgrades.
 
-`just version`, `just outdated`, and `just upgrade` hide commit SHAs and image digests by default; the Homebrew installer is labeled as a pinned commit because it has no release version. `just outdated` checks the same upstream sources as `just upgrade`, displays current and latest versions with update status, and reports whether updates are available. It never prompts or changes files, and skips package/installer downloads needed only for checksum updates. It requires Python 3 and Internet access. A completed check exits successfully whether or not updates are available; lookup failures exit with an error.
+`just version`, `just outdated`, and `just upgrade` hide commit SHAs and image digests by default; the Homebrew installer is labeled as a pinned commit because it has no release version. `just outdated` checks the same upstream sources as `just upgrade`, lists only outdated dependencies with their current and latest versions, and reports when all pins are current. It never prompts or changes files, and skips package/installer downloads needed only for checksum updates. It requires Python 3 and Internet access. A completed check exits successfully whether or not updates are available; lookup failures exit with an error.
 
 Add `--hashes` to any dependency command to include commit SHAs and image digests: `just version --hashes`, `just outdated --hashes`, or `just upgrade --hashes`. Hash changes are still detected and reported as available updates when hashes are hidden.
 
@@ -376,7 +376,6 @@ Setting backup variables alone does not enable them.
 | `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Audience matching is case-sensitive: copy the value exactly as Cloudflare provides it, without changing letter casing. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration results in HTTP 503. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
 | `CF_ACCESS_ALLOWED_EMAILS` | Optional; empty. | Comma-separated exact, case-sensitive email claims, for example `alice@example.com,bob@example.com`. |
 | `CF_ACCESS_ALLOWED_SERVICE_TOKENS` | Optional; empty. | Comma-separated exact `common_name` claims from Access service-token JWTs. If either allowlist is set, the signed token must match an email OR a service identity; missing claims and spoofed headers do not match. Invalid list syntax stops startup. Both empty delegates identity authorization to the Access policy. |
-| `REPAIR_HOME_OWNERSHIP` | Optional; `false`. | Accepts exactly `true` or `false`. `true` recursively repairs ownership of `/home/cloud-user` to `cloud-user` (UID/GID 10000) at startup. `false` repairs only that directory's owner, preserving file owners required by nested containers. Other directories under `/home`, including Homebrew's directory, are outside this repair. Invalid values stop startup. |
 | `HOMEBREW_INSTALL_TIMEOUT` | Optional; `600`. | Positive integer in seconds limiting the first or retried Homebrew installation. After this timeout, the installer receives TERM, then KILL after another 30 seconds if needed. Failure stops container startup and keeps a marker for retry on the next start. An existing complete Homebrew installation is reused, so this timeout does not apply to normal subsequent starts. Increase it for slow downloads; if necessary, also increase Compose's health-check `start_period` beyond its current 12 minutes. |
 
 ### Optional backups
@@ -473,11 +472,9 @@ when needed. Installation is limited to 600 seconds by default; set
 `HOMEBREW_INSTALL_TIMEOUT` to change it. Failure or timeout stops startup and
 retains a marker so incomplete installations are retried.
 
-Recursive ownership repair defaults to disabled. Set `REPAIR_HOME_OWNERSHIP=true` only for an intentional migration: it changes ownership of all home contents, including nested containers' database files, which can prevent those containers from starting. The home directory owner is still corrected.
-
 If reusing the previous home-volume layout, move its existing contents into a
-`cloud-user/` subdirectory before restarting with this mount. Ownership repair
-remains scoped to `/home/cloud-user`, preserving ownership of other home directories.
+`cloud-user/` subdirectory before restarting with this mount. Startup creates the home directory as needed
+without changing ownership of its contents or other home directories.
 
 Add apt packages in `build/Dockerfile`, one-time startup commands in `build/runtime/entrypoint.sh`, and
 foreground services in `build/runtime/supervisord.conf`. Every supervised service is

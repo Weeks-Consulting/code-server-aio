@@ -150,7 +150,9 @@ def main():
         return
     print('Looking up upstream releases, installer commit, Actions, and service image digests...', flush=True)
     current, latest, edits = plan(ROOT, prepare=args.command == 'upgrade')
-    show(current, latest, hide_hashes=not args.hashes)
+    visible = ({name: value for name, value in current.items() if value != latest[name]}
+               if args.command == 'outdated' else current)
+    show(visible, latest, hide_hashes=not args.hashes)
     if not edits:
         print('All repository pins are current.')
         return
