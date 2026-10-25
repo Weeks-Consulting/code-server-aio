@@ -101,13 +101,14 @@ docker exec "$name" /bin/bash -ec '
     # The health check must detect missing Access configuration.
     if /usr/local/bin/container-healthcheck; then exit 1; fi
     # Install temporary trusted keys to check the healthy path against real code-server.
-    /usr/bin/python3 -c '\''import importlib.util,time
+    /usr/bin/python3 -c '\''import hashlib,importlib.util,time
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 spec=importlib.util.spec_from_file_location("proxy","/usr/local/lib/access-proxy.py")
 p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
-key=p.RUNTIME/"smoke.pem"
-key.write_bytes(rsa.generate_private_key(public_exponent=65537,key_size=2048).public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))
+pem=rsa.generate_private_key(public_exponent=65537,key_size=2048).public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)
+key=p.RUNTIME/(hashlib.sha256(pem).hexdigest()+".pem")
+key.write_bytes(pem)
 p.install(p.configuration("https://test.cloudflareaccess.com","a"*64,[key],int(time.time())+3600))'\''
     /usr/local/bin/container-healthcheck
     /usr/bin/supervisorctl stop dockerd
@@ -124,6 +125,9 @@ docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOU
         chmod +x /home/linuxbrew/.linuxbrew/bin/brew
         if /usr/local/bin/entrypoint.sh --help > /tmp/result 2>&1; then exit 1; fi
         grep -q "HOMEBREW_INSTALL_TIMEOUT must be" /tmp/result
+        printf "#!/bin/sh\ntouch /tmp/root-brew-executed\n" > /home/linuxbrew/.linuxbrew/bin/brew
+        /bin/bash --login -c true
+        test ! -e /tmp/root-brew-executed
     '
 # A deliberately paused installer must leave the proxy available and backend closed.
 docker rm -f "$name" >/dev/null

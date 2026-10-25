@@ -5,13 +5,14 @@ set -eu
 repository=Weeks-Consulting/code-server-aio
 directory=/opt/code-server
 version=
+image_tag=latest
 dry_run=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version|--directory|--repository)
             if [ "$#" -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then echo "Missing value for $1" >&2; exit 1; fi
             case "$1" in
-                --version) version=$2 ;;
+                --version) version=$2; image_tag=${2#v} ;;
                 --directory) directory=$2 ;;
                 --repository) repository=$2 ;;
             esac
@@ -22,7 +23,7 @@ while [ "$#" -gt 0 ]; do
 Usage: sh install.sh [--version vX.Y.Z[-N]] [--directory PATH] [--repository owner/repo] [--dry-run]
 
   --directory PATH   Installation directory (default: /opt/code-server)
-  --version TAG      Release tag (default: latest stable release)
+  --version TAG      Release tag and image version (default image: latest)
   --repository NAME  GitHub owner/repo (default: Weeks-Consulting/code-server-aio)
   --dry-run          Show dependency and deployment changes without making them
   -h, --help         Show this help
@@ -153,6 +154,7 @@ if $dry_run; then
     else
         printf 'Would create %s/.env from the release template with its image selected.\n' "$directory"
     fi
+    printf 'Would set CODE_SERVER_IMAGE=ghcr.io/%s:%s in .env unless an existing digest pin is present.\n' "$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')" "$image_tag"
     printf 'Would set .env mode to 600 and generate a backup key only if missing or empty.\n'
     printf 'Dry run complete. No packages installed, releases downloaded, files changed, or services started.\n'
     exit 0
@@ -205,8 +207,32 @@ if [ "$launcher_status" = 200 ]; then
         *) echo "Unable to download restore helper (HTTP $restore_status)." >&2; exit 1 ;;
     esac
 fi
+# New releases attach checksums; older releases remain installable with a warning.
+checksums_status=$(curl --silent --show-error --location --retry 3 \
+    "https://github.com/$repository/releases/download/$version/SHA256SUMS" \
+    --output "$staging/SHA256SUMS" --write-out '%{http_code}')
+case "$checksums_status" in
+    200)
+        # The file list is constructed internally and intentionally split.
+        # shellcheck disable=SC2086
+        python3 - "$staging" $deployment_files .env.example <<'PYVERIFY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+checksums = {}
+for line in (root / "SHA256SUMS").read_text().splitlines():
+    digest, name = line.split(maxsplit=1)
+    checksums[name] = digest
+for name in sys.argv[2:]:
+    source = "build/tools/" + name if name in ("restore-home.sh", "backup-key.sh") else name
+    if checksums.get(source) != hashlib.sha256((root / name).read_bytes()).hexdigest():
+        sys.exit("Release checksum missing or incorrect: " + name)
+PYVERIFY
+        ;;
+    404) echo 'Warning: this older release has no SHA256SUMS; downloads cannot be checksum-verified.' >&2 ;;
+    *) echo "Unable to download release checksums (HTTP $checksums_status)." >&2; exit 1 ;;
+esac
 image_repository=$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')
-image="ghcr.io/$image_repository:${version#v}"
+image="ghcr.io/$image_repository:$image_tag"
 sed "s|^CODE_SERVER_IMAGE=.*|CODE_SERVER_IMAGE=$image|" "$staging/.env.example" > "$staging/.env"
 
 mkdir -p -- "$directory"
@@ -217,7 +243,7 @@ for file in $deployment_files .env; do
     fi
 done
 if [ -f "$directory/.env" ]; then
-    # Treat .env as data, never shell code. Existing keys (even empty ones) win.
+    # Treat .env as data, never shell code. Preserve settings except the selected image.
     awk -v release="$version" '
         function key(line) {
             sub(/^[[:space:]]*/, "", line)
@@ -255,7 +281,7 @@ done
 if [ -f "$directory/.env" ]; then
     if [ -s "$staging/env-additions" ]; then
         cat "$staging/env-additions" >> "$directory/.env"
-        printf 'Added new settings and notes to %s/.env; existing values preserved.\n' "$directory"
+        printf 'Added new settings and notes to %s/.env; other existing values preserved.\n' "$directory"
     else
         printf 'Keeping existing %s/.env; no new settings.\n' "$directory"
     fi
@@ -263,6 +289,32 @@ if [ -f "$directory/.env" ]; then
 else
     install -m 600 -- "$staging/.env" "$directory/.env"
 fi
+# Preserve deliberate digest pins; update mutable tags without executing dotenv content.
+python3 - "$directory/.env" "$image" <<'PYIMAGE'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text().splitlines(keepends=True)
+setting = "CODE_SERVER_IMAGE=" + sys.argv[2] + "\n"
+found = False
+# The last assignment is the effective dotenv value. Keep all image lines intact
+# when it selects a digest, including quoting and comments.
+values = [match.group(1) for line in lines
+          if (match := re.match(r"\s*(?:export\s+)?CODE_SERVER_IMAGE\s*=(.*)", line))]
+if values and re.search(r"@sha256:[a-fA-F0-9]{64}(?=[\s\"'#]|$)", values[-1]):
+    print("Warning: keeping existing CODE_SERVER_IMAGE digest pin; "
+          "verify a new digest or run manage upgrade to deliberately replace it.",
+          file=sys.stderr)
+    sys.exit(0)
+for index, line in enumerate(lines):
+    if re.match(r"\s*(?:export\s+)?CODE_SERVER_IMAGE\s*=", line):
+        lines[index] = setting
+        found = True
+if not found:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(setting)
+path.write_text("".join(lines))
+PYIMAGE
 if [ -f "$staging/backup-key.sh" ]; then
     # Honor the helper's shebang, including Bash helpers in older Linux releases.
     "$directory/backup-key.sh" "$directory/.env"

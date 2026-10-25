@@ -12,10 +12,15 @@ initialization_failed() {
 }
 trap initialization_failed EXIT
 
+proxy_deadline=$((SECONDS + 120))
 while true; do
     status=$(/usr/bin/curl --noproxy '*' --silent --output /dev/null --write-out '%{http_code}' \
     --max-time 1 http://127.0.0.1:8080/ || true)
     [[ $status == 503 || $status == 403 ]] && break
+    if (( SECONDS >= proxy_deadline )); then
+        echo "Access proxy did not become ready within 120 seconds (last HTTP status: $status)." >&2
+        exit 1
+    fi
     sleep 0.1
 done
 

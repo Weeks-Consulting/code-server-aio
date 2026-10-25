@@ -77,6 +77,6 @@ cd "$project_dir"
     --env "TEST_TMPDIR=$test_tmp" \
     --env "TEST_HOME_STORAGE=$home_storage" \
     --env DOCKER_BUILD_RECORD_UPLOAD=false \
-    -P "ubuntu-24.04=catthehacker/ubuntu:act-24.04" \
-    -P "ubuntu-24.04-arm=catthehacker/ubuntu:act-24.04" \
+    -P "ubuntu-24.04=catthehacker/ubuntu:act-24.04@sha256:c58e2b364da03b0c804c7d660f2ecbedf2f221a382b9baa0b344b0144780ff43" \
+    -P "ubuntu-24.04-arm=catthehacker/ubuntu:act-24.04@sha256:c58e2b364da03b0c804c7d660f2ecbedf2f221a382b9baa0b344b0144780ff43" \
     "$@"

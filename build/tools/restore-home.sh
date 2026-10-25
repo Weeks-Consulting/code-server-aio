@@ -19,6 +19,9 @@ cleanup() {
     if [ -n "$rollback_directory" ]; then rmdir -- "$rollback_directory" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Decrypt into a private temporary directory before any volume changes.
 # Keep the key out of argv and remove plaintext on success or failure.
@@ -31,10 +34,9 @@ case "$archive" in *.gpg)
     # Stay beside the archive so Docker can access the plaintext on macOS too.
     decryption_directory=$(mktemp -d "$(dirname -- "$archive")/.decrypt.XXXXXXXX")
     chmod 700 "$decryption_directory"
-    gpg --homedir "$decryption_directory" --batch --pinentry-mode loopback --passphrase-fd 3 \
-        --output "$decryption_directory/home.tar.gz" --decrypt "$archive" 3<<PASSPHRASE
-$GPG_PASSPHRASE
-PASSPHRASE
+    printf '%s\n' "$GPG_PASSPHRASE" | gpg --homedir "$decryption_directory" --batch \
+        --pinentry-mode loopback --passphrase-fd 0 \
+        --output "$decryption_directory/home.tar.gz" --decrypt "$archive"
     chmod 600 "$decryption_directory/home.tar.gz"
     archive="$decryption_directory/home.tar.gz"
 ;;

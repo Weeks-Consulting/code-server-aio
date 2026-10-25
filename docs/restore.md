@@ -12,7 +12,11 @@ new key for recovery: it cannot decrypt old backups. On a replacement host, reco
 the original key from your password manager first.
 
 The helper decrypts into a private temporary directory beside the archive and
-removes the plaintext on exit. On macOS, place the archive in a folder shared with
+removes the plaintext on normal exit and catchable termination signals. SIGKILL,
+an OOM kill, or power loss can leave a `.decrypt.*` directory containing plaintext.
+After an interrupted restore, check beside the archive and remove that specific
+directory once you have confirmed no restore is still using it. The helper does
+not automatically delete other restores' temporary directories. On macOS, place the archive in a folder shared with
 Docker; the helper also writes its rollback archive there. A missing or incorrect key stops restoration before any volume changes.
 Legacy plaintext `.tar.gz` archives need no key or host GPG installation.
 

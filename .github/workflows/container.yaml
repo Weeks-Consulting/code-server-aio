@@ -218,6 +218,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 30
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -228,6 +230,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           ARCH: ${{ matrix.arch }}
+          REGISTRY_USER: ${{ github.actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sudo apt-get update
@@ -239,7 +242,7 @@ jobs:
           staging=$(mktemp -d)
           trap 'rm -rf -- "$staging"' EXIT
           printf '%s' "$GH_TOKEN" | skopeo login --authfile "$staging/auth.json" \
-            ghcr.io -u "${{ github.actor }}" --password-stdin
+            ghcr.io -u "$REGISTRY_USER" --password-stdin
           mkdir -p digests
           skopeo copy --preserve-digests --authfile "$staging/auth.json" \
             --digestfile "digests/$ARCH" dir:tested-image/image "docker://$image@$digest"
@@ -304,6 +307,7 @@ jobs:
             exit 1
           }
       - name: Publish tested manifests
+        id: manifest
         env:
           IMAGE: ${{ steps.image.outputs.name }}
           TAGS: ${{ steps.metadata.outputs.tags }}
@@ -318,7 +322,16 @@ jobs:
             [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
             sources+=("$IMAGE@$digest")
           done
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          docker buildx imagetools create --metadata-file manifest-metadata.json "${args[@]}" "${sources[@]}"
+          digest=$(jq -r '."containerimage.descriptor".digest' manifest-metadata.json)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest published image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
       - name: Published image
         env:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
@@ -327,3 +340,25 @@ jobs:
           printf '%s\n' "Published image: $IMAGE_NAME" \
             'Available image tags:' \
             "$IMAGE_TAGS" >> "$GITHUB_STEP_SUMMARY"
+
+  release-assets:
+    name: Publish installer and deployment checksums
+    needs: [source, test, check-debian, check-macos]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+          persist-credentials: false
+      - name: Attach release installer and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+        run: |
+          sha256sum compose.yaml compose.backup.yaml compose.backup-local.yaml .env.example \
+            manage build/tools/install.sh build/tools/restore-home.sh build/tools/backup-key.sh > SHA256SUMS
+          gh release upload "$RELEASE_TAG" build/tools/install.sh SHA256SUMS --clobber

@@ -14,17 +14,18 @@ volume=
 caller_directory=$PWD
 usage() {
     cat <<'HELP'
-Usage: sh manage [start|stop|backup|backups|restore] [OPTIONS]
+Usage: sh manage [start|stop|upgrade|backup|backups|restore] [OPTIONS]
 
   start              Start services (default)
   stop               Stop and remove project containers and networks; keep volumes
+  upgrade            Set .env image to the latest stable GitHub release; do not restart
   backup             Run a backup now; requires --backup s3 or local
   backups            List local backup archives; requires --backup local
   restore            Back up and restore --archive FILE into --volume ORIGINAL_VOLUME
 
   --backup MODE      none (default), s3, or local
   --foreground       Attach to logs instead of starting in the background
-  --pull             Pull images before starting
+  --pull             Pull current images and recreate containers whose image changed
   --project-name NAME  Override the Compose project name
   --archive FILE     Downloaded .tar.gz.gpg (or legacy .tar.gz) archive to restore
   --volume NAME      Existing home volume to back up and replace
@@ -51,14 +52,14 @@ while [ "$#" -gt 0 ]; do
         --foreground) foreground=true; shift ;;
         --pull) pull=true; shift ;;
         -h|--help) usage; exit 0 ;;
-        start|stop|backup|backups|restore)
+        start|stop|upgrade|backup|backups|restore)
             if $action_given; then fail 'Specify only one command'; fi
             action=$1; action_given=true; shift ;;
         -*) fail "Unknown option: $1 (use --help)" ;;
         *) fail "Unknown command: $1 (use --help)" ;;
     esac
 done
-case "$action" in start|stop|backup|backups|restore) ;; *) fail "Unknown command: $action" ;; esac
+case "$action" in start|stop|upgrade|backup|backups|restore) ;; *) fail "Unknown command: $action" ;; esac
 case "$backup" in none|s3|local) ;; *) fail 'Backup mode must be none, s3, or local' ;; esac
 if [ "$action" != start ] && { $foreground || $pull; }; then
     fail '--foreground and --pull are only supported by the start command'
@@ -102,6 +103,65 @@ fi
 cd -- "$directory"
 [ -f .env ] || fail 'Configure .env in the deployment directory before starting.'
 [ -r .env ] || fail 'Cannot read .env. If installed as root, run manage with sudo.'
+if [ "$action" = upgrade ]; then
+    if [ "$backup" != none ] || [ -n "$project" ]; then
+        fail 'upgrade only updates .env; omit --backup and --project-name'
+    fi
+    command -v python3 >/dev/null || fail 'Install python3 to upgrade the image version.'
+    python3 - "$directory/.env" <<'PYUPGRADE'
+import json, os, pathlib, re, sys, tempfile, urllib.request
+
+path = pathlib.Path(sys.argv[1])
+try:
+    if path.is_symlink():
+        raise ValueError("Expected a regular .env file, not a symlink")
+    original = path.read_text()
+    pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
+    matches = list(pattern.finditer(original))
+    image = "ghcr.io/weeks-consulting/code-server-aio:latest"
+    if matches:
+        value = matches[-1].group(1).strip()
+        if value.startswith(("\"", "'")):
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end < 0 or (value[end + 1:].strip() and not value[end + 1:].strip().startswith("#")):
+                raise ValueError("Invalid CODE_SERVER_IMAGE quoting")
+            image = value[1:end]
+        else:
+            image = value.split(" #", 1)[0].strip()
+    match = re.fullmatch(r"ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+)(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?", image)
+    if not match:
+        raise ValueError("CODE_SERVER_IMAGE must name a ghcr.io/owner/repo image")
+    repository = match[1]
+    request = urllib.request.Request(
+        "https://api.github.com/repos/" + repository + "/releases/latest",
+        headers={"User-Agent": "code-server-aio-manage", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        release = json.load(response)
+    tag = release["tag_name"]
+    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[1-9]\d*)?", tag):
+        raise ValueError("GitHub returned an invalid stable release tag")
+    selected = "ghcr.io/" + repository + ":" + tag[1:]
+    setting = "CODE_SERVER_IMAGE=" + selected
+    updated = pattern.sub(lambda _: setting, original)
+    if not matches:
+        updated += ("" if not updated or updated.endswith("\n") else "\n") + setting + "\n"
+    # Finish the lookup and validation before replacing the configuration.
+    descriptor, temporary = tempfile.mkstemp(prefix=".env-upgrade-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(updated)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print("Set CODE_SERVER_IMAGE=" + selected)
+    print("Run manage --pull with your usual launch options to apply the upgrade.")
+except Exception as error:
+    sys.exit("Unable to upgrade image: " + str(error))
+PYUPGRADE
+    exit 0
+fi
 set -- docker compose --project-directory "$PWD" --env-file "$PWD/.env"
 [ -z "$project" ] || set -- "$@" --project-name "$project"
 files=compose.yaml
@@ -132,6 +192,23 @@ if [ "$backup" != none ] && { [ "$action" = start ] || [ "$action" = backup ]; }
 fi
 case "$action" in
     start)
+        # Best effort only: respect custom images/digests and remain usable offline.
+        if command -v python3 >/dev/null && model=$("$@" config --format json 2>/dev/null); then
+            printf '%s\n' "$model" | python3 -c '
+import json, re, sys, urllib.request
+try:
+    image = json.load(sys.stdin)["services"]["code-server"]["image"]
+    match = re.fullmatch(r"ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-[1-9]\d*)?)", image)
+    if match:
+        request = urllib.request.Request("https://api.github.com/repos/" + match[1] + "/releases/latest", headers={"User-Agent": "code-server-aio-manage"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            latest = json.load(response)["tag_name"]
+        if re.fullmatch(r"v\d+\.\d+\.\d+(?:-[1-9]\d*)?", latest) and latest != "v" + match[2]:
+            print("Warning: CODE_SERVER_IMAGE differs from latest release " + latest + ". Review .env before pulling; pinned older tags may miss security fixes.", file=sys.stderr)
+except Exception:
+    pass
+' || true
+        fi
         set -- "$@" up
         if ! $foreground; then set -- "$@" -d; fi
         if $pull; then set -- "$@" --pull always; fi

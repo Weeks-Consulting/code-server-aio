@@ -34,6 +34,7 @@ class LauncherTests(unittest.TestCase):
             'from pathlib import Path\n'
             'Path(os.environ["ARGUMENT_LOG"]).write_text(json.dumps(sys.argv[1:]))\n'
             'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("LOCAL_BACKUP_UID", "LOCAL_BACKUP_GID")}))\n'
+            'if sys.argv[-3:] == ["config", "--format", "json"]: print(os.environ.get("TEST_MODEL", ""))\n'
             'sys.exit(int(os.environ.get("DOCKER_EXIT", "0")))\n'
         )
         docker.chmod(0o755)
@@ -94,6 +95,74 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("example", args)
         self.assertNotIn("-d", args)
         self.assertEqual(args[-3:], ["up", "--pull", "always"])
+
+    def test_release_warning_is_best_effort(self):
+        # Exercise the full launcher, replacing only the upstream network response.
+        (self.root / "sitecustomize.py").write_text(
+            "import io, json, os, urllib.request\n"
+            "def release(request, timeout):\n"
+            "    assert timeout == 2\n"
+            "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
+            "    assert request.full_url == 'https://api.github.com/repos/weeks-consulting/code-server-aio/releases/latest'\n"
+            "    return io.BytesIO(json.dumps({'tag_name': 'v9.0.0'}).encode())\n"
+            "urllib.request.urlopen = release\n")
+        self.env["PYTHONPATH"] = str(self.root)
+        for tag, offline, warn in (("1.0.0", False, True), ("9.0.0", False, False),
+                                   ("1.0.0", True, False), ("latest", False, False)):
+            with self.subTest(tag=tag, offline=offline):
+                self.env["TEST_MODEL"] = json.dumps({"services": {"code-server": {
+                    "image": "ghcr.io/weeks-consulting/code-server-aio:" + tag}}})
+                if offline:
+                    self.env["TEST_OFFLINE"] = "1"
+                else:
+                    self.env.pop("TEST_OFFLINE", None)
+                result = self.run_launcher("--pull")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual("differs from latest release" in result.stderr, warn)
+                self.assertEqual(json.loads(self.log.read_text())[-4:], ["up", "-d", "--pull", "always"])
+
+    def test_upgrade_updates_only_image_and_does_not_start_services(self):
+        (self.root / "sitecustomize.py").write_text(
+            "import io, json, os, urllib.request\n"
+            "def release(request, timeout):\n"
+            "    assert request.full_url == 'https://api.github.com/repos/example/fork/releases/latest'\n"
+            "    assert timeout == 15\n"
+            "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
+            "    return io.BytesIO(json.dumps({'tag_name': os.environ.get('TEST_TAG', 'v9.0.0-1')}).encode())\n"
+            "urllib.request.urlopen = release\n")
+        self.env["PYTHONPATH"] = str(self.root)
+        dotenv = self.deployment / ".env"
+        original = ("# Keep my settings\n"
+                    "export CODE_SERVER_IMAGE='ghcr.io/example/fork:1.0.0'\n"
+                    "SECRET=$(never-execute-this)\n")
+        dotenv.write_text(original)
+        result = self.run_launcher("upgrade")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = original.replace("export CODE_SERVER_IMAGE='ghcr.io/example/fork:1.0.0'",
+                                    "CODE_SERVER_IMAGE=ghcr.io/example/fork:9.0.0-1")
+        self.assertEqual(dotenv.read_text(), expected)
+        self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.log.exists())
+        self.assertIn("manage --pull", result.stdout)
+        for overrides in ({"TEST_OFFLINE": "1"}, {"TEST_TAG": "invalid"}):
+            with self.subTest(overrides=overrides):
+                self.env.update(overrides)
+                result = self.run_launcher("upgrade")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(dotenv.read_text(), expected)
+                for key in overrides:
+                    self.env.pop(key)
+
+    def test_upgrade_rejects_custom_registry_and_launch_options(self):
+        dotenv = self.deployment / ".env"
+        original = "CODE_SERVER_IMAGE=example/custom:fixed\n"
+        dotenv.write_text(original)
+        for args in (("upgrade",), ("upgrade", "--pull"),
+                     ("upgrade", "--backup", "local"), ("upgrade", "--project-name", "other")):
+            with self.subTest(args=args):
+                self.assertNotEqual(self.run_launcher(*args).returncode, 0)
+                self.assertEqual(dotenv.read_text(), original)
+                self.assertFalse(self.log.exists())
 
     def test_invalid_options(self):
         for args in (("--backup", "invalid"), ("--backup",), ("--unknown",),

@@ -50,6 +50,8 @@ class DependencyTests(unittest.TestCase):
         for name in ('compose.backup.yaml', 'compose.backup-local.yaml'):
             self.assertIn('sha256:' + 'c' * 64, edits[name])
         self.assertNotIn('# v6\n', edits[deps.WORKFLOW])
+        self.assertIn('catthehacker/ubuntu', latest)
+        self.assertEqual(edits['build/tests/actions.sh'].count('@sha256:' + 'c' * 64), 2)
 
     def test_confirmation_and_eof(self):
         target = self.root / 'build/tests/act.version'

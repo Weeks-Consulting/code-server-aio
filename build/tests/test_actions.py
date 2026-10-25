@@ -63,8 +63,8 @@ class ActionsTests(unittest.TestCase):
                 recorded = json.loads(log.read_text())
                 args = recorded["args"]
                 platforms = [args[i + 1] for i, arg in enumerate(args) if arg == "-P"]
-                self.assertIn("ubuntu-24.04=catthehacker/ubuntu:act-24.04", platforms)
-                self.assertIn("ubuntu-24.04-arm=catthehacker/ubuntu:act-24.04", platforms)
+                self.assertRegex(platforms[0], r"^ubuntu-24.04=catthehacker/ubuntu:act-24.04@sha256:[a-f0-9]{64}$")
+                self.assertEqual(platforms[1], "ubuntu-24.04-arm=" + platforms[0].split("=", 1)[1])
                 self.assertEqual(args[args.index("--matrix") + 1], f"arch:{arch}")
                 self.assertEqual(args[args.index("--container-architecture") + 1], f"linux/{arch}")
                 self.assertIn("TEST_HOME_STORAGE=" + ("volume" if system == "Darwin" else "bind"), args)

@@ -92,6 +92,16 @@ class BackupKeyTests(unittest.TestCase):
             "#!/usr/bin/env python3\nimport pathlib, shutil, sys\n"
             "args = sys.argv[1:]\n"
             "url = next(a for a in args if a.startswith('https://'))\n"
+            "if url.endswith('/SHA256SUMS'):\n"
+            "    if __import__('os').environ.get('NO_CHECKSUMS'): print('404', end=''); sys.exit()\n"
+            f"    root = pathlib.Path({str(ROOT)!r})\n"
+            "    files = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'build/tools/backup-key.sh', 'build/tools/restore-home.sh')\n"
+            "    import hashlib\n"
+            "    content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files)\n"
+            "    if __import__('os').environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], '0' * 64)\n"
+            "    pathlib.Path(args[args.index('--output') + 1]).write_text(content)\n"
+            "    print('200', end=''); sys.exit()\n"
+            "if url.endswith('/releases/latest'): print('https://github.com/Weeks-Consulting/code-server-aio/releases/tag/v4.141.0-1', end=''); sys.exit()\n"
             "relative = url.split('/refs/tags/v4.141.0-1/', 1)[1]\n"
             f"shutil.copyfile(pathlib.Path({str(ROOT)!r}) / relative, args[args.index('--output') + 1])\n"
             "if '--write-out' in args: print('200', end='')\n"
@@ -114,6 +124,62 @@ class BackupKeyTests(unittest.TestCase):
                    "--directory", str(deployment)]
         env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}
         return command, env, deployment
+
+    def test_older_release_without_checksums_warns(self):
+        command, env, deployment = self.installer_fixture()
+        result = subprocess.run(command, env={**env, "NO_CHECKSUMS": "1"}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no SHA256SUMS", result.stderr)
+        self.assertTrue((deployment / ".env").exists())
+
+    def test_installer_rejects_tampered_downloads(self):
+        command, env, deployment = self.installer_fixture()
+        result = subprocess.run(command, env={**env, "BAD_CHECKSUM": "1"}, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Release checksum missing or incorrect", result.stderr)
+        self.assertFalse(deployment.exists())
+
+    def test_installer_updates_existing_image(self):
+        command, env, deployment = self.installer_fixture()
+        deployment.mkdir()
+        dotenv = deployment / ".env"
+        dotenv.write_text("CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:0.0.1\nGPG_PASSPHRASE=keep-secret\n")
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:4.141.0-1", dotenv.read_text())
+        self.assertNotIn("keep-secret", result.stdout + result.stderr)
+        self.assertNotIn(":0.0.1", dotenv.read_text())
+
+    def test_installer_preserves_digest_pins(self):
+        command, env, deployment = self.installer_fixture()
+        deployment.mkdir()
+        dotenv = deployment / ".env"
+        digest = "ghcr.io/weeks-consulting/code-server-aio:4.141.0@sha256:" + "a" * 64
+        for assignment in (f"CODE_SERVER_IMAGE={digest}\n",
+                           f'export CODE_SERVER_IMAGE="{digest}" # verified\n'):
+            for explicit_version in (False, True):
+                with self.subTest(assignment=assignment, explicit_version=explicit_version):
+                    original = assignment + "GPG_PASSPHRASE=keep-secret\n"
+                    dotenv.write_text(original)
+                    args = command if explicit_version else command[:2] + command[4:]
+                    result = subprocess.run(args, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(dotenv.read_text().startswith(original))
+                    self.assertIn("keeping existing CODE_SERVER_IMAGE digest pin", result.stderr)
+                    self.assertNotIn("keep-secret", result.stdout + result.stderr)
+                    self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
+
+    def test_installer_defaults_to_latest_image_on_install_and_refresh(self):
+        command, env, deployment = self.installer_fixture()
+        del command[2:4]  # Omit --version, retaining latest release file resolution.
+        for initial in (None, "CODE_SERVER_IMAGE=example/custom:fixed\n"):
+            with self.subTest(initial=initial):
+                if initial is not None:
+                    (deployment / ".env").write_text(initial)
+                result = subprocess.run(command, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:latest",
+                              (deployment / ".env").read_text())
 
     def test_installer_dry_run_leaves_files_and_secrets_untouched(self):
         command, env, deployment = self.installer_fixture()
@@ -241,7 +307,7 @@ class BackupKeyTests(unittest.TestCase):
         result = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         contents = dotenv.read_text()
-        self.assertTrue(contents.startswith(original))
+        self.assertTrue(contents.startswith(original.replace("example/custom:fixed", "ghcr.io/weeks-consulting/code-server-aio:4.141.0-1")))
         self.assertIn("# Settings added by installer for release v4.141.0-1", contents)
         self.assertIn("# Maximum first-start Homebrew installation duration, in seconds.\nHOMEBREW_INSTALL_TIMEOUT=600", contents)
         for key in ("CODE_SERVER_IMAGE", "CF_ACCESS_AUD", "BACKUP_ID", "GPG_PASSPHRASE"):

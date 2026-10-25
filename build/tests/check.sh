@@ -12,6 +12,7 @@ python3 build/tests/test_release.py
 python3 build/tests/test_actions.py
 python3 build/tests/test_dependencies.py
 python3 build/tests/test_backup_key.py
+python3 build/tests/test_start.py
 sh -n build/runtime/homebrew.sh
 
 # Configuration checks use a disposable passphrase, never a deployment key.

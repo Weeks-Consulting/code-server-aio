@@ -47,8 +47,11 @@ class Backend(http.server.BaseHTTPRequestHandler):
                 (self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
             ).digest()) + "=")
             self.end_headers()
-            self.wfile.write(self.rfile.read(4))
-            self.wfile.flush()
+            try:
+                self.wfile.write(self.rfile.read(4))
+                self.wfile.flush()
+            except ConnectionResetError:
+                pass  # Expected when HAProxy forcibly closes an old worker.
         else:
             self.send_response(200)
             self.end_headers()
@@ -177,9 +180,66 @@ class AccessProxyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             proxy.public_keys({"keys": ignored})
         small = jwk(rsa.generate_private_key(public_exponent=65537, key_size=1024))
-        for keys in ([small], [valid, small]):
+        with self.assertRaises(ValueError):
+            proxy.public_keys({"keys": [small]})
+        self.assertEqual(proxy.public_keys({"keys": [valid, small]}), self.keys)
+
+    def test_identity_allowlists(self):
+        for identities in ((("user@example.com",), ()), ((), ("service.access",)),
+                           (("user@example.com",), ("service.access",))):
+            with self.subTest(identities=identities):
+                proxy.install(proxy.configuration(ISSUER, AUD, self.keys, int(time.time()) + 3600, identities))
+                for claims, expected in (({}, 403), ({"email": "user@example.com"}, 200 if identities[0] else 403),
+                                         ({"common_name": "service.access"}, 200 if identities[1] else 403),
+                                         ({"email": "User@example.com"}, 403),
+                                         ({"email": "prefix-user@example.com"}, 403),
+                                         ({"email": ["user@example.com"]}, 403)):
+                    self.assertEqual(self.status(self.token(claims)), expected)
+                self.assertEqual(self.status(self.token(), headers={"Cf-Access-Authenticated-User-Email": "user@example.com"}), 403)
+                self.assertEqual(self.status(self.token({"email": "user@example.com"}, key=self.other_key)), 403)
+
+    def test_identity_settings_reject_config_injection(self):
+        for name in ("CF_ACCESS_ALLOWED_EMAILS", "CF_ACCESS_ALLOWED_SERVICE_TOKENS"):
+            for value in ("-f", "user@example.com\nhttp-request allow", "user@example.com,", "'quoted'", "a b"):
+                with self.subTest(name=name, value=value), unittest.mock.patch.dict(os.environ, {name: value}):
+                    with self.assertRaises(ValueError):
+                        proxy.allowed_identities()
+        with unittest.mock.patch.dict(os.environ, {"CF_ACCESS_ALLOWED_EMAILS": "a@example.com, b@example.com", "CF_ACCESS_ALLOWED_SERVICE_TOKENS": "service.access"}):
+            self.assertEqual(proxy.allowed_identities(), (("a@example.com", "b@example.com"), ("service.access",)))
+
+    def test_requires_haproxy_3(self):
+        for version, accepted in (("2.8.30", False), ("3.0.0", True), ("3.2.1-1", True)):
+            with unittest.mock.patch.object(proxy.subprocess, "run", return_value=unittest.mock.Mock(stdout="HAProxy version " + version)):
+                if accepted:
+                    proxy.require_haproxy()
+                else:
+                    with self.assertRaisesRegex(ValueError, "HAProxy 3.0"):
+                        proxy.require_haproxy()
+
+    def test_configuration_rejects_unsafe_values(self):
+        for issuer, audience, keys in ((ISSUER + "\nhttp-request allow", AUD, self.keys),
+                                        (ISSUER, AUD + " extra", self.keys),
+                                        (ISSUER, AUD, [proxy.RUNTIME / "unsafe.pem"])):
             with self.assertRaises(ValueError):
-                proxy.public_keys({"keys": keys})
+                proxy.configuration(issuer, audience, keys, int(time.time()) + 3600)
+        with self.assertRaises(ValueError):
+            proxy.configuration(ISSUER, AUD, self.keys, identities=(("-f@example.com",), ()))
+
+    def test_websocket_worker_deadline(self):
+        # Accelerate the production deadline to verify active sockets are closed.
+        config = proxy.configuration(ISSUER, AUD, self.keys, int(time.time()) + 3600)
+        proxy.install(config.replace("hard-stop-after 1h", "hard-stop-after 1s"))
+        with socket.create_connection(("127.0.0.1", 8080), timeout=5) as connection:
+            connection.sendall(("GET /socket HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n"
+                                "Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n"
+                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                "Cf-Access-Jwt-Assertion: " + self.token() + "\r\n\r\n").encode())
+            response = b""
+            while not response.endswith(b"\r\n\r\n"):
+                response += connection.recv(1)
+            self.assertIn(b"101 Switching Protocols", response)
+            proxy.install(config)
+            self.assertEqual(connection.recv(1), b"")
 
     def test_not_before_in_past(self):
         self.assertEqual(self.status(self.token({"nbf": int(time.time()) - 30})), 200)
