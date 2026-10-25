@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import subprocess
@@ -14,7 +15,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class BackupKeyTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        # Root installer fixtures need trusted ancestors: /tmp is intentionally
+        # rejected by the production guard even when the test directory is 0700.
+        parent = pwd.getpwuid(0).pw_dir if os.geteuid() == 0 else None
+        self.temp = tempfile.TemporaryDirectory(dir=parent)
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.env = self.directory / ".env"
@@ -162,6 +166,21 @@ class BackupKeyTests(unittest.TestCase):
         result = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Root installation requires root-owned directories', result.stderr)
+        self.assertFalse((deployment / '.env').exists())
+
+    @unittest.skipUnless(os.geteuid() == 0, 'requires root to test ancestor permissions')
+    def test_root_installer_rejects_writable_ancestor(self):
+        command, env, deployment = self.installer_fixture()
+        parent = self.directory / 'writable-parent'
+        parent.mkdir()
+        parent.chmod(0o777)
+        deployment = parent / 'installed'
+        deployment.mkdir(mode=0o700)
+        command[-1] = str(deployment)
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Root installation requires root-owned directories', result.stderr)
+        self.assertIn(': ' + str(parent) + '\n', result.stderr)
         self.assertFalse((deployment / '.env').exists())
 
     def test_installer_updates_existing_image(self):

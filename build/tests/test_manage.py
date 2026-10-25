@@ -307,9 +307,23 @@ class LauncherTests(unittest.TestCase):
         # test exercises extraction, rollback encryption, and replacement.
         (self.deployment / "restore-home.sh").write_text(
             '#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGUMENT_LOG"\n')
-        result = self.run_launcher("restore", "--archive", archive.name, "--volume", "new-home")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.log.read_text().splitlines(), [str(archive), "new-home"])
+        alias = self.root / "caller-alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        for caller in (self.root, alias):
+            with self.subTest(caller=caller):
+                result = subprocess.run(
+                    ["sh", str(self.script), "restore", "--archive", archive.name,
+                     "--volume", "new-home"],
+                    env={**self.env, "PWD": str(caller)}, cwd=caller,
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                forwarded, volume = self.log.read_text().splitlines()
+                self.assertTrue(Path(forwarded).is_absolute())
+                # macOS /var is a symlink to /private/var; either spelling
+                # must identify the archive relative to the caller's directory.
+                self.assertEqual(Path(forwarded).resolve(), archive.resolve())
+                self.assertEqual(volume, "new-home")
 
     def test_invalid_commands(self):
         for args in (("backup",), ("backups", "--backup", "s3"), ("restore",),
