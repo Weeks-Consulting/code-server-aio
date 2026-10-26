@@ -15,7 +15,8 @@ class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Match the launcher's physical paths (macOS /var aliases /private/var).
+        self.root = Path(self.temp.name).resolve()
         self.deployment = self.root / "deployment with spaces"
         self.deployment.mkdir()
         self.script = self.deployment / "manage"
