@@ -93,8 +93,13 @@ docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/da
 echo 'PASS: Failed validation leaves no rollback directory or misleading path.'
 # Exercise installed-launcher dotenv parsing without an inherited key.
 cp "$project_dir/manage" "$archive_dir/manage"
+cp "$project_dir/manage.py" "$archive_dir/manage.py"
 cp "$restore_script" "$archive_dir/restore-home.sh"
-env -u GPG_PASSPHRASE RESTORE_IMAGE="$image" sh "$archive_dir/manage" restore \
+# act shares a long TMPDIR with sibling containers. GPG agent sockets must still
+# fit even when the caller's temporary directory exceeds the Unix socket limit.
+restore_tmp="$archive_dir/restore-temporary-directory-with-a-long-path-for-agent-socket-coverage"
+mkdir "$restore_tmp"
+env -u GPG_PASSPHRASE TMPDIR="$restore_tmp" RESTORE_IMAGE="$image" sh "$archive_dir/manage" restore \
     --archive "$archive_dir/restore-test.tar.gz.gpg" --volume "$prefix-restored"
 docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
     --entrypoint /bin/sh "$image" -ec '

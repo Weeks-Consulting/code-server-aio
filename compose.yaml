@@ -6,16 +6,13 @@ services:
     restart: unless-stopped
     stop_grace_period: 150s
     environment:
-      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
-      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
-      CF_ACCESS_ALLOWED_EMAILS: ${CF_ACCESS_ALLOWED_EMAILS:-}
-      CF_ACCESS_ALLOWED_SERVICE_TOKENS: ${CF_ACCESS_ALLOWED_SERVICE_TOKENS:-}
       HOMEBREW_INSTALL_TIMEOUT: ${HOMEBREW_INSTALL_TIMEOUT:-600}
     volumes:
       - code-server-home:/home
       - docker-data:/var/lib/docker
-    expose:
-      - "8080"
+      - code-server-socket:/run/code-server
+    networks:
+      - workspace
     healthcheck:
       test: ["CMD", "/usr/local/bin/container-healthcheck"]
       interval: 30s
@@ -23,16 +20,490 @@ services:
       start_period: 12m
       retries: 3
 
+  envoy:
+    image: envoyproxy/envoy:v1.40.1@sha256:713bb146f1a7c97ebc70e13d259f77ff36f2c5d00f3145677816af5af9bd1530
+    command: ["-c", "/etc/envoy/envoy.json", "--concurrency", "2", "--disable-hot-restart"]
+    user: envoy
+    group_add: ["10000"]
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      CF_ACCESS_ALLOWED_EMAILS: ${CF_ACCESS_ALLOWED_EMAILS:-}
+      CF_ACCESS_ALLOWED_SERVICE_TOKENS: ${CF_ACCESS_ALLOWED_SERVICE_TOKENS:-}
+    configs:
+      - source: envoy-bootstrap
+        target: /etc/envoy/envoy.json
+    volumes:
+      - code-server-socket:/run/code-server:ro
+    networks:
+      - edge
+    expose:
+      - "8080"
+    depends_on:
+      code-server:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -ec
+        - |
+          test ! -w /etc/envoy/envoy.json
+          check() {
+            exec 3<>/dev/tcp/127.0.0.1/"$$1"
+            printf 'GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' "$$2" >&3
+            read -r protocol status rest <&3
+            exec 3<&-
+            exec 3>&-
+            test "$$status" = "$$3"
+          }
+          check 9901 /ready 200
+          check 8080 / 403
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   cloudflared:
-    image: cloudflare/cloudflared:latest@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39
+    image: cloudflare/cloudflared:latest@sha256:c6c7ae1d5dfdcb094ad344ed68ccffc26635c9c6be80965664c33baf064b0515
     command: tunnel --no-autoupdate run
     restart: unless-stopped
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    networks:
+      - edge
     depends_on:
-      code-server:
+      envoy:
         condition: service_started
+
+networks:
+  edge:
+  workspace:
 
 volumes:
   code-server-home:
   docker-data:
+  code-server-socket:
+
+configs:
+  envoy-bootstrap:
+    # Compose interpolates these values and mounts the result read-only.
+    content: |
+      {
+        "admin": {
+          "address": {
+            "socket_address": {
+              "address": "127.0.0.1",
+              "port_value": 9901
+            }
+          }
+        },
+        "static_resources": {
+          "listeners": [
+            {
+              "name": "access",
+              "address": {
+                "socket_address": {
+                  "address": "0.0.0.0",
+                  "port_value": 8080
+                }
+              },
+              "filter_chains": [
+                {
+                  "filters": [
+                    {
+                      "name": "envoy.filters.network.http_connection_manager",
+                      "typed_config": {
+                        "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+                        "stat_prefix": "access",
+                        "normalize_path": true,
+                        "stream_idle_timeout": "3600s",
+                        "common_http_protocol_options": {
+                          "max_stream_duration": "7200s"
+                        },
+                        "upgrade_configs": [
+                          {
+                            "upgrade_type": "websocket"
+                          }
+                        ],
+                        "route_config": {
+                          "name": "workspace",
+                          "virtual_hosts": [
+                            {
+                              "name": "workspace",
+                              "domains": [
+                                "*"
+                              ],
+                              "routes": [
+                                {
+                                  "match": {
+                                    "prefix": "/"
+                                  },
+                                  "route": {
+                                    "cluster": "code_server",
+                                    "timeout": "0s"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "local_reply_config": {
+                          "mappers": [
+                            {
+                              "filter": {
+                                "status_code_filter": {
+                                  "comparison": {
+                                    "op": "EQ",
+                                    "value": {
+                                      "default_value": 401,
+                                      "runtime_key": "unused"
+                                    }
+                                  }
+                                }
+                              },
+                              "status_code": 403,
+                              "body": {
+                                "inline_string": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Cloudflare Access authentication required</title>\n  <style>\n    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }\n    body { margin: 0; padding: 3rem 1.25rem; }\n    main { max-width: 42rem; margin: auto; }\n    h1 { line-height: 1.2; font-size: 2rem; }\n    h2 { font-size: 1.15rem; margin-top: 2rem; }\n    .status { font-size: .85rem; letter-spacing: .08em; }\n    code { font-size: .9em; overflow-wrap: anywhere; }\n  </style>\n</head>\n<body>\n  <main>\n    <p class=\"status\">403 &middot; ACCESS DENIED</p>\n    <h1>Cloudflare Access authentication required</h1>\n    <p>This service requires a valid Cloudflare Access session. Your request did not include a token that this service could accept.</p>\n    <h2>If you are trying to sign in</h2>\n    <p>Open the protected hostname and sign in through Cloudflare Access. If your session has expired, sign in again. Contact the administrator if access is still denied.</p>\n    <h2>If you administer this service</h2>\n    <p>Configure a Cloudflare Access application and an Allow or Service Auth policy for this hostname. A Tunnel alone does not provide Access authentication. Bypass policies do not supply the required authentication.</p>\n    <p>Verify that <code>CF_ACCESS_TEAM_DOMAIN</code> and <code>CF_ACCESS_AUD</code> match that application, and that the tunnel forwards requests to the protected proxy on port 8080.</p>\n    <p>A missing policy, an expired session, or an invalid token can cause this response. Access remains blocked until a valid application token is supplied.</p>\n  </main>\n</body>\n</html>\n"
+                              },
+                              "body_format_override": {
+                                "text_format_source": {
+                                  "inline_string": "%LOCAL_REPLY_BODY%"
+                                },
+                                "content_type": "text/html; charset=utf-8"
+                              },
+                              "headers_to_add": [
+                                {
+                                  "header": {
+                                    "key": "cache-control",
+                                    "value": "no-store"
+                                  },
+                                  "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
+                                },
+                                {
+                                  "header": {
+                                    "key": "x-content-type-options",
+                                    "value": "nosniff"
+                                  },
+                                  "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
+                                }
+                              ]
+                            },
+                            {
+                              "filter": {
+                                "status_code_filter": {
+                                  "comparison": {
+                                    "op": "EQ",
+                                    "value": {
+                                      "default_value": 403,
+                                      "runtime_key": "unused"
+                                    }
+                                  }
+                                }
+                              },
+                              "status_code": 403,
+                              "body": {
+                                "inline_string": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Cloudflare Access authentication required</title>\n  <style>\n    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }\n    body { margin: 0; padding: 3rem 1.25rem; }\n    main { max-width: 42rem; margin: auto; }\n    h1 { line-height: 1.2; font-size: 2rem; }\n    h2 { font-size: 1.15rem; margin-top: 2rem; }\n    .status { font-size: .85rem; letter-spacing: .08em; }\n    code { font-size: .9em; overflow-wrap: anywhere; }\n  </style>\n</head>\n<body>\n  <main>\n    <p class=\"status\">403 &middot; ACCESS DENIED</p>\n    <h1>Cloudflare Access authentication required</h1>\n    <p>This service requires a valid Cloudflare Access session. Your request did not include a token that this service could accept.</p>\n    <h2>If you are trying to sign in</h2>\n    <p>Open the protected hostname and sign in through Cloudflare Access. If your session has expired, sign in again. Contact the administrator if access is still denied.</p>\n    <h2>If you administer this service</h2>\n    <p>Configure a Cloudflare Access application and an Allow or Service Auth policy for this hostname. A Tunnel alone does not provide Access authentication. Bypass policies do not supply the required authentication.</p>\n    <p>Verify that <code>CF_ACCESS_TEAM_DOMAIN</code> and <code>CF_ACCESS_AUD</code> match that application, and that the tunnel forwards requests to the protected proxy on port 8080.</p>\n    <p>A missing policy, an expired session, or an invalid token can cause this response. Access remains blocked until a valid application token is supplied.</p>\n  </main>\n</body>\n</html>\n"
+                              },
+                              "body_format_override": {
+                                "text_format_source": {
+                                  "inline_string": "%LOCAL_REPLY_BODY%"
+                                },
+                                "content_type": "text/html; charset=utf-8"
+                              },
+                              "headers_to_add": [
+                                {
+                                  "header": {
+                                    "key": "cache-control",
+                                    "value": "no-store"
+                                  },
+                                  "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
+                                },
+                                {
+                                  "header": {
+                                    "key": "x-content-type-options",
+                                    "value": "nosniff"
+                                  },
+                                  "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
+                                }
+                              ]
+                            },
+                            {
+                              "filter": {
+                                "status_code_filter": {
+                                  "comparison": {
+                                    "op": "EQ",
+                                    "value": {
+                                      "default_value": 503,
+                                      "runtime_key": "unused"
+                                    }
+                                  }
+                                }
+                              },
+                              "status_code": 503,
+                              "body": {
+                                "inline_string": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Service is not ready</title>\n  <meta http-equiv=\"refresh\" content=\"5\">\n  <style>\n    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }\n    body { margin: 0; padding: 3rem 1.25rem; }\n    main { max-width: 42rem; margin: auto; }\n    h1 { line-height: 1.2; font-size: 2rem; }\n    h2 { font-size: 1.15rem; margin-top: 2rem; }\n    .status { font-size: .85rem; letter-spacing: .08em; }\n    code { font-size: .9em; overflow-wrap: anywhere; }\n  </style>\n</head>\n<body>\n  <main>\n    <p class=\"status\">503 &middot; SERVICE UNAVAILABLE</p>\n    <h1>Service is not ready</h1>\n    <p>The workspace is starting or temporarily unavailable. Initial setup can take several minutes. This page will retry automatically.</p>\n    <h2>If you are trying to sign in</h2>\n    <p>Please leave this page open. If setup does not finish, contact the administrator.</p>\n    <h2>If you administer this service</h2>\n    <p>Set <code>CF_ACCESS_TEAM_DOMAIN</code> and <code>CF_ACCESS_AUD</code> in the service environment, and configure an Access application and policy for this hostname.</p>\n    <p>Check that the container can reach your team's <code>/cdn-cgi/access/certs</code> endpoint over HTTPS. First-start dependency installation, a starting backend, invalid configuration, or signing keys that could not be refreshed can cause this response.</p>\n    <p>Review <code>docker compose logs envoy code-server</code> for configuration and key-refresh errors.</p>\n  </main>\n</body>\n</html>\n"
+                              },
+                              "body_format_override": {
+                                "text_format_source": {
+                                  "inline_string": "%LOCAL_REPLY_BODY%"
+                                },
+                                "content_type": "text/html; charset=utf-8"
+                              },
+                              "headers_to_add": [
+                                {
+                                  "header": {
+                                    "key": "cache-control",
+                                    "value": "no-store"
+                                  },
+                                  "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
+                                },
+                                {
+                                  "header": {
+                                    "key": "x-content-type-options",
+                                    "value": "nosniff"
+                                  },
+                                  "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "http_filters": [
+                          {
+                            "name": "envoy.filters.http.lua",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua",
+                              "default_source_code": {
+                                "inline_string": "-- Validate startup settings without interpolating user data into Lua source.\nlocal domain = os.getenv(\"CF_ACCESS_TEAM_DOMAIN\") or \"\"\nlocal team = domain:match(\"^(.-)%.cloudflareaccess%.com$$\")\nassert(team and (team:match(\"^[a-z0-9]$$\") or team:match(\"^[a-z0-9][a-z0-9%-]*[a-z0-9]$$\")),\n       \"Set CF_ACCESS_TEAM_DOMAIN to your team.cloudflareaccess.com hostname\")\nlocal audience = os.getenv(\"CF_ACCESS_AUD\") or \"\"\nassert(#audience == 64 and audience:match(\"^[a-fA-F0-9]+$$\"),\n       \"Set CF_ACCESS_AUD to the 64-character application audience\")\nfunction envoy_on_request(handle)\n  if handle:headers():getNumValues(\"cf-access-jwt-assertion\") ~= 1 then\n    handle:respond({[\":status\"] = \"403\"}, \"A single Access JWT header is required\")\n  end\nend\n"
+                              }
+                            }
+                          },
+                          {
+                            "name": "envoy.filters.http.rbac",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC",
+                              "rules": {
+                                "action": "ALLOW",
+                                "policies": {
+                                  "single_assertion": {
+                                    "permissions": [
+                                      {
+                                        "any": true
+                                      }
+                                    ],
+                                    "principals": [
+                                      {
+                                        "header": {
+                                          "name": "cf-access-jwt-assertion",
+                                          "string_match": {
+                                            "safe_regex": {
+                                              "regex": "[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "name": "envoy.filters.http.jwt_authn",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication",
+                              "providers": {
+                                "cloudflare": {
+                                  "issuer": "https://${CF_ACCESS_TEAM_DOMAIN:-}",
+                                  "audiences": [
+                                    "${CF_ACCESS_AUD:-}"
+                                  ],
+                                  "require_expiration": true,
+                                  "clock_skew_seconds": 1,
+                                  "from_headers": [
+                                    {
+                                      "name": "cf-access-jwt-assertion"
+                                    }
+                                  ],
+                                  "payload_in_metadata": "claims",
+                                  "header_in_metadata": "header",
+                                  "remote_jwks": {
+                                    "http_uri": {
+                                      "uri": "https://${CF_ACCESS_TEAM_DOMAIN:-}/cdn-cgi/access/certs",
+                                      "cluster": "cloudflare_jwks",
+                                      "timeout": "10s"
+                                    },
+                                    "cache_duration": "3600s",
+                                    "retry_policy": {
+                                      "num_retries": 2
+                                    }
+                                  }
+                                }
+                              },
+                              "rules": [
+                                {
+                                  "match": {
+                                    "prefix": "/"
+                                  },
+                                  "requires": {
+                                    "provider_name": "cloudflare"
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "name": "envoy.filters.http.rbac",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC",
+                              "rules": {
+                                "action": "ALLOW",
+                                "policies": {
+                                  "rs256": {
+                                    "permissions": [
+                                      {
+                                        "any": true
+                                      }
+                                    ],
+                                    "principals": [
+                                      {
+                                        "sourced_metadata": {
+                                          "metadata_source": "DYNAMIC",
+                                          "metadata_matcher": {
+                                            "filter": "envoy.filters.http.jwt_authn",
+                                            "path": [
+                                              {
+                                                "key": "header"
+                                              },
+                                              {
+                                                "key": "alg"
+                                              }
+                                            ],
+                                            "value": {
+                                              "string_match": {
+                                                "exact": "RS256"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "name": "envoy.filters.http.lua",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua",
+                              "default_source_code": {
+                                "inline_string": "-- Parse literal identities once per worker; JWT verification has already succeeded.\nlocal function identities(name, pattern)\n  local raw = os.getenv(name) or \"\"\n  local values = {}\n  if raw ~= \"\" then\n    for entry in (raw .. \",\"):gmatch(\"(.-),\") do\n      entry = entry:match(\"^%s*(.-)%s*$$\")\n      assert(entry:match(pattern), name .. \" must be a comma-separated list of literal identities\")\n      values[#values + 1] = entry\n    end\n  end\n  return values\nend\nlocal emails = identities(\"CF_ACCESS_ALLOWED_EMAILS\", \"^[A-Za-z0-9_][A-Za-z0-9_+%.%-]*@[A-Za-z0-9%.%-]+$$\")\nlocal services = identities(\"CF_ACCESS_ALLOWED_SERVICE_TOKENS\", \"^[A-Za-z0-9_][A-Za-z0-9_%.@%-]*$$\")\nlocal function contains(values, claim)\n  if type(claim) ~= \"string\" then return false end\n  for _, value in ipairs(values) do\n    if claim == value then return true end\n  end\n  return false\nend\nfunction envoy_on_request(handle)\n  if #emails == 0 and #services == 0 then return end\n  local verified = handle:streamInfo():dynamicMetadata():get(\"envoy.filters.http.jwt_authn\") or {}\n  local claims = verified.claims or {}\n  if not contains(emails, claims.email) and not contains(services, claims.common_name) then\n    handle:respond({[\":status\"] = \"403\"}, \"Access identity is not allowed\")\n  end\nend\n"
+                              }
+                            }
+                          },
+                          {
+                            "name": "envoy.filters.http.router",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router"
+                            }
+                          }
+                        ],
+                        "access_log": [
+                          {
+                            "name": "envoy.access_loggers.stdout",
+                            "typed_config": {
+                              "@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
+                              "log_format": {
+                                "text_format_source": {
+                                  "inline_string": "%START_TIME% %REQ(:METHOD)% %PROTOCOL% %RESPONSE_CODE% %RESPONSE_CODE_DETAILS%\n"
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "clusters": [
+            {
+              "name": "code_server",
+              "connect_timeout": "2s",
+              "type": "STATIC",
+              "load_assignment": {
+                "cluster_name": "code_server",
+                "endpoints": [
+                  {
+                    "lb_endpoints": [
+                      {
+                        "endpoint": {
+                          "address": {
+                            "pipe": {
+                              "path": "/run/code-server/backend.sock"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "cloudflare_jwks",
+              "connect_timeout": "5s",
+              "type": "STRICT_DNS",
+              "load_assignment": {
+                "cluster_name": "cloudflare_jwks",
+                "endpoints": [
+                  {
+                    "lb_endpoints": [
+                      {
+                        "endpoint": {
+                          "address": {
+                            "socket_address": {
+                              "address": "${CF_ACCESS_TEAM_DOMAIN:-}",
+                              "port_value": 443
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "transport_socket": {
+                "name": "envoy.transport_sockets.tls",
+                "typed_config": {
+                  "@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
+                  "sni": "${CF_ACCESS_TEAM_DOMAIN:-}",
+                  "common_tls_context": {
+                    "validation_context": {
+                      "trusted_ca": {
+                        "filename": "/etc/ssl/certs/ca-certificates.crt"
+                      },
+                      "match_typed_subject_alt_names": [
+                        {
+                          "san_type": "DNS",
+                          "matcher": {
+                            "exact": "${CF_ACCESS_TEAM_DOMAIN:-}"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }

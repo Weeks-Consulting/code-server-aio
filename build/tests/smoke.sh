@@ -22,6 +22,8 @@ if [ "$home_storage" = volume ]; then
     timeout_mount="type=volume,src=$name-timeout,dst=/home,volume-nocopy"
 fi
 cleanup() {
+    result=$?
+    if [ "$result" -ne 0 ]; then docker logs "$name" >&2 || true; fi
     docker rm -f "$name" >/dev/null 2>&1 || true
     docker run --rm --network none --mount "type=bind,src=$home_dir,dst=/test-home" \
         --entrypoint /bin/bash "$image" -ec 'find /test-home -mindepth 1 -delete' >/dev/null
@@ -34,26 +36,22 @@ trap cleanup EXIT
 wait_ready() {
     deadline=$(($(date +%s) + 720))
     until docker exec "$name" /bin/bash -ec '
-        /usr/bin/supervisorctl status
-        /usr/bin/docker info >/dev/null 2>&1
-        /usr/bin/curl --fail --silent http://127.0.0.1:8081/healthz >/dev/null
-        test "$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/)" = 503
+        /usr/local/bin/container-healthcheck
     ' >/dev/null 2>&1; do
         if [ "$(date +%s)" -gt "$deadline" ]; then docker logs "$name"; return 1; fi
         sleep 2
     done
 }
 docker run -d --name "$name" --privileged --init --restart unless-stopped \
-    --env CF_ACCESS_ALLOWED_EMAILS="invalid identity" \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready
 docker exec "$name" /bin/bash -ec '
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
     /usr/bin/sudo -H -u cloud-user /bin/bash --login -ec "command -v brew; brew --version"
-    helper=$(/usr/bin/supervisorctl pid access-keys)
-    helper_uid=$(id -u haproxy)
-    grep -q "^Uid:[[:space:]]*$helper_uid" "/proc/$helper/status"
-    test "$(stat -c %U /run/access-proxy/master.sock)" = haproxy
+    test "$(stat -c %a /run/code-server/backend.sock)" = 660
+    test "$(stat -c %u:%g /run/code-server/backend.sock)" = 10000:10000
+    if curl --silent --max-time 1 http://127.0.0.1:8080/; then exit 1; fi
+    if curl --silent --max-time 1 http://127.0.0.1:8081/; then exit 1; fi
     pid=$(/usr/bin/supervisorctl pid code-server)
     grep -q "^Uid:[[:space:]]*10000" "/proc/$pid/status"
 '
@@ -103,18 +101,9 @@ docker exec "$name" /bin/bash -ec '
     done
     test ! -f /home/linuxbrew/.homebrew-installing
     /usr/bin/sudo -H -u cloud-user /bin/bash --login -ec "brew --version"
-    # The health check must detect missing Access configuration.
-    if /usr/local/bin/container-healthcheck; then exit 1; fi
-    # Install temporary trusted keys to check the healthy path against real code-server.
-    /usr/bin/python3 -c '\''import hashlib,importlib.util,time
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-spec=importlib.util.spec_from_file_location("proxy","/usr/local/lib/access-proxy.py")
-p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
-pem=rsa.generate_private_key(public_exponent=65537,key_size=2048).public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)
-key=p.RUNTIME/(hashlib.sha256(pem).hexdigest()+".pem")
-key.write_bytes(pem)
-p.install(p.configuration("https://test.cloudflareaccess.com","a"*64,[key],int(time.time())+3600))'\''
+    /usr/local/bin/container-healthcheck
+    # Restarting code-server replaces its stale socket without repeating setup.
+    /usr/bin/supervisorctl restart code-server
     /usr/local/bin/container-healthcheck
     /usr/bin/supervisorctl stop dockerd
     if /usr/local/bin/container-healthcheck; then exit 1; fi
@@ -128,13 +117,13 @@ docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOU
         mkdir -p /home/linuxbrew/.linuxbrew/bin
         touch /home/linuxbrew/.linuxbrew/bin/brew
         chmod +x /home/linuxbrew/.linuxbrew/bin/brew
-        if /usr/local/bin/entrypoint.sh --help > /tmp/result 2>&1; then exit 1; fi
+        if /bin/bash /usr/local/lib/preinstall.sh > /tmp/result 2>&1; then exit 1; fi
         grep -q "HOMEBREW_INSTALL_TIMEOUT must be" /tmp/result
         printf "#!/bin/sh\ntouch /tmp/root-brew-executed\n" > /home/linuxbrew/.linuxbrew/bin/brew
         /bin/bash --login -c true
         test ! -e /tmp/root-brew-executed
     '
-# A deliberately paused installer must leave the proxy available and backend closed.
+# A deliberately paused installer must leave the backend socket unavailable.
 docker rm -f "$name" >/dev/null
 cat > "$home_dir/paused-installer.sh" <<'INSTALL'
 #!/bin/bash
@@ -152,10 +141,8 @@ until docker exec "$name" test -f /home/linuxbrew/.homebrew-installing; do
     sleep 1
 done
 docker exec "$name" /bin/bash -ec '
-    test "$(curl -s -o /tmp/startup-page -w "%{http_code}" http://127.0.0.1:8080/)" = 503
-    grep -q "Service is not ready" /tmp/startup-page
-    grep -q http-equiv= /tmp/startup-page
-    if curl --fail --silent http://127.0.0.1:8081/healthz; then exit 1; fi
+    test ! -S /run/code-server/backend.sock
+    if curl --unix-socket /run/code-server/backend.sock --fail --silent http://localhost/healthz; then exit 1; fi
     if /usr/local/bin/container-healthcheck; then exit 1; fi
     touch /home/linuxbrew/continue-setup
 '

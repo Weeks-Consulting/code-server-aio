@@ -20,6 +20,7 @@ class LauncherTests(unittest.TestCase):
         self.deployment.mkdir()
         self.script = self.deployment / "manage"
         self.script.write_bytes(SCRIPT.read_bytes())
+        (self.deployment / "manage.py").write_bytes((SCRIPT.parent / "manage.py").read_bytes())
         (self.deployment / "backup-key.sh").write_bytes(
             (SCRIPT.parent / "build/tools/backup-key.sh").read_bytes())
         (self.deployment / "restore-home.sh").write_bytes(
@@ -260,12 +261,12 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("example", args)
         result = self.run_launcher("start", "stop")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("only one command", result.stderr)
+        self.assertIn("unrecognized arguments", result.stderr)
 
     def test_help(self):
         result = self.run_launcher("--help")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Usage:", result.stdout)
+        self.assertIn("usage:", result.stdout)
         self.assertFalse(self.log.exists())
 
     def test_docker_exit_status(self):

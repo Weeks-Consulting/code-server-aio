@@ -13,7 +13,7 @@ The entire project has also been reviewed and tested by a real person.
 ## Install
 
 Supported hosts are Debian Linux and macOS. Start with a working Docker
-installation. The deployment installer checks for curl, Python 3, GnuPG, and
+installation and Python 3. The deployment installer checks for GnuPG and
 Docker Compose, and installs missing runtime packages using apt on Debian or
 Homebrew on macOS. It also installs missing CA certificates on Debian. Package
 installation uses sudo on Debian when needed; Homebrew must already be available
@@ -24,8 +24,15 @@ On macOS, keep the deployment, checkout, and backup archives in a folder shared
 with Docker, such as your home directory. Use `--directory "$HOME/code-server"`
 without `sudo` as shown below.
 
-Install the latest published release using the installer from `main` (also available
-as a release asset in newer releases):
+Installation and management run through `manage`, a thin shell wrapper around
+`manage.py` using Python's standard library. From a checkout, install with:
+
+```sh
+./manage install --directory "$HOME/code-server"
+```
+
+For hosts without a checkout, the compatibility bootstrap needs curl and Python 3.
+It downloads the latest released `manage.py`, which performs the installation:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sudo sh -s --
@@ -46,10 +53,10 @@ with `--version` to select both the location and release.
 Preview the dependency commands and deployment changes before installing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sh -s -- --dry-run --directory "$HOME/code-server"
+./manage install --dry-run --directory "$HOME/code-server"
 ```
 
-`--dry-run` installs no packages, downloads no release files, and leaves the
+`manage install --dry-run` installs no packages, makes no network requests, and leaves the
 deployment untouched. It reports existing files that would be backed up and
 whether `.env` would be created or preserved, without displaying its secrets.
 Without `--version`, it reports that the latest release would be resolved during
@@ -75,7 +82,8 @@ or restart services; start them with Docker Compose after configuring `.env`.
 All services use `restart: unless-stopped`: once deployed, Docker restarts them
 when they exit or the Docker daemon restarts, unless you explicitly stop them.
 
-To update, download and rerun the installer using the command above. Review any
+To refresh deployment files, run `manage install --directory PATH` with the deployment
+directory and any desired `--version` or `--repository` option. Review any
 new `.env` settings before restarting. The installer sets `CODE_SERVER_IMAGE` to `:latest` or the version supplied with
 `--version`, preserving existing digest pins with a warning. Then run
 `sudo /opt/code-server/manage --pull` with your usual launch options.
@@ -85,7 +93,7 @@ without `sudo`, using that installation's path.
 To install a specific release, pass its full tag, including the leading `v`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/tags/v4.141.0/build/tools/install.sh | sudo sh -s -- --version v4.141.0
+./manage install --version v4.141.0 --directory "$HOME/code-server"
 ```
 
 For a project revision, use `--version v4.141.0-1` instead.
@@ -136,6 +144,14 @@ use isolated containers and temporary storage. CI runs the same scripts from
 
 ### Test details
 
+`just test-proxy` checks the real Envoy binary against disposable HTTPS signing keys
+and a Unix-socket fixture: JWT claims, duplicate headers, allowlists, TLS validation,
+key rotation and outages, error pages, and WebSocket lifetime limits. It also starts
+the production Compose topology with real code-server and a temporary JWKS service,
+then checks socket isolation from a client on both networks, Envoy hardening, backend
+and sidecar restarts, and rejection of requests while either service is unavailable.
+No Cloudflare account or published host ports are needed.
+
 `just test-backup` exercises both local archives and S3 uploads to a disposable,
 digest-pinned RustFS server. The S3 test checks application stop/restart, the object
 prefix and filename, encryption, and a restore with numeric ownership preserved.
@@ -167,9 +183,9 @@ logic; the version bundled with either host is sufficient.
 
 ### Dependency updates
 
-`just version` reports repository versions without hashes, including code-server, act, the Homebrew installer, GitHub Actions, cloudflared, and the backup image.
+`just version` reports repository versions without hashes, including code-server, act, the Homebrew installer, GitHub Actions, Envoy, cloudflared, and the backup image.
 
-`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. It updates code-server and act to the latest stable GitHub releases, including checksums for every supported architecture, the Homebrew installer commit and checksum, GitHub Actions commit pins and version comments, and service, Debian build, CI, and restore image digests on their existing tag tracks.
+`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. It updates code-server, act, and Envoy to the latest stable GitHub releases, including code-server and act checksums for every supported architecture, the Homebrew installer commit and checksum, GitHub Actions commit pins and version comments, and service, Debian build, CI, and restore image digests on their existing tag tracks.
 Homebrew installer updates include a compare link before confirmation. Files are
 staged before replacement; write failures attempt to restore previous contents. A
 process or host crash during replacement can still require recovery using Git. GitHub asset SHA-256 metadata is used when available; otherwise assets are downloaded and hashed. Set `GH_TOKEN` or `GITHUB_TOKEN` if needed for GitHub API rate limits. Lookup failures and a declined or unanswered prompt leave files unchanged. Review `git diff` and run `just test` afterward; rebuilding/redeploying is a separate step.
@@ -339,7 +355,7 @@ allowlists below in addition to restricting the Access policy.
    - `CLOUDFLARE_TUNNEL_TOKEN`: your remotely managed tunnel token.
    - `CF_ACCESS_TEAM_DOMAIN`: your `team.cloudflareaccess.com` hostname, without `https://`.
    - `CF_ACCESS_AUD`: the 64-character Application Audience tag copied exactly from your Access application, including letter casing.
-2. Configure the tunnel origin as `http://code-server:8080` and protect the hostname
+2. Configure the tunnel origin as `http://envoy:8080` and protect the hostname
    with an Access application and an Allow or Service Auth policy.
 3. Start the services:
 
@@ -374,9 +390,9 @@ Setting backup variables alone does not enable them.
 | --- | --- | --- |
 | `CODE_SERVER_IMAGE` | Optional; `ghcr.io/weeks-consulting/code-server-aio:latest`. | Full registry image reference to pull, such as `ghcr.io/weeks-consulting/code-server-aio:4.141.0` or `:4.141.0-1`. The installer sets this to `:latest` by default or the requested version on every installation, preserving existing digest pins. `latest` follows stable releases. Ignored when `compose.build.yaml` selects the local image. |
 | `CODE_SERVER_VERSION` | Optional; `build/code-server.version`. | Overrides the upstream code-server version for local builds, such as `4.141.0`, without a leading `v`. Used only by `compose.build.yaml`; it does not change a prebuilt image. The package must have a checksum in `build/code-server.sha256`, so normally update `build/code-server.version` instead. |
-| `CLOUDFLARE_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `http://code-server:8080`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
-| `CF_ACCESS_TEAM_DOMAIN` | Required for access; no default. | Cloudflare Access team hostname, such as `my-team.cloudflareaccess.com`. Supply only the hostname, without `https://`, a path, or a trailing slash. HAProxy's helper downloads signing keys from this team and checks that JWTs have its issuer. Missing or invalid configuration keeps the origin blocked with HTTP 503. |
-| `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Audience matching is case-sensitive: copy the value exactly as Cloudflare provides it, without changing letter casing. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration results in HTTP 503. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
+| `CLOUDFLARE_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `http://envoy:8080`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
+| `CF_ACCESS_TEAM_DOMAIN` | Required for access; no default. | Cloudflare Access team hostname, such as `my-team.cloudflareaccess.com`. Supply only the hostname, without `https://`, a path, or a trailing slash. Envoy fetches signing keys from this team and checks the JWT issuer. Missing or invalid configuration prevents the Envoy sidecar from starting. |
+| `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Audience matching is case-sensitive: copy the value exactly as Cloudflare provides it, without changing letter casing. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration prevents Envoy from starting. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
 | `CF_ACCESS_ALLOWED_EMAILS` | Optional; empty. | Comma-separated exact, case-sensitive email claims, for example `alice@example.com,bob@example.com`. |
 | `CF_ACCESS_ALLOWED_SERVICE_TOKENS` | Optional; empty. | Comma-separated exact `common_name` claims from Access service-token JWTs. If either allowlist is set, the signed token must match an email OR a service identity; missing claims and spoofed headers do not match. Invalid list syntax stops startup. Both empty delegates identity authorization to the Access policy. |
 | `HOMEBREW_INSTALL_TIMEOUT` | Optional; `600`. | Positive integer in seconds limiting the first or retried Homebrew installation. After this timeout, the installer receives TERM, then KILL after another 30 seconds if needed. Failure stops container startup and keeps a marker for retry on the next start. An existing complete Homebrew installation is reused, so this timeout does not apply to normal subsequent starts. Increase it for slow downloads; if necessary, also increase Compose's health-check `start_period` beyond its current 12 minutes. |
@@ -415,33 +431,68 @@ an existing deployment.
 
 ## Access protection
 
-Traffic flows through cloudflared → HAProxy (`:8080`) → code-server (`127.0.0.1:8081`).
-HAProxy validates Access JWT signatures, issuer, audience, and timestamps.
+Traffic flows through cloudflared → Envoy (`:8080`) → code-server over
+`/run/code-server/backend.sock`. Configure the remotely managed tunnel origin as
+`http://envoy:8080`. Code-server has **no TCP listener** and no published ports.
+Only code-server and Envoy mount the socket volume; Envoy mounts it read-only.
+Cloudflared and backup containers have no socket mount. Code-server uses a separate
+`workspace` network for outbound development traffic; Envoy and cloudflared share
+an `edge` network. Containers on either network cannot bypass JWT validation by
+connecting to a code-server TCP port. The host administrator and containers with
+host Docker API access remain trusted and can override this isolation.
 
-- **403:** Missing or invalid token, including an expired session or incorrect AUD.
-- **503:** Workspace setup is still running, the backend is starting, Access settings are invalid/missing, key download is pending, or cached keys are older than 24 hours.
+Envoy uses the official, digest-pinned `envoyproxy/envoy` image directly in Compose.
+It runs as the image's unprivileged `envoy` user, with supplemental group 10000
+for socket access, all capabilities dropped, no privilege escalation, and a private
+temporary directory. Compose provides its bootstrap with mode 0444, and the backend
+socket volume is mounted read-only. The container root filesystem
+is writable because Compose injects inline configs by copying them into the container. The application image
+contains no Envoy binary. Envoy has no home-volume or Docker-socket mount, and its
+admin interface listens only on its own loopback address, port 9901.
 
-WebSocket tokens are validated when the connection opens. Idle tunnels close after
-one hour; on reload, old workers are forcibly stopped after one hour. Hourly key
-refreshes therefore bound existing sockets to roughly two hours when refreshes
-succeed. Active sockets are not revalidated at token expiry, and failed refreshes
-can delay the next reload. For immediate revocation, remove the user or service token
-from the Access policy, revoke their Access sessions in Cloudflare, then run
-`docker compose restart code-server` with the deployment's usual Compose options
-to disconnect existing sockets. Removing an origin allowlist entry requires
-`manage start` to recreate the container with its updated environment.
+Compose's native `configs.content` interpolation renders the bootstrap defined in
+`compose.yaml` and mounts it read-only at `/etc/envoy/envoy.json`. This requires
+Docker Compose 2.23.1 or newer. There is no configuration container, renderer script,
+key-refresh helper, PEM conversion, or periodic proxy reload.
 
-Signing keys refresh hourly, with retries every minute on failure. Startup blocks
-access until keys are fetched. The health check verifies supervised services,
-nested Docker, code-server, and HAProxy's rejection of unauthenticated requests.
-HAProxy starts before home-directory setup and first-start Homebrew installation.
-Cloudflared starts alongside the container, so visitors see a 503 pending-startup
-page while setup runs. The page retries every five seconds. Once setup finishes,
-code-server starts as `cloud-user`; JWT validation remains required for access.
-Initialization failures retain the Homebrew retry marker and restart the container.
-The container becomes healthy only after setup, backend services, and Access
-validation are ready.
-Customize `build/runtime/access-403.html` and `build/runtime/access-503.html` and rebuild.
+Envoy's native JWT filter checks signatures, issuer, audience, required expiration,
+and not-before timestamps with one second of clock tolerance; RBAC restricts the
+verified algorithm to RS256. Small inline Lua filters validate startup settings,
+reject duplicate or missing JWT headers, and match the optional literal email and
+service-token allowlists against verified claims. Invalid settings prevent Envoy
+from starting. Cookies, bearer tokens, and query parameters are not accepted as
+substitutes for `Cf-Access-Jwt-Assertion`.
+
+Envoy downloads JWKS over HTTPS with CA and team-hostname verification when a worker
+first needs keys, and caches them for one hour per worker. After cache expiry, a
+request must fetch fresh keys successfully before it can authenticate. Failed fetches
+are retried twice; requests stay blocked if no unexpired keys are available. Requests
+can continue using still-valid cached keys during an outage. Asynchronous refresh is
+intentionally disabled because it can retain stale keys during a prolonged outage.
+A newly introduced signing key may be rejected until the current cache expires.
+
+- **403:** Missing, duplicated, malformed, expired, or otherwise invalid token; incorrect AUD; denied identity; or signing keys unavailable when verification needs a fetch.
+- **503:** A valid authenticated request reaches Envoy while workspace setup is running or the backend is unavailable.
+- **Connection unavailable:** Envoy is stopped or its environment configuration is missing/invalid. Check `docker compose logs envoy`.
+
+The 403 and 503 pages include troubleshooting steps; the 503 page retries every five
+seconds. Customize `local_reply_config` in the `envoy-bootstrap` config in `compose.yaml`
+to change the error pages.
+
+WebSocket tokens are checked when the connection opens. Idle streams close after
+one hour, and all streams have an absolute two-hour lifetime, independent of key
+refresh success. Open sockets are not revalidated when their JWT expires. To revoke
+access immediately, remove the user or service token from the Access policy, revoke
+its Access sessions, then run `docker compose restart envoy` with the deployment's
+usual Compose options to disconnect existing sockets. Apply origin allowlist changes
+with `manage start`, which recreates Envoy with its updated environment and bootstrap.
+
+Envoy starts alongside workspace setup, so authenticated visitors can see the startup
+page while Homebrew installs. The code-server health check verifies completed workspace initialization, running
+supervised services, nested Docker, and the backend Unix socket. The separate Envoy health check
+verifies listener readiness and rejection of unauthenticated requests; it does not
+prove that a JWKS fetch will succeed or that a particular user can authenticate.
+Initialization failures retain the Homebrew retry marker and restart code-server.
 
 ## Operation and customization
 
@@ -456,8 +507,8 @@ code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Doc
 group access. Supervisor manages the services; the container runs privileged for
 Docker-in-Docker. Startup repairs the home directory owner; recursive repair is opt-in.
 If any supervised service exhausts its startup retries, Supervisor shuts down so
-Docker's restart policy can restart the container. Missing Access configuration
-reports unhealthy and keeps access blocked until corrected.
+Docker's restart policy can restart the container. Missing or invalid Access
+configuration prevents Envoy from starting until corrected.
 
 Save projects under `/home/cloud-user`; `/workspace` is not provided.
 
@@ -475,6 +526,17 @@ when needed. Installation is limited to 600 seconds by default; set
 `HOMEBREW_INSTALL_TIMEOUT` to change it. Failure or timeout stops startup and
 retains a marker so incomplete installations are retried.
 
+Supervisor runs `initialize-workspace.py` to prepare the private socket directory and mounted
+home directory, and call `preinstall.sh` to install prerequisites such as Homebrew.
+Only successful initialization starts code-server, which Supervisor runs directly as `cloud-user`. Restarting the
+code-server service does not repeat workspace initialization.
+
+Envoy runs as a separate Compose service using the upstream image. Compose mounts its
+interpolated bootstrap directly; changing Access settings with `manage start`
+recreates Envoy.
+Code-server starts with `--socket` and removes a stale socket before binding it;
+restarting either service does not require restarting the other.
+
 If reusing the previous home-volume layout, move its existing contents into a
 `cloud-user/` subdirectory before restarting with this mount. Startup creates the home directory as needed
 without changing ownership of its contents or other home directories.
@@ -485,7 +547,8 @@ critical: the health check requires it to be running, and repeated startup failu
 restarts the container.
 
 Files shipped in the application image live in `build/runtime/`, including startup
-scripts, service configuration, and error pages. Build-only version and checksum
+scripts and Supervisor configuration. Envoy configuration and error pages are
+embedded in `compose.yaml`. Build-only version and checksum
 files stay beside `build/Dockerfile`. Host installation and restore helpers live
 in `build/tools/`; tests stay in `build/tests/`. Compose files stay at the project root.
 

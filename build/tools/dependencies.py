@@ -198,16 +198,22 @@ def plan(root, prepare=True):
     if workflow != (root / WORKFLOW).read_text():
         edits[WORKFLOW] = workflow
     resolved = {}
+    envoy_tag = None
     for file in COMPOSE:
         content = edits.get(file, (root / file).read_text())
         for repo, tag, digest in IMAGE.findall(content):
-            key = (repo, tag)
+            new_tag = tag
+            if repo == 'envoyproxy/envoy':
+                if envoy_tag is None:
+                    envoy_tag = checked(github(repo, 'releases/latest')['tag_name'], r'v\d+\.\d+\.\d+')
+                new_tag = envoy_tag
+            key = (repo, new_tag)
             if key not in resolved:
-                resolved[key] = image_digest(repo, tag)
+                resolved[key] = image_digest(repo, new_tag)
             new_digest = resolved[key]
             label = repo if repo in current else repo + ':' + tag
-            latest[label] = f'{tag} @ sha256:{new_digest}'
-            content = content.replace(f'{repo}:{tag}@sha256:{digest}', f'{repo}:{tag}@sha256:{new_digest}')
+            latest[label] = f'{new_tag} @ sha256:{new_digest}'
+            content = content.replace(f'{repo}:{tag}@sha256:{digest}', f'{repo}:{new_tag}@sha256:{new_digest}')
         if content != (root / file).read_text():
             edits[file] = content
     return current, latest, edits

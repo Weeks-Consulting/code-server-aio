@@ -1,5 +1,5 @@
 #!/bin/bash
-# Readiness: all services running, nested Docker ready, proxy enforcing Access.
+# Readiness: all services running, nested Docker ready, workspace socket ready.
 set -euo pipefail
 
 not_ready() {
@@ -7,20 +7,28 @@ not_ready() {
     exit 1
 }
 
-# supervisorctl exits nonzero unless every program and event listener is RUNNING.
-status=$(timeout 3 /usr/bin/supervisorctl status 2>&1) || not_ready $'services not running:\n'"$status"
+# Supervisor reports EXITED initializers with a nonzero status. Inspect states
+# explicitly so readiness cannot race its pending `start code-server` command.
+result=0
+status=$(timeout 3 /usr/bin/supervisorctl status service-events dockerd code-server initialize-workspace 2>&1) || result=$?
+[[ "$result" == 0 || "$result" == 3 ]] || not_ready "$status"
+while read -r service state _; do
+    case "$service:$state" in
+        service-events:RUNNING|dockerd:RUNNING|code-server:RUNNING|initialize-workspace:EXITED) ;;
+        *) not_ready "services not ready: $status" ;;
+    esac
+done <<< "$status"
 
 docker_info=$(timeout 3 /usr/bin/docker info --format '{{.ServerVersion}}' 2>&1) \
     || not_ready "Docker is not ready: $docker_info"
 
 check_http() {
     local url=$1 expected=$2 code
-    code=$(curl --noproxy '*' --silent --show-error --location --max-time 2 \
+    code=$(curl --unix-socket /run/code-server/backend.sock --noproxy '*' --silent --show-error --location --max-time 2 \
         --output /dev/null --write-out '%{http_code}' "$url") \
         || not_ready "Request to $url failed"
     [[ "$code" == "$expected" ]] \
         || not_ready "$url returned $code, expected $expected"
 }
 
-check_http http://127.0.0.1:8081/healthz 200
-check_http http://127.0.0.1:8080/ 403
+check_http http://localhost/healthz 200

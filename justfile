@@ -21,7 +21,7 @@ check:
 # Build once and run all local checks and integration tests.
 test: check test-proxy test-smoke test-backup
 
-# Test JWT validation, key rotation, error pages, and WebSocket reloads.
+# Test JWT validation, key rotation, error pages, WebSocket lifetimes, and backend isolation.
 test-proxy: build
     ./build/tests/proxy.sh {{quote(image)}}
 

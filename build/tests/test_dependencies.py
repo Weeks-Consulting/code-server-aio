@@ -51,6 +51,8 @@ class DependencyTests(unittest.TestCase):
         for name in ('compose.backup.yaml', 'compose.backup-local.yaml'):
             self.assertIn('sha256:' + 'c' * 64, edits[name])
         self.assertNotIn('# v6\n', edits[deps.WORKFLOW])
+        self.assertEqual(latest['envoyproxy/envoy'], 'v99.0.0 @ sha256:' + 'c' * 64)
+        self.assertIn('envoyproxy/envoy:v99.0.0@sha256:' + 'c' * 64, edits['compose.yaml'])
         self.assertIn('catthehacker/ubuntu', latest)
         self.assertEqual(edits['build/tests/actions.sh'].count('@sha256:' + 'c' * 64), 2)
 

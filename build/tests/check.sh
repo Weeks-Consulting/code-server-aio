@@ -8,11 +8,13 @@ for script in build/runtime/*.sh; do bash -n "$script"; done
 command -v shellcheck >/dev/null || { echo 'Install shellcheck to run checks.' >&2; exit 1; }
 shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runtime/*.sh
 python3 build/tests/test_manage.py
+python3 build/tests/test_install.py
 python3 build/tests/test_release.py
 python3 build/tests/test_actions.py
 python3 build/tests/test_dependencies.py
 python3 build/tests/test_backup_key.py
 python3 build/tests/test_start.py
+python3 build/tests/test_supervisor_events.py
 sh -n build/runtime/homebrew.sh
 
 # Configuration checks use a disposable passphrase, never a deployment key.
@@ -49,6 +51,27 @@ for overlay in ("compose.backup.yaml", "compose.backup-local.yaml"):
         "-f", overlay, "config", "--quiet",
     ], env={**os.environ, "GPG_PASSPHRASE": ""}, capture_output=True, text=True)
     assert result.returncode != 0 and "GPG_PASSPHRASE" in result.stderr
+
+# Only the application and Envoy receive the socket volume. No backend TCP port.
+base = model("compose.backup.yaml")
+services = base["services"]
+app, envoy, tunnel = (services[name] for name in ("code-server", "envoy", "cloudflared"))
+assert not app.get("ports") and not app.get("expose")
+assert set(app["networks"]).isdisjoint(envoy["networks"])
+assert set(app["networks"]).isdisjoint(tunnel["networks"])
+socket_users = {name for name, service in services.items() if any(
+    volume.get("source") == "code-server-socket" for volume in service.get("volumes", []))}
+assert socket_users == {"code-server", "envoy"}
+assert next(volume for volume in envoy["volumes"] if volume["target"] == "/run/code-server")["read_only"]
+assert envoy["image"].startswith("envoyproxy/envoy:") and not envoy.get("build")
+assert "envoy-config" not in services
+assert next(config for config in envoy["configs"] if config["target"] == "/etc/envoy/envoy.json")["source"] == "envoy-bootstrap"
+bootstrap = json.loads(base["configs"]["envoy-bootstrap"]["content"])
+assert bootstrap["static_resources"]["clusters"][0]["load_assignment"]["endpoints"][0]["lb_endpoints"][0]["endpoint"]["address"]["pipe"]["path"] == "/run/code-server/backend.sock"
+assert envoy["user"] == "envoy" and "10000" in envoy["group_add"]
+assert "ALL" in envoy["cap_drop"]
+assert not envoy.get("privileged")
+assert not any(volume["target"] in ("/home", "/var/run/docker.sock") for volume in envoy["volumes"])
 
 deployments = []
 for project in ("isolation-a", "isolation-b"):

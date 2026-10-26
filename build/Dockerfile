@@ -19,11 +19,9 @@ RUN version=${CODE_SERVER_VERSION:-$(cat /tmp/code-server.version)} && \
         docker.io \
         file \
         git \
-        haproxy \
         locales \
         procps \
         python3 \
-        python3-cryptography \
         sudo \
         supervisor && \
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
@@ -59,14 +57,13 @@ ENV LANG=en_US.UTF-8 \
     HOME=/home/cloud-user
 
 WORKDIR /home/cloud-user
-EXPOSE 8080
 
 COPY --chmod=755 build/runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY build/runtime/initialize-workspace.py /usr/local/lib/initialize-workspace.py
+COPY build/runtime/preinstall.sh /usr/local/lib/preinstall.sh
 COPY build/runtime/start-code-server.sh /usr/local/lib/start-code-server.sh
 COPY build/runtime/supervisord.conf /etc/supervisor/supervisord.conf
-COPY build/runtime/access-proxy.py /usr/local/lib/access-proxy.py
-COPY build/runtime/access-403.html build/runtime/access-503.html /etc/haproxy/errors/
 COPY build/runtime/homebrew.sh /etc/profile.d/homebrew.sh
-COPY build/runtime/supervisor-events.sh /usr/local/lib/supervisor-events.sh
+COPY build/runtime/supervisor-events.py /usr/local/lib/supervisor-events.py
 COPY --chmod=755 build/runtime/container-healthcheck.sh /usr/local/bin/container-healthcheck
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

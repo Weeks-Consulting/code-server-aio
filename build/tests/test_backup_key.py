@@ -91,26 +91,25 @@ class BackupKeyTests(unittest.TestCase):
         # Serve the workspace's release files without any network requests.
         tools = self.directory / "bin"
         tools.mkdir()
-        curl = tools / "curl"
-        curl.write_text(
-            "#!/usr/bin/env python3\nimport pathlib, shutil, sys\n"
-            "args = sys.argv[1:]\n"
-            "url = next(a for a in args if a.startswith('https://'))\n"
-            "if url.endswith('/SHA256SUMS'):\n"
-            "    if __import__('os').environ.get('NO_CHECKSUMS'): print('404', end=''); sys.exit()\n"
-            f"    root = pathlib.Path({str(ROOT)!r})\n"
-            "    files = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'build/tools/backup-key.sh', 'build/tools/restore-home.sh')\n"
-            "    import hashlib\n"
-            "    content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files)\n"
-            "    if __import__('os').environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], '0' * 64)\n"
-            "    pathlib.Path(args[args.index('--output') + 1]).write_text(content)\n"
-            "    print('200', end=''); sys.exit()\n"
-            "if url.endswith('/releases/latest'): print('https://github.com/Weeks-Consulting/code-server-aio/releases/tag/v4.141.0-1', end=''); sys.exit()\n"
-            "relative = url.split('/refs/tags/v4.141.0-1/', 1)[1]\n"
-            f"shutil.copyfile(pathlib.Path({str(ROOT)!r}) / relative, args[args.index('--output') + 1])\n"
-            "if '--write-out' in args: print('200', end='')\n"
+        # Patch the Python HTTP boundary while exercising the real launcher.
+        (tools / "sitecustomize.py").write_text(
+            "import hashlib, io, json, os, pathlib, platform, subprocess, urllib.request, urllib.error\n"
+            f"root = pathlib.Path({str(ROOT)!r})\n"
+            f"tools = pathlib.Path({str(self.directory / 'bin')!r})\n"
+            "def response(request, timeout):\n"
+            "    url = request.full_url\n"
+            "    if url.endswith('/SHA256SUMS'):\n"
+            "        if os.environ.get('NO_CHECKSUMS'): raise urllib.error.HTTPError(url, 404, 'missing', {}, None)\n"
+            "        files = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.sh', 'build/tools/restore-home.sh')\n"
+            "        content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files).encode()\n"
+            "        if os.environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], b'0' * 64)\n"
+            "        return io.BytesIO(content)\n"
+            "    if url.endswith('/releases/latest'): return io.BytesIO(b'{\"tag_name\":\"v4.141.0-1\"}')\n"
+            "    return io.BytesIO((root / url.split('/refs/tags/v4.141.0-1/', 1)[1]).read_bytes())\n"
+            "urllib.request.urlopen = response\n"
+            "if (tools / 'uname').exists(): platform.system = lambda: subprocess.check_output([str(tools / 'uname')], text=True).strip()\n"
+            "if (tools / 'id').exists(): os.geteuid = lambda: int(subprocess.check_output([str(tools / 'id')], text=True).strip())\n"
         )
-        curl.chmod(0o755)
         # Installation tests must never invoke a real package manager or daemon.
         for name, body in {
             "docker": "exit 0",
@@ -126,7 +125,7 @@ class BackupKeyTests(unittest.TestCase):
         deployment = self.directory / "installed"
         command = ["sh", str(ROOT / "build/tools/install.sh"), "--version", "v4.141.0-1",
                    "--directory", str(deployment)]
-        env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}
+        env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "PYTHONPATH": str(tools)}
         return command, env, deployment
 
     def test_older_release_without_checksums_warns(self):
@@ -290,26 +289,16 @@ class BackupKeyTests(unittest.TestCase):
                     self.assertIn(package, log.read_text())
                     self.assertTrue((deployment / ".env").exists())
 
-    def test_installer_dry_run_detects_missing_runtime_tools(self):
+    def test_installer_requires_python_before_dependency_setup(self):
         command, env, deployment = self.installer_fixture()
         tools = self.directory / "bin"
-        (tools / "curl").unlink()
-        (tools / "gpg").unlink()
-        (tools / "grep").symlink_to(shutil.which("grep"))
-        (tools / "id").write_text("#!/bin/sh\necho 1000\n")
-        (tools / "id").chmod(0o755)
+        (tools / "dirname").symlink_to(shutil.which("dirname"))
         env["PATH"] = str(tools)
-        systems = ["Darwin"] + (["Linux"] if Path("/etc/debian_version").exists() else [])
-        for system in systems:
-            with self.subTest(system=system):
-                (tools / "uname").write_text(f"#!/bin/sh\necho {system}\n")
-                (tools / "uname").chmod(0o755)
-                result = subprocess.run(["/bin/sh", *command[1:], "--dry-run"],
-                                        env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                packages = "curl python gnupg" if system == "Darwin" else "curl python3 gnupg"
-                self.assertIn(packages, result.stdout)
-                self.assertFalse(deployment.exists())
+        result = subprocess.run(["/bin/sh", *command[1:], "--dry-run"],
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("python3", result.stderr)
+        self.assertFalse(deployment.exists())
 
     def test_installer_generates_and_preserves_key_on_refresh(self):
         command, env, deployment = self.installer_fixture()
@@ -370,7 +359,7 @@ class BackupKeyTests(unittest.TestCase):
                         args.append(value)
                     result = subprocess.run(args, cwd=self.directory, capture_output=True, text=True)
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(f"Missing value for {option}", result.stderr)
+                    self.assertIn(option, result.stderr)
         self.assertEqual(list(self.directory.iterdir()), [])
 
     def test_rejects_symlinks(self):

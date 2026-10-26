@@ -84,7 +84,9 @@ def finish(processes):
 
 
 try:
-    with tempfile.TemporaryDirectory(prefix='restore-gpg-') as gpg_home:
+    # GPG's agent creates Unix sockets here. Shared Docker TMPDIR paths (act,
+    # Docker Desktop) can exceed their length limit; this directory is host-only.
+    with tempfile.TemporaryDirectory(prefix='restore-gpg-', dir='/tmp') as gpg_home:
         # GNU tar rejects traversal and directory symlink attacks. The entire
         # archive is isolated under a new directory until layout validation.
         extract = '''

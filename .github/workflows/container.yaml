@@ -133,7 +133,7 @@ jobs:
           no-cache: ${{ needs.source.outputs.publish == 'true' }}
           cache-from: ${{ !env.ACT && format('type=gha,scope=container-{0}', matrix.arch) || '' }}
           cache-to: ${{ !env.ACT && format('type=gha,mode=max,scope=container-{0}', matrix.arch) || '' }}
-      - name: Test JWT validation, error pages, key rotation, and WebSockets
+      - name: Test Envoy JWT validation, key rotation, WebSockets, and backend isolation
         env:
           TEST_IMAGE: ${{ steps.image.outputs.name }}:test
         run: sh build/tests/proxy.sh "$TEST_IMAGE"
@@ -350,7 +350,7 @@ jobs:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
         run: |
           sha256sum compose.yaml compose.backup.yaml compose.backup-local.yaml .env.example \
-            manage build/tools/install.sh build/tools/restore-home.sh build/tools/backup-key.sh > SHA256SUMS
+            manage manage.py build/tools/install.sh build/tools/restore-home.sh build/tools/backup-key.sh > SHA256SUMS
       - name: Attest deployment checksums
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -360,4 +360,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
-        run: gh release upload "$RELEASE_TAG" build/tools/install.sh SHA256SUMS --clobber
+        run: gh release upload "$RELEASE_TAG" build/tools/install.sh manage.py SHA256SUMS --clobber
