@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: container-${{ github.workflow }}-${{ github.ref }}
+  # Only PR checks supersede earlier runs; every other run must reach completion.
+  group: container-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -245,6 +246,8 @@ jobs:
     concurrency:
       group: publish-${{ github.repository }}
       cancel-in-progress: false
+      # Keep the shared staging tag serialized without displacing pending publishes.
+      queue: max
     needs: [source, push]
     if: needs.source.outputs.publish == 'true'
     runs-on: ubuntu-24.04

@@ -118,6 +118,4 @@ Do not change these without discussing it first.
 
 ## Known issues and follow-ups
 
-<!-- TODO: Link to CODE_REVIEW.md items or track new ones here. -->
-
-See [CODE_REVIEW.md](CODE_REVIEW.md) for the remaining review findings.
+<!-- TODO: Track known issues and follow-ups here. -->

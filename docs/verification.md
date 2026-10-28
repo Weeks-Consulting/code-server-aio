@@ -15,8 +15,9 @@ remain mutable to support weekly security rebuilds; digest pins require delibera
 updates. Installer reruns preserve existing digest pins and warn that they were kept.
 `manage upgrade` deliberately replaces a digest pin with the latest release tag;
 verify and set a new digest instead if you want to keep deploying verified bytes.
-Image verification requires `gh` and may require GHCR authentication; it is an
-explicit deployment check. Bootstrap and deployment checksum attestation verification
+Image verification requires `gh` logged in to GitHub (`gh auth login --hostname github.com`
+or an exported `GH_TOKEN`), even for public images; see [installation](installation.md#install).
+It is an explicit deployment check. Bootstrap and deployment checksum attestation verification
 is mandatory and fails closed. Restrict package publishing to trusted maintainers.
 `manage start --pull` also warns when a version-tagged GHCR image differs from its repository's
 latest stable release, with a best-effort check that stays quiet on network errors. Starts without
@@ -24,7 +25,12 @@ latest stable release, with a best-effort check that stays quiet on network erro
 
 Release deployment checksums have GitHub artifact provenance. To verify their origin
 with GitHub CLI before using them, download `SHA256SUMS` from the selected release and
-run `gh attestation verify SHA256SUMS --repo Weeks-Consulting/code-server-aio`.
+run:
+
+```sh
+gh attestation verify SHA256SUMS --repo Weeks-Consulting/code-server-aio --signer-workflow Weeks-Consulting/code-server-aio/.github/workflows/container.yaml
+```
+
 Checksums downloaded from the same release verify file integrity; independent
 provenance verification also verifies the publishing repository and workflow.
 The current installer requires deployment checksums and the current file layout;
