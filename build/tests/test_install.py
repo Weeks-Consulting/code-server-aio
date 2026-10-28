@@ -106,6 +106,9 @@ class InstallationTests(unittest.TestCase):
             management.install(self.args)
 
     def test_root_rejects_writable_ancestors(self):
+        # act may run as root with TMPDIR on a root-owned Docker volume.
+        # Create the unsafe ancestor instead of relying on host temp permissions.
+        self.directory.parent.chmod(0o777)
         with patch.object(management.os, 'geteuid', return_value=0):
             with self.assertRaisesRegex(ValueError, 'Root installation requires'):
                 management.validate_destination(self.directory, [])
