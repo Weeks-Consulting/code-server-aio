@@ -108,7 +108,7 @@ class LauncherTests(unittest.TestCase):
             "    assert timeout == 2\n"
             "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
             "    assert request.full_url == 'https://api.github.com/repos/weeks-consulting/code-server-aio/releases/latest'\n"
-            "    return io.BytesIO(json.dumps({'tag_name': 'v9.0.0'}).encode())\n"
+            "    return io.BytesIO(os.environ.get('TEST_RELEASE', '{\"tag_name\": \"v9.0.0\"}').encode())\n"
             "urllib.request.urlopen = release\n")
         self.env["PYTHONPATH"] = str(self.root)
         for tag, offline, warn in (("1.0.0", False, True), ("9.0.0", False, False),
@@ -124,6 +124,19 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual("differs from latest release" in result.stderr, warn)
                 self.assertEqual(json.loads(self.log.read_text())[-5:], ["up", "--remove-orphans", "-d", "--pull", "always"])
+
+        # Invalid or non-stable upstream responses must not warn or block startup.
+        self.env.pop("TEST_OFFLINE", None)
+        self.env["TEST_MODEL"] = json.dumps({"services": {"code-server": {
+            "image": "ghcr.io/weeks-consulting/code-server-aio:1.0.0"}}})
+        for release in ({"tag_name": "invalid"}, {"tag_name": "v9.0.0", "draft": True},
+                        {"tag_name": "v9.0.0", "prerelease": True}):
+            with self.subTest(release=release):
+                self.env["TEST_RELEASE"] = json.dumps(release)
+                result = self.run_launcher("--pull")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("differs from latest release", result.stderr)
+                self.assertEqual(json.loads(self.log.read_text())[-2:], ["--pull", "always"])
 
     def test_upgrade_updates_only_image_and_does_not_start_services(self):
         (self.root / "sitecustomize.py").write_text(

@@ -2,6 +2,7 @@
 """Install and manage a published Compose deployment using Python's standard library."""
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,11 @@ import urllib.error
 import urllib.request
 
 
+TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
+DEFAULT_IMAGE = "ghcr.io/weeks-consulting/code-server-aio:latest"
+IMAGE_SETTING = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
+
+
 def fail(message):
     raise ValueError(message)
 
@@ -28,10 +34,9 @@ def helper(directory, name):
     fail(f"{name} helper is missing; reinstall this release.")
 
 
-def read_image_setting(original):
-    pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
-    matches = list(pattern.finditer(original))
-    image = "ghcr.io/weeks-consulting/code-server-aio:latest"
+def image_repository(original):
+    matches = list(IMAGE_SETTING.finditer(original))
+    image = DEFAULT_IMAGE
     if matches:
         value = matches[-1].group(1).strip()
         if value.startswith(("\"", "'")):
@@ -42,24 +47,27 @@ def read_image_setting(original):
             image = value[1:end]
         else:
             image = re.split(r"\s+#", value, 1)[0].strip()
-    image = image or "ghcr.io/weeks-consulting/code-server-aio:latest"
+    image = image or DEFAULT_IMAGE
     match = re.fullmatch(r"ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+)(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?", image)
     if not match:
         raise ValueError("CODE_SERVER_IMAGE must name a ghcr.io/owner/repo image")
-    repository = match[1]
-    return pattern, matches, repository
+    return match[1]
 
 
-def latest_tag(repository):
+def stable_tag(release):
+    tag = release["tag_name"]
+    if release.get("draft") or release.get("prerelease") or not re.fullmatch(TAG, tag):
+        fail("GitHub returned an invalid stable release tag")
+    return tag
+
+
+def latest_tag(repository, timeout=15):
     request = urllib.request.Request(
         "https://api.github.com/repos/" + repository + "/releases/latest",
         headers={"User-Agent": "code-server-aio-manage", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         release = json.load(response)
-    tag = release["tag_name"]
-    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[1-9]\d*)?", tag):
-        raise ValueError("GitHub returned an invalid stable release tag")
-    return tag
+    return stable_tag(release)
 
 
 def write_env_atomic(path, updated, owner):
@@ -78,29 +86,33 @@ def write_env_atomic(path, updated, owner):
             os.unlink(temporary)
 
 
+@contextmanager
+def env_lock(path):
+    # A stable sidecar keeps installers and key/image updates on the same inode.
+    descriptor = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as guard:
+        if path.exists():
+            owner, current = path.stat(), os.fstat(guard.fileno())
+            if (owner.st_uid, owner.st_gid) != (current.st_uid, current.st_gid):
+                os.fchown(guard.fileno(), owner.st_uid, owner.st_gid)
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        yield
+
+
 def upgrade(directory):
     path = directory / ".env"
     try:
         if path.is_symlink():
             raise ValueError("Expected a regular .env file, not a symlink")
-        lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        owner = path.stat()
-        lock_owner = os.fstat(lock)
-        if (lock_owner.st_uid, lock_owner.st_gid) != (owner.st_uid, owner.st_gid):
-            os.fchown(lock, owner.st_uid, owner.st_gid)
-        guard = os.fdopen(lock, "w")
-        fcntl.flock(guard, fcntl.LOCK_EX)
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("Expected a regular .env file")
-        owner = path.stat()
-        original = path.read_text()
-        pattern, matches, repository = read_image_setting(original)
-        selected = "ghcr.io/" + repository + ":" + latest_tag(repository)[1:]
-        setting = "CODE_SERVER_IMAGE=" + selected
-        updated = pattern.sub(lambda _: setting, original)
-        if not matches:
-            updated += ("" if not updated or updated.endswith("\n") else "\n") + setting + "\n"
-        write_env_atomic(path, updated, owner)
+        with env_lock(path):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("Expected a regular .env file")
+            owner = path.stat()
+            original = path.read_text()
+            repository = image_repository(original)
+            selected = "ghcr.io/" + repository + ":" + latest_tag(repository)[1:]
+            updated = replace_image_setting(original, selected)
+            write_env_atomic(path, updated, owner)
         print("Set CODE_SERVER_IMAGE=" + selected)
         print("Run manage --pull with your usual launch options to apply the upgrade.")
     except Exception as error:
@@ -130,13 +142,7 @@ def parser():
 
 
 def manage(args, directory):
-    if args.action != 'start' and (args.foreground or args.pull):
-        fail('--foreground and --pull are only supported by the start command')
     if args.action == 'restore':
-        if not args.archive or not args.volume:
-            fail('restore requires --archive FILE and --volume NAME')
-        if args.backup != 'none' or args.project_name:
-            fail('restore targets an explicit volume; omit --backup and --project-name')
         archive = os.path.abspath(args.archive)
         restore = helper(directory, 'restore-home.sh')
         if archive.endswith('.gpg') and not os.environ.get('BACKUP_GPG_PASSPHRASE'):
@@ -151,20 +157,12 @@ def manage(args, directory):
                 text=True, env=env)
             os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment']['BACKUP_GPG_PASSPHRASE']
         os.execvp('sh', ['sh', str(restore), archive, args.volume])
-    if args.archive or args.volume:
-        fail('--archive and --volume are only supported by restore')
-    if args.action == 'backup' and args.backup == 'none':
-        fail('backup requires --backup s3 or local')
-    if args.action == 'backups' and args.backup != 'local':
-        fail('backups requires --backup local; use your storage provider to list S3 archives')
     os.chdir(directory)
     if not (directory / '.env').is_file():
         fail('Configure .env in the deployment directory before starting.')
     if not os.access(directory / '.env', os.R_OK):
         fail('Cannot read .env. If installed as root, run manage with sudo.')
     if args.action == 'upgrade':
-        if args.backup != 'none' or args.project_name:
-            fail('upgrade only updates .env; omit --backup and --project-name')
         upgrade(directory)
         return
     command = ['docker', 'compose', '--project-directory', str(directory), '--env-file', str(directory / '.env')]
@@ -208,11 +206,8 @@ def warn_release(command):
         image = json.loads(model)['services']['code-server']['image']
         match = re.fullmatch(r'ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-[1-9]\d*)?)', image)
         if match:
-            request = urllib.request.Request('https://api.github.com/repos/' + match[1] + '/releases/latest',
-                                             headers={'User-Agent': 'code-server-aio-manage'})
-            with urllib.request.urlopen(request, timeout=2) as response:
-                latest = json.load(response)['tag_name']
-            if re.fullmatch(r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?', latest) and latest != 'v' + match[2]:
+            latest = latest_tag(match[1], timeout=2)
+            if latest != 'v' + match[2]:
                 print('Warning: CODE_SERVER_IMAGE differs from latest release ' + latest + '. Review .env before pulling; pinned older tags may miss security fixes.', file=sys.stderr)
     except Exception:
         pass  # Remain usable offline and with custom images.
@@ -225,7 +220,6 @@ DEPLOYMENT_FILES.update({
     'restore-home.sh': 'build/tools/restore-home.sh',
     'backup-key.py': 'build/tools/backup-key.py',
 })
-TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
 
 
 def validate_destination(directory, names):
@@ -330,14 +324,17 @@ def merge_settings(original, template, version):
 
 
 def select_image(text, image):
-    pattern = re.compile(r'^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$', re.M)
-    values = list(pattern.finditer(text))
+    values = list(IMAGE_SETTING.finditer(text))
     if values and re.search(r'@sha256:[a-fA-F0-9]{64}(?=[\s"\x27#]|$)', values[-1][1]):
         print('Warning: keeping existing CODE_SERVER_IMAGE digest pin; verify a new digest or run manage upgrade to deliberately replace it.', file=sys.stderr)
         return text
+    return replace_image_setting(text, image)
+
+
+def replace_image_setting(text, image):
     setting = 'CODE_SERVER_IMAGE=' + image
-    if values:
-        return pattern.sub(lambda _: setting, text)
+    if IMAGE_SETTING.search(text):
+        return IMAGE_SETTING.sub(lambda _: setting, text)
     return text + ('' if not text or text.endswith('\n') else '\n') + setting + '\n'
 
 
@@ -369,9 +366,7 @@ def install(args):
         return
     if not version:
         release = json.loads(download(f'https://api.github.com/repos/{repository}/releases/latest'))
-        version = release['tag_name']
-        if release.get('draft') or release.get('prerelease') or not re.fullmatch(TAG, version):
-            fail('GitHub returned an invalid stable release tag')
+        version = stable_tag(release)
     base = f'https://raw.githubusercontent.com/{repository}/refs/tags/{version}'
     sources = {**DEPLOYMENT_FILES, '.env.example': '.env.example'}
     try:
@@ -401,15 +396,7 @@ def install(args):
         destination.chmod(0o755 if name == 'manage' or name.endswith('.sh') else 0o644)
         print(f'Updated {destination}')
     env = directory / '.env'
-    # Share the same lock as startup key generation and image upgrades.
-    lock = os.open(str(env) + '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    if env.exists():
-        owner = env.stat()
-        current = os.fstat(lock)
-        if (owner.st_uid, owner.st_gid) != (current.st_uid, current.st_gid):
-            os.fchown(lock, owner.st_uid, owner.st_gid)
-    with os.fdopen(lock, 'w') as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
+    with env_lock(env):
         text = merge_settings(env.read_text(), template, version) if env.exists() else template
         text = select_image(text, image)
         env.touch(mode=0o600, exist_ok=True)
@@ -421,19 +408,39 @@ def install(args):
     print(f'Then run sh "{directory}/manage" to launch. No services have been started.')
 
 
-def main():
-    cli = parser()
-    args = cli.parse_args()
+def validate_args(args):
     for option in ('directory', 'repository', 'version', 'project_name', 'archive', 'volume'):
         if getattr(args, option) == '':
             fail('Missing value for --' + option.replace('_', '-'))
     if args.action == 'install':
         if args.backup != 'none' or args.foreground or args.pull or args.project_name or args.archive or args.volume:
             fail('install does not support startup, backup, or restore options')
+        return
+    if args.directory is not None or args.repository is not None or args.version is not None or args.dry_run:
+        fail('--directory, --repository, --version, and --dry-run are only supported by install')
+    if args.action != 'start' and (args.foreground or args.pull):
+        fail('--foreground and --pull are only supported by the start command')
+    if args.action == 'restore':
+        if not args.archive or not args.volume:
+            fail('restore requires --archive FILE and --volume NAME')
+        if args.backup != 'none' or args.project_name:
+            fail('restore targets an explicit volume; omit --backup and --project-name')
+    elif args.archive or args.volume:
+        fail('--archive and --volume are only supported by restore')
+    if args.action == 'backup' and args.backup == 'none':
+        fail('backup requires --backup s3 or local')
+    if args.action == 'backups' and args.backup != 'local':
+        fail('backups requires --backup local; use your storage provider to list S3 archives')
+    if args.action == 'upgrade' and (args.backup != 'none' or args.project_name):
+        fail('upgrade only updates .env; omit --backup and --project-name')
+
+
+def main():
+    args = parser().parse_args()
+    validate_args(args)
+    if args.action == 'install':
         install(args)
     else:
-        if args.directory is not None or args.repository is not None or args.version is not None or args.dry_run:
-            fail('--directory, --repository, --version, and --dry-run are only supported by install')
         manage(args, Path(__file__).resolve().parent)
 
 

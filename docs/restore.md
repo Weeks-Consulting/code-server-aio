@@ -79,4 +79,4 @@ Archives made before the `/home` mount change need their user files moved into
 `cloud-user/` after restoration. Restore Homebrew onto the same CPU architecture.
 
 Run `just test-backup` to exercise archive creation, in-place restoration, rollback
-contents, hidden files, shared home directories, and ownership without S3.
+contents, hidden files, shared home directories, and ownership for local and S3 backups.

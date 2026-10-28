@@ -3,6 +3,8 @@
 set -eu
 image=${1:?Pass the application image}
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=build/tests/backup-common.sh
+. "$script_dir/backup-common.sh"
 project_dir=$(cd -- "$script_dir/../.." && pwd)
 prefix="code-server-s3-$$"
 source_volume="${prefix}_code-server-home"
@@ -32,9 +34,7 @@ cleanup() {
     docker rm -f "$app_name" >/dev/null 2>&1 || true
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
     docker volume rm "$source_volume" "$prefix-restored" >/dev/null 2>&1 || true
-    docker run --rm --network none --mount "type=bind,src=$archive_dir,dst=/test-archives" \
-        --entrypoint /bin/sh "$image" -ec 'find /test-archives -mindepth 1 -delete' >/dev/null
-    rmdir "$archive_dir"
+    remove_test_archives
     exit "$result"
 }
 trap cleanup EXIT
@@ -55,25 +55,11 @@ until s3 "http://rustfs:9000/" > /dev/null 2>&1; do
     sleep 1
 done
 s3 -X PUT "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME"
-docker volume create --label "com.docker.compose.project=$prefix" \
-    --label com.docker.compose.volume=code-server-home "$source_volume" >/dev/null
-docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/data" \
-    --entrypoint /bin/sh "$image" -ec '
-        mkdir -p /data/cloud-user/.config /data/linuxbrew
-        echo saved-settings > /data/cloud-user/.config/sentinel
-        echo saved-brew > /data/linuxbrew/sentinel
-        chown -R 10000:10000 /data
-        echo low-owner > /data/low-uid
-        chown 1:13 /data/low-uid
-    '
-docker run -d --name "$app_name" \
-    --label "docker-volume-backup.stop-during-backup=$prefix-home" \
-    --mount "type=volume,src=$source_volume,dst=/home" \
-    --entrypoint /usr/bin/sleep "$image" infinity >/dev/null
+# A lightweight application verifies backup stop/restart behavior.
+start_backup_fixture
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
 compose run --rm --no-deps --entrypoint backup backup
-test "$(docker inspect -f '{{.State.Running}}' "$app_name")" = true
-test "$(docker inspect -f '{{.State.StartedAt}}' "$app_name")" != "$started_before"
+assert_backup_restarted_app
 echo 'PASS: S3 backup stopped and restarted the labeled application.'
 # List the whole bucket so an upload to an unexpected prefix also fails.
 s3 "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME?list-type=2" > "$archive_dir/objects.xml"
@@ -99,12 +85,5 @@ echo 'PASS: One encrypted archive uploaded under the expected S3 prefix.'
 docker volume create "$prefix-restored" >/dev/null
 RESTORE_IMAGE="$image" sh "$script_dir/../tools/restore-home.sh" \
     "$archive_dir/backup.tar.gz.gpg" "$prefix-restored"
-docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
-    --entrypoint /bin/sh "$image" -ec '
-        grep -qx saved-settings /data/cloud-user/.config/sentinel
-        grep -qx saved-brew /data/linuxbrew/sentinel
-        grep -qx low-owner /data/low-uid
-        test "$(stat -c %u:%g /data/cloud-user/.config/sentinel)" = 10000:10000
-        test "$(stat -c %u:%g /data/low-uid)" = 1:13
-    '
+assert_restored_home
 echo 'PASS: S3 backup/restore round trip preserved contents and numeric owners.'

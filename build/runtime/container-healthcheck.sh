@@ -20,18 +20,14 @@ docker_info=$(timeout 3 /usr/bin/docker info --format '{{.ServerVersion}}' 2>&1)
 
 check_http() {
     local url=$1 expected=$2 code
-    code=$(curl --unix-socket /run/code-server/backend.sock --noproxy '*' --silent --show-error --location --max-time 2 \
-        --output /dev/null --write-out '%{http_code}' "$url") \
+    shift 2
+    code=$(curl --noproxy '*' --silent --show-error --max-time 2 \
+        --output /dev/null --write-out '%{http_code}' "$@" "$url") \
         || not_ready "Request to $url failed"
     [[ "$code" == "$expected" ]] \
         || not_ready "$url returned $code, expected $expected"
 }
 
-check_http http://localhost/healthz 200
-
-for endpoint in '9901 /ready 200' '8080 / 403'; do
-    read -r port path expected <<< "$endpoint"
-    code=$(curl --noproxy '*' --silent --show-error --max-time 2 --output /dev/null \
-        --write-out '%{http_code}' "http://127.0.0.1:$port$path") || not_ready "Envoy request failed"
-    [[ "$code" == "$expected" ]] || not_ready "Envoy $path returned $code, expected $expected"
-done
+check_http http://localhost/healthz 200 --unix-socket /run/code-server/backend.sock --location
+check_http http://127.0.0.1:9901/ready 200
+check_http http://127.0.0.1:8080/ 403

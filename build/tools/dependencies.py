@@ -253,16 +253,16 @@ def plan(root, prepare=True, scope=None):
 
 
 def show(current, latest=None, hide_hashes=True):
-    def display(name, value):
+    def display(value):
         if not hide_hashes:
             return value
         return value.split(' @ ', 1)[0]
 
     for name, value in current.items():
-        print(f'{name}: {display(name, value)}', flush=True)
+        print(f'{name}: {display(value)}', flush=True)
         if latest is not None:
             status = ' (current)' if value == latest[name] else ' (update available)'
-            print(f'  latest: {display(name, latest[name])}{status}', flush=True)
+            print(f'  latest: {display(latest[name])}{status}', flush=True)
 
 
 def main():
