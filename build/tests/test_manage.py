@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -22,8 +23,8 @@ class LauncherTests(unittest.TestCase):
         self.script = self.deployment / "manage"
         self.script.write_bytes(SCRIPT.read_bytes())
         (self.deployment / "manage.py").write_bytes((SCRIPT.parent / "manage.py").read_bytes())
-        (self.deployment / "backup-key.sh").write_bytes(
-            (SCRIPT.parent / "build/tools/backup-key.sh").read_bytes())
+        (self.deployment / "backup-key.py").write_bytes(
+            (SCRIPT.parent / "build/tools/backup-key.py").read_bytes())
         (self.deployment / "restore-home.sh").write_bytes(
             (SCRIPT.parent / "build/tools/restore-home.sh").read_bytes())
         for name in (".env", "compose.yaml",
@@ -35,7 +36,7 @@ class LauncherTests(unittest.TestCase):
             '#!/usr/bin/env python3\nimport json, os, sys\n'
             'from pathlib import Path\n'
             'Path(os.environ["ARGUMENT_LOG"]).write_text(json.dumps(sys.argv[1:]))\n'
-            'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("LOCAL_BACKUP_UID", "LOCAL_BACKUP_GID")}))\n'
+            'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("BACKUP_LOCAL_UID", "BACKUP_LOCAL_GID")}))\n'
             'if sys.argv[-3:] == ["config", "--format", "json"]: print(os.environ.get("TEST_MODEL", ""))\n'
             'sys.exit(int(os.environ.get("DOCKER_EXIT", "0")))\n'
         )
@@ -86,8 +87,8 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 owner = json.loads(Path(str(self.log) + ".env").read_text())
                 self.assertEqual(owner, {
-                    "LOCAL_BACKUP_UID": str(os.getuid()),
-                    "LOCAL_BACKUP_GID": str(os.getgid()),
+                    "BACKUP_LOCAL_UID": str(os.getuid()),
+                    "BACKUP_LOCAL_GID": str(os.getgid()),
                 })
 
     def test_foreground_pull_and_project(self):
@@ -180,12 +181,12 @@ class LauncherTests(unittest.TestCase):
             try:
                 with self.assertRaises(subprocess.TimeoutExpired):
                     process.wait(timeout=0.3)
-                dotenv.write_text('CODE_SERVER_IMAGE=\nGPG_PASSPHRASE=newly-generated\n')
+                dotenv.write_text('CODE_SERVER_IMAGE=\nBACKUP_GPG_PASSPHRASE=newly-generated\n')
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 stdout, stderr = process.communicate(timeout=10)
             self.assertEqual(process.returncode, 0, stderr)
-            self.assertIn('GPG_PASSPHRASE=newly-generated', dotenv.read_text())
+            self.assertIn('BACKUP_GPG_PASSPHRASE=newly-generated', dotenv.read_text())
 
     @unittest.skipUnless(os.geteuid() == 0, 'requires root to model sudo ownership')
     def test_upgrade_preserves_another_users_file_and_lock(self):
@@ -200,7 +201,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for path in (dotenv, self.deployment / '.env.lock'):
             self.assertEqual((path.stat().st_uid, path.stat().st_gid), (65534, 65534))
-        result = subprocess.run(['sh', str(self.deployment / 'backup-key.sh'), str(dotenv)],
+        result = subprocess.run([sys.executable, str(self.deployment / 'backup-key.py'), str(dotenv)],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((dotenv.stat().st_uid, dotenv.stat().st_gid), (65534, 65534))
@@ -284,11 +285,11 @@ class LauncherTests(unittest.TestCase):
 
     def test_backup_key_generated_and_preserved(self):
         dotenv = self.deployment / ".env"
-        dotenv.write_text("GPG_PASSPHRASE=\n")
+        dotenv.write_text("BACKUP_GPG_PASSPHRASE=\n")
         result = self.run_launcher("--backup", "local")
         self.assertEqual(result.returncode, 0, result.stderr)
         contents = dotenv.read_text()
-        self.assertRegex(contents, r"GPG_PASSPHRASE=[a-f0-9]{64}")
+        self.assertRegex(contents, r"BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}")
         result = self.run_launcher("backup", "--backup", "local")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(dotenv.read_text(), contents)

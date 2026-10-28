@@ -1,7 +1,6 @@
 """Run the production Compose topology with real code-server and disposable Access keys.
 
-The fixture and client have no backend socket mount. Only the fixture JWKS URL and
-Homebrew installer are replaced; production socket permissions and sidecar hardening apply.
+The fixture and client have no backend socket mount. Only the JWKS transport is replaced; production socket permissions and Supervisor lifecycle apply.
 """
 
 import base64
@@ -69,18 +68,17 @@ def blocked(host, port):
 
 def probe(expected, backend_ip):
     assert not Path('/run/code-server/backend.sock').exists(), 'Client has backend socket access'
-    # Even a client attached to the workspace network cannot reach a TCP backend.
+    # Even a client attached to the default network cannot reach a TCP backend.
     for host in ('code-server', backend_ip):
-        blocked(host, 8080)
         blocked(host, 8081)
-    blocked('envoy', 9901)
+    blocked('code-server', 9901)
     if expected == 'down':
-        blocked('envoy', 8080)
+        blocked('code-server', 8080)
         return
-    status, _ = request('envoy', 8080)
+    status, _ = request('code-server', 8080)
     assert status == 403, status
     _, token = request('fixture', 8088, '/token')
-    status, body = request('envoy', 8080, '/healthz', {'Cf-Access-Jwt-Assertion': token})
+    status, body = request('code-server', 8080, '/healthz', {'Cf-Access-Jwt-Assertion': token})
     assert status == int(expected), (status, body)
     if expected == '200':
         assert json.loads(body)['status'] in ('alive', 'expired'), body
@@ -99,24 +97,26 @@ def integration(image):
         overlay = directory / 'compose.json'
         mount = {'type': 'bind', 'source': str(Path(__file__).resolve()), 'target': '/tmp/isolation.py', 'read_only': True}
         override = {'services': {
-            'code-server': {'image': image},
-            'envoy': {'environment': {'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD,
+            'code-server': {'image': image, 'environment': {'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD,
                                      'CF_ACCESS_ALLOWED_EMAILS': 'user@example.com',
                                      'CF_ACCESS_ALLOWED_SERVICE_TOKENS': ''},
-                      'healthcheck': {'interval': '1s', 'start_period': '1s'}},
+                      'healthcheck': {'interval': '1s', 'start_period': '10s', 'retries': 30}},
             'fixture': {'image': image, 'entrypoint': ['/usr/bin/python3', '/tmp/isolation.py', '--fixture'],
-                        'volumes': [mount], 'networks': ['edge'], 'healthcheck': {
+                        'volumes': [mount], 'healthcheck': {
                             'test': ['CMD', 'curl', '-fsS', 'http://localhost:8088/token'],
                             'interval': '1s', 'timeout': '2s', 'retries': 20}},
             'client': {'image': image, 'entrypoint': ['/usr/bin/python3', '/tmp/isolation.py', '--probe'],
-                       'volumes': [mount], 'networks': ['edge', 'workspace']},
+                       'volumes': [mount]},
         }}
         compose = ['docker', 'compose', '--project-directory', str(root), '--project-name', project,
                    '--env-file', '/dev/null', '-f', str(root / 'compose.yaml'), '-f', str(overlay)]
-        env = {**os.environ, 'CLOUDFLARE_TUNNEL_TOKEN': 'test-only',
+        env = {**os.environ, 'CF_TUNNEL_TOKEN': 'test-only',
                'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD}
-        base = subprocess.check_output(compose[:-2] + ['config', '--format', 'json'], env=env, text=True)
-        config = json.loads(json.loads(base)['configs']['envoy-bootstrap']['content'].replace('$$', '$'))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('launcher', root / 'build/runtime/start-envoy.py')
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        config = launcher.render((root / 'build/runtime/envoy.json.template').read_text(), env)
         # Replace only the JWKS transport with the disposable local fixture.
         cluster = config['static_resources']['clusters'][1]
         del cluster['transport_socket']
@@ -124,46 +124,38 @@ def integration(image):
         address.update(address='fixture', port_value=8088)
         manager = config['static_resources']['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
         manager['http_filters'][2]['typed_config']['providers']['cloudflare']['remote_jwks']['http_uri']['uri'] = 'http://fixture:8088/certs'
-        override['configs'] = {'envoy-bootstrap': {'content': json.dumps(config).replace('$', '$$')}}
+        template = directory / 'envoy.json.template'
+        template.write_text(json.dumps(config))
+        override['services']['code-server']['volumes'] = [{'type': 'bind', 'source': str(template),
+            'target': '/etc/envoy/envoy.json.template', 'read_only': True}]
         overlay.write_text(json.dumps(override))
         def run(*args, **kwargs):
             return subprocess.check_output([*compose, *args], env=env, text=True, **kwargs)
         try:
-            run('run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'code-server', '-ec',
-                'mkdir -p /home/linuxbrew/.linuxbrew/bin; '
-                'printf "#!/bin/sh\\necho test-brew\\n" > /home/linuxbrew/.linuxbrew/bin/brew; '
-                'chmod +x /home/linuxbrew/.linuxbrew/bin/brew; chown -R 10000:10000 /home/linuxbrew')
-            run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server', 'envoy', 'fixture')
+            run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server', 'fixture')
             app = run('ps', '-q', 'code-server').strip()
             info = json.loads(subprocess.check_output(['docker', 'inspect', app], text=True))[0]
-            backend_ip = info['NetworkSettings']['Networks'][project + '_workspace']['IPAddress']
+            backend_ip = info['NetworkSettings']['Networks'][project + '_default']['IPAddress']
             run('run', '--rm', '--no-deps', 'client', '200', backend_ip)
-            sidecar = run('ps', '-q', 'envoy').strip()
-            info = json.loads(subprocess.check_output(['docker', 'inspect', sidecar], text=True))[0]
-            assert info['Config']['Image'].startswith('envoyproxy/envoy:')
-            assert info['Config']['User'] == 'envoy'
-            assert '10000' in info['HostConfig']['GroupAdd']
-            run('exec', '-T', 'envoy', '/bin/bash', '-ec',
-                'test ! -w /etc/envoy/envoy.json; test "$(stat -c %a /etc/envoy/envoy.json)" = 444')
-            assert 'ALL' in info['HostConfig']['CapDrop']
-            assert all(not mount['RW'] for mount in info['Mounts'] if mount['Destination'] == '/run/code-server')
-            # Compose applies changed Access settings without a renderer service.
+            # Access environment changes recreate the combined container.
             for email, expected in (('denied@example.com', '403'), ('user@example.com', '200')):
-                override['services']['envoy']['environment']['CF_ACCESS_ALLOWED_EMAILS'] = email
+                override['services']['code-server']['environment']['CF_ACCESS_ALLOWED_EMAILS'] = email
                 overlay.write_text(json.dumps(override))
-                run('up', '-d', '--wait', '--wait-timeout', '30', 'envoy')
+                run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server')
                 run('run', '--rm', '--no-deps', 'client', expected, backend_ip)
-            # Fresh configuration and empty in-memory key cache work on sidecar restart.
-            run('restart', 'envoy')
+            # Fresh configuration and empty in-memory key cache work on container restart.
+            run('restart', 'code-server')
+            run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server')
             time.sleep(2)
             run('run', '--rm', '--no-deps', 'client', '200', backend_ip)
-            run('stop', 'code-server')
+            run('exec', '-T', 'code-server', 'supervisorctl', 'stop', 'code-server')
             run('run', '--rm', '--no-deps', 'client', '503', backend_ip)
+            run('exec', '-T', 'code-server', 'supervisorctl', 'start', 'code-server')
             run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server')
             run('run', '--rm', '--no-deps', 'client', '200', backend_ip)
-            run('stop', 'envoy')
+            run('exec', '-T', 'code-server', 'supervisorctl', 'stop', 'envoy')
             run('run', '--rm', '--no-deps', 'client', 'down', backend_ip)
-            print('PASS: Unix-socket isolation, hardened Envoy, real code-server, restarts, and fail-closed routing.')
+            print('PASS: Unix-socket backend, supervised Envoy, real code-server, restarts, and fail-closed routing.')
         except BaseException:
             print(run('logs', '--no-color'), file=sys.stderr)
             raise

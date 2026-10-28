@@ -5,7 +5,7 @@ services:
       docker-volume-backup.stop-during-backup: ${COMPOSE_PROJECT_NAME}-home
 
   backup:
-    image: offen/docker-volume-backup:v2@sha256:570a4bea8c19f824b22a4ce31e01afdf418a7bb616dcb17052f0a78b504ac54c
+    image: offen/docker-volume-backup:v2@sha256:49fcfb2bdc6194ed4d7563d5ede75ff94f3a7435d15cbebae2ef816627944831
     # Root reads all archived owners; local copy hooks set the host file owner.
     user: "0:0"
     restart: unless-stopped
@@ -13,13 +13,13 @@ services:
       docker-volume-backup.exec-label: ${COMPOSE_PROJECT_NAME}-local-home
       docker-volume-backup.copy-pre: >-
         /bin/sh -ec 'chmod 700 /archive;
-        chown ${LOCAL_BACKUP_UID:-0}:${LOCAL_BACKUP_GID:-0} /archive'
+        chown ${BACKUP_LOCAL_UID:-0}:${BACKUP_LOCAL_GID:-0} /archive'
       docker-volume-backup.copy-post: >-
         /bin/sh -ec 'file="/archive/$${COMMAND_RUNTIME_ARCHIVE_FILEPATH##*/}";
-        chown ${LOCAL_BACKUP_UID:-0}:${LOCAL_BACKUP_GID:-0} "$$file";
+        chown ${BACKUP_LOCAL_UID:-0}:${BACKUP_LOCAL_GID:-0} "$$file";
         chmod 600 "$$file"'
     environment:
-      GPG_PASSPHRASE: ${GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
+      GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
       TZ: ${BACKUP_TIMEZONE:-America/Chicago}
       EXEC_LABEL: ${COMPOSE_PROJECT_NAME}-local-home
       BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}

@@ -29,7 +29,7 @@ class ActionsTests(unittest.TestCase):
                 tests.mkdir(parents=True)
                 script = tests / "actions.sh"
                 script.write_bytes((ROOT / "build/tests/actions.sh").read_bytes())
-                (tests / "act.version").write_bytes((ROOT / "build/tests/act.version").read_bytes())
+                pins = json.loads((ROOT / "build/build-versions.json").read_text())
                 log = root / "arguments.json"
                 executable = (f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
                               f"pathlib.Path({str(log)!r}).write_text(json.dumps(dict(args=sys.argv[1:], host=os.environ.get('DOCKER_HOST'))))\n").encode()
@@ -39,7 +39,8 @@ class ActionsTests(unittest.TestCase):
                     info.mode, info.size = 0o755, len(executable)
                     bundle.addfile(info, io.BytesIO(executable))
                 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-                (tests / "act.sha256").write_text(f"{digest}  act_{system}_{asset}.tar.gz\n")
+                pins["packages"]["act"]["sha256"] = {f"act_{system}_{asset}.tar.gz": digest}
+                (project / "build/build-versions.json").write_text(json.dumps(pins))
                 tools = root / "bin"
                 tools.mkdir()
                 (tools / "uname").write_text(f'#!/bin/sh\ncase "$1" in -s) echo {system};; -m) echo {machine};; esac\n')
@@ -75,6 +76,7 @@ class ActionsTests(unittest.TestCase):
                     self.assertNotIn("--container-daemon-socket", args)
                 self.assertEqual(args[-1], "--list")
                 self.assertIn("--rm", args)
+                self.assertEqual(args[args.index("--env-file") + 1], "/dev/null")
                 self.assertFalse(list(project.glob(".test-tmp.*")))
                 calls = docker_log.read_text() if docker_log.exists() else ""
                 self.assertNotIn('"volume"', calls)

@@ -10,16 +10,16 @@ app_name="$prefix-app"
 archive_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
 # Override deployment settings, including optional prefix/name settings inherited
 # from the caller. No real credentials or endpoints are used.
-AWS_ACCESS_KEY_ID=s3-test-access
-AWS_SECRET_ACCESS_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(24))')
-GPG_PASSPHRASE=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
-AWS_S3_BUCKET_NAME=backup-test
-AWS_ENDPOINT=rustfs:9000
-AWS_S3_BUCKET_LOOKUP=path
-AWS_S3_PATH="$prefix/home"
+BACKUP_AWS_ACCESS_KEY_ID=s3-test-access
+BACKUP_AWS_SECRET_ACCESS_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(24))')
+BACKUP_GPG_PASSPHRASE=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+BACKUP_AWS_S3_BUCKET_NAME=backup-test
+BACKUP_AWS_ENDPOINT=rustfs:9000
+BACKUP_AWS_S3_BUCKET_LOOKUP=path
+BACKUP_AWS_S3_PATH="$prefix/home"
 BACKUP_ID=$prefix
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY GPG_PASSPHRASE
-export AWS_S3_BUCKET_NAME AWS_ENDPOINT AWS_S3_BUCKET_LOOKUP AWS_S3_PATH BACKUP_ID
+export BACKUP_AWS_ACCESS_KEY_ID BACKUP_AWS_SECRET_ACCESS_KEY BACKUP_GPG_PASSPHRASE
+export BACKUP_AWS_S3_BUCKET_NAME BACKUP_AWS_ENDPOINT BACKUP_AWS_S3_BUCKET_LOOKUP BACKUP_AWS_S3_PATH BACKUP_ID
 compose() {
     docker compose --project-directory "$project_dir" --project-name "$prefix" \
         --env-file "$project_dir/.env.example" -f "$project_dir/compose.yaml" \
@@ -40,10 +40,10 @@ cleanup() {
 trap cleanup EXIT
 s3() {
     docker run --rm --network "${prefix}_default" \
-        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY --entrypoint /bin/sh "$image" -ec '
+        -e BACKUP_AWS_ACCESS_KEY_ID -e BACKUP_AWS_SECRET_ACCESS_KEY --entrypoint /bin/sh "$image" -ec '
         exec curl --silent --show-error --fail --connect-timeout 3 --max-time 10 \
             --aws-sigv4 aws:amz:us-east-1:s3 \
-            --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$@"
+            --user "$BACKUP_AWS_ACCESS_KEY_ID:$BACKUP_AWS_SECRET_ACCESS_KEY" "$@"
         ' sh "$@"
 }
 compose up -d rustfs
@@ -54,7 +54,7 @@ until s3 "http://rustfs:9000/" > /dev/null 2>&1; do
     if [ "$attempt" -ge 30 ]; then echo 'RustFS did not become ready.' >&2; exit 1; fi
     sleep 1
 done
-s3 -X PUT "http://rustfs:9000/$AWS_S3_BUCKET_NAME"
+s3 -X PUT "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME"
 docker volume create --label "com.docker.compose.project=$prefix" \
     --label com.docker.compose.volume=code-server-home "$source_volume" >/dev/null
 docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/data" \
@@ -76,7 +76,7 @@ test "$(docker inspect -f '{{.State.Running}}' "$app_name")" = true
 test "$(docker inspect -f '{{.State.StartedAt}}' "$app_name")" != "$started_before"
 echo 'PASS: S3 backup stopped and restarted the labeled application.'
 # List the whole bucket so an upload to an unexpected prefix also fails.
-s3 "http://rustfs:9000/$AWS_S3_BUCKET_NAME?list-type=2" > "$archive_dir/objects.xml"
+s3 "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME?list-type=2" > "$archive_dir/objects.xml"
 key=$(python3 - "$archive_dir/objects.xml" "$prefix" <<'PYTHON'
 import re, sys
 import xml.etree.ElementTree as ET
@@ -90,7 +90,7 @@ assert re.fullmatch(project + r"/home/" + project + r"-home-\d{4}-\d{2}-\d{2}T\d
 print(keys[0])
 PYTHON
 )
-s3 "http://rustfs:9000/$AWS_S3_BUCKET_NAME/$key" > "$archive_dir/backup.tar.gz.gpg"
+s3 "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME/$key" > "$archive_dir/backup.tar.gz.gpg"
 test -s "$archive_dir/backup.tar.gz.gpg"
 if tar -tzf "$archive_dir/backup.tar.gz.gpg" >/dev/null 2>&1; then
     echo 'S3 backup is not encrypted.' >&2; exit 1

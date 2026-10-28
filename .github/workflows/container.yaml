@@ -88,15 +88,15 @@ jobs:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
         run: |
           python3 - <<'PY'
-          import os, re
+          import json, os, re
           from pathlib import Path
-          version = Path("build/code-server.version").read_text().strip()
+          version = json.loads(Path("build/versions.json").read_text())["packages"]["code-server"]["version"]
           if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-              raise SystemExit("build/code-server.version must contain a version such as 4.141.0")
+              raise SystemExit("build/versions.json must contain a version such as 4.141.0")
           expected = "v" + version
           tag = os.environ["RELEASE_TAG"]
           if tag and not re.fullmatch(re.escape(expected) + r"(?:-[1-9][0-9]*)?", tag):
-              raise SystemExit(f"Release tag must be {expected} or {expected}-N (N >= 1) to match build/code-server.version (got {tag})")
+              raise SystemExit(f"Release tag must be {expected} or {expected}-N (N >= 1) to match build/versions.json (got {tag})")
           print(f"Building code-server {version}" + (f" for release {tag}" if tag else ""))
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"version={version}\n")
@@ -173,7 +173,7 @@ jobs:
     name: Host scripts (Debian sh)
     needs: source
     runs-on: ubuntu-24.04
-    container: debian:13@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308
+    container: debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -350,7 +350,7 @@ jobs:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
         run: |
           sha256sum compose.yaml compose.backup.yaml compose.backup-local.yaml .env.example \
-            manage manage.py build/tools/install.sh build/tools/restore-home.sh build/tools/backup-key.sh > SHA256SUMS
+            manage manage.py build/tools/install.sh build/tools/restore-home.sh build/tools/backup-key.py > SHA256SUMS
       - name: Attest deployment checksums
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

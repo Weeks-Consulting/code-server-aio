@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect repository pins and prepare an interactive upgrade plan with rollback on write failure."""
+"""Inspect and synchronize the pin manifest; prepare upgrades with rollback on write failure."""
 import argparse
 import hashlib
 import json
@@ -16,7 +16,8 @@ ACTION = re.compile(r'uses: ([\w-]+/[\w-]+)@([a-f0-9]{40}) # (\S+)')
 IMAGE = re.compile(r'(?<![\w./:-])([\w./-]+(?::[0-9]+)?):([\w.-]+)@sha256:([a-f0-9]{64})')
 WORKFLOW = '.github/workflows/container.yaml'
 COMPOSE = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
-           'build/tests/actions.sh', 'build/Dockerfile', 'build/tools/restore-home.sh', WORKFLOW)
+           'build/tests/actions.sh', 'build/tests/compose.backup-s3.yaml',
+           'build/Dockerfile', 'build/tools/restore-home.sh', WORKFLOW)
 
 
 class SafeRedirectHandler(HTTPRedirectHandler):
@@ -144,78 +145,110 @@ def apply_edits(root, edits):
                 os.unlink(temporary)
 
 
-def inventory(root):
-    result = {
-        'code-server': (root / 'build/code-server.version').read_text().strip(),
-        'act': (root / 'build/tests/act.version').read_text().strip(),
-        'Homebrew installer': (root / 'build/homebrew-install.version').read_text().strip(),
-    }
-    for repo, sha, tag in ACTION.findall((root / WORKFLOW).read_text()):
-        result[repo] = f'{tag} @ {sha}'
-    images = [pin for file in COMPOSE for pin in IMAGE.findall((root / file).read_text())]
+PIN_FILE = 'build/versions.json'
+PIN_FILES = {'runtime': PIN_FILE, 'build': 'build/build-versions.json'}
+
+
+def load_pins(root, scope=None):
+    pins = {'packages': {}, 'images': {}, 'actions': {}}
+    for filename in ([PIN_FILES[scope]] if scope else PIN_FILES.values()):
+        manifest = json.loads((root / filename).read_text())
+        for section in pins:
+            overlap = pins[section].keys() & manifest[section].keys()
+            if overlap:
+                raise ValueError(f'Duplicate pins in {filename}: {sorted(overlap)}')
+            pins[section].update(manifest[section])
+    for package in pins['packages'].values():
+        checked(package['version'], r'\d+\.\d+\.\d+')
+        for digest in package['sha256'].values():
+            checked(digest, r'[a-f0-9]{64}')
+    for digest in pins['images'].values():
+        checked(digest, r'[a-f0-9]{64}')
+    for pin in pins['actions'].values():
+        checked(pin['version'], r'v\d+(?:\.\d+){0,2}')
+        checked(pin['sha'], r'[a-f0-9]{40}')
+    return pins
+
+
+def inventory(root, pins=None, scope=None):
+    pins = load_pins(root, scope) if pins is None else pins
+    result = {name: package['version'] for name, package in pins['packages'].items()}
+    result.update({repo: f'{pin["version"]} @ {pin["sha"]}'
+                   for repo, pin in pins['actions'].items()})
     tracks = {}
-    for repo, tag, digest in images:
-        tracks.setdefault(repo, set()).add(tag)
-    for repo, tag, digest in images:
-        label = repo + ':' + tag if len(tracks[repo]) > 1 else repo
-        result[label] = f'{tag} @ sha256:{digest}'
+    for image in pins['images']:
+        repo, tag = image.rsplit(':', 1)
+        tracks.setdefault(repo, []).append(tag)
+    for image, digest in pins['images'].items():
+        repo, tag = image.rsplit(':', 1)
+        result[repo if len(tracks[repo]) == 1 else image] = f'{tag} @ sha256:{digest}'
     return result
 
 
-def plan(root, prepare=True):
-    current = inventory(root)
-    latest = dict(current)
+def references(root, pins):
+    """Render literal pins required by Docker and GitHub Actions from the manifest."""
     edits = {}
-    for label, repo, version_file, checksum_file in (
-        ('code-server', 'coder/code-server', 'build/code-server.version', 'build/code-server.sha256'),
-        ('act', 'nektos/act', 'build/tests/act.version', 'build/tests/act.sha256'),
-    ):
+    for file in COMPOSE:
+        original = (root / file).read_text()
+        def image(match):
+            repo, tag, _ = match.groups()
+            return f'{repo}:{tag}@sha256:{pins["images"][repo + ":" + tag]}'
+        content = IMAGE.sub(image, original)
+        if file == WORKFLOW:
+            content = ACTION.sub(lambda m: f'uses: {m[1]}@{pins["actions"][m[1]]["sha"]} # {pins["actions"][m[1]]["version"]}', content)
+        if content != original:
+            edits[file] = content
+    return edits
+
+
+def plan(root, prepare=True, scope=None):
+    current = inventory(root, scope=scope)
+    pins = load_pins(root, scope)
+    changed = False
+    for label, repo in (('code-server', 'coder/code-server'),
+                        ('envoy', 'envoyproxy/envoy'), ('act', 'nektos/act')):
+        if label not in pins['packages']:
+            continue
         release = github(repo, 'releases/latest')
         version = checked(release['tag_name'], r'v\d+\.\d+\.\d+')[1:]
-        latest[label] = version
-        if version != current[label]:
+        if version != pins['packages'][label]['version']:
+            changed = True
+            pins['packages'][label]['version'] = version
             names = ([f'code-server_{version}_{arch}.deb' for arch in ('amd64', 'arm64')]
                      if label == 'code-server' else
+                     [f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')]
+                     if label == 'envoy' else
                      [f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
                       for arch in ('arm64', 'x86_64')])
-            edits[version_file] = version + '\n'
             if prepare:
-                edits[checksum_file] = asset_checksums(release, names)
-    commit = checked(github('Homebrew/install', 'commits/HEAD')['sha'], r'[a-f0-9]{40}')
-    latest['Homebrew installer'] = commit
-    if commit != current['Homebrew installer']:
-        edits['build/homebrew-install.version'] = commit + '\n'
-        if prepare:
-            script = fetch(f'https://raw.githubusercontent.com/Homebrew/install/{commit}/install.sh')
-            edits['build/homebrew-install.sha256'] = hashlib.sha256(script).hexdigest() + '  homebrew-install.sh\n'
-    workflow = (root / WORKFLOW).read_text()
-    for repo, sha, tag in dict.fromkeys(ACTION.findall(workflow)):
+                pins['packages'][label]['sha256'] = {
+                    line.split()[1]: line.split()[0]
+                    for line in asset_checksums(release, names).splitlines()}
+    for repo, pin in pins['actions'].items():
         release = github(repo, 'releases/latest')
-        new_tag = checked(release['tag_name'], r'v\d+(?:\.\d+){0,2}')
-        new_sha = checked(github(repo, 'commits/' + quote(new_tag, safe=''))['sha'], r'[a-f0-9]{40}')
-        latest[repo] = f'{new_tag} @ {new_sha}'
-        workflow = workflow.replace(f'{repo}@{sha} # {tag}', f'{repo}@{new_sha} # {new_tag}')
-    if workflow != (root / WORKFLOW).read_text():
-        edits[WORKFLOW] = workflow
-    resolved = {}
-    envoy_tag = None
-    for file in COMPOSE:
-        content = edits.get(file, (root / file).read_text())
-        for repo, tag, digest in IMAGE.findall(content):
-            new_tag = tag
-            if repo == 'envoyproxy/envoy':
-                if envoy_tag is None:
-                    envoy_tag = checked(github(repo, 'releases/latest')['tag_name'], r'v\d+\.\d+\.\d+')
-                new_tag = envoy_tag
-            key = (repo, new_tag)
-            if key not in resolved:
-                resolved[key] = image_digest(repo, new_tag)
-            new_digest = resolved[key]
-            label = repo if repo in current else repo + ':' + tag
-            latest[label] = f'{new_tag} @ sha256:{new_digest}'
-            content = content.replace(f'{repo}:{tag}@sha256:{digest}', f'{repo}:{new_tag}@sha256:{new_digest}')
-        if content != (root / file).read_text():
-            edits[file] = content
+        tag = checked(release['tag_name'], r'v\d+(?:\.\d+){0,2}')
+        sha = checked(github(repo, 'commits/' + quote(tag, safe=''))['sha'], r'[a-f0-9]{40}')
+        changed |= pin != {'version': tag, 'sha': sha}
+        pins['actions'][repo] = {'version': tag, 'sha': sha}
+    for image, digest in pins['images'].items():
+        repo, tag = image.rsplit(':', 1)
+        new_digest = image_digest(repo, tag)
+        changed |= new_digest != digest
+        pins['images'][image] = new_digest
+    # Inventory uses the same formatting for local and proposed pins.
+    latest = inventory(root, pins)
+    combined = load_pins(root)
+    for section in pins:
+        combined[section].update(pins[section])
+    edits = references(root, combined)
+    if changed:
+        for selected in ([scope] if scope else PIN_FILES):
+            filename = PIN_FILES[selected]
+            original = load_pins(root, selected)
+            updated = {section: {key: pins[section][key] for key in values}
+                       for section, values in original.items()}
+            if updated != original:
+                edits[filename] = json.dumps(updated, indent=2) + '\n'
     return current, latest, edits
 
 
@@ -223,7 +256,7 @@ def show(current, latest=None, hide_hashes=True):
     def display(name, value):
         if not hide_hashes:
             return value
-        return 'pinned installer commit' if name == 'Homebrew installer' else value.split(' @ ', 1)[0]
+        return value.split(' @ ', 1)[0]
 
     for name, value in current.items():
         print(f'{name}: {display(name, value)}', flush=True)
@@ -234,14 +267,22 @@ def show(current, latest=None, hide_hashes=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('version', 'outdated', 'upgrade'))
+    parser.add_argument('command', choices=('version', 'outdated', 'upgrade', 'sync', 'check'))
+    parser.add_argument('--scope', choices=('runtime', 'build'), default='runtime')
     parser.add_argument('--hashes', action='store_true', help='Show commit SHAs and image digests')
     args = parser.parse_args()
-    if args.command == 'version':
-        show(inventory(ROOT), hide_hashes=not args.hashes)
+    if args.command in ('sync', 'check'):
+        edits = references(ROOT, load_pins(ROOT))
+        if args.command == 'check' and edits:
+            raise ValueError('Pin references differ from build/versions.json; run just sync-pins')
+        if args.command == 'sync':
+            apply_edits(ROOT, edits)
         return
-    print('Looking up upstream releases, installer commit, Actions, and service image digests...', flush=True)
-    current, latest, edits = plan(ROOT, prepare=args.command == 'upgrade')
+    if args.command == 'version':
+        show(inventory(ROOT, scope=args.scope), hide_hashes=not args.hashes)
+        return
+    print('Looking up upstream releases, Actions, and service image digests...', flush=True)
+    current, latest, edits = plan(ROOT, prepare=args.command == 'upgrade', scope=args.scope)
     visible = ({name: value for name, value in current.items() if value != latest[name]}
                if args.command == 'outdated' else current)
     show(visible, latest, hide_hashes=not args.hashes)
@@ -249,11 +290,8 @@ def main():
         print('All repository pins are current.')
         return
     if args.command == 'outdated':
-        print('Outdated repository pins found. Run just upgrade to review and apply updates.')
+        print('Outdated repository pins found. Run just ' + ('build-upgrade' if args.scope == 'build' else 'upgrade') + ' to review and apply updates.')
         return
-    if current.get('Homebrew installer') != latest.get('Homebrew installer'):
-        print('Review installer changes: https://github.com/Homebrew/install/compare/'
-              + current['Homebrew installer'] + '...' + latest['Homebrew installer'])
     print('\nFiles to update:\n' + '\n'.join(f'  {path}' for path in sorted(edits)))
     try:
         answer = input('Update these repository pins? [y/N] ')

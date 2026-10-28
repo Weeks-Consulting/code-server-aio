@@ -1,0 +1,24 @@
+{
+  "packages": {
+    "code-server": {
+      "version": "4.143.1",
+      "sha256": {
+        "code-server_4.143.1_amd64.deb": "e4b771c98fafbe2af3990ecd71d93ba22515588db550007076768a014ae34c02",
+        "code-server_4.143.1_arm64.deb": "79ca8df2db219b24de75e2a830c5302808124d8c2bf132f4bc6105cea834bb1c"
+      }
+    },
+    "envoy": {
+      "version": "1.40.2",
+      "sha256": {
+        "envoy-1.40.2-linux-aarch_64": "b9d6d1e06dd5838a3506de9f4deebad3de9a2ce6cadb87cd76222ca286213baf",
+        "envoy-1.40.2-linux-x86_64": "1d64506e25c1844f146162ddb2ece7010fa4e784faddb40a079021491f1f03cc"
+      }
+    }
+  },
+  "images": {
+    "cloudflare/cloudflared:latest": "1b1d34d0a9c0bfca9de72db8460d328db3f19edd2b96169114e3e893a97bbe53",
+    "offen/docker-volume-backup:v2": "49fcfb2bdc6194ed4d7563d5ede75ff94f3a7435d15cbebae2ef816627944831",
+    "debian:13-slim": "62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad"
+  },
+  "actions": {}
+}

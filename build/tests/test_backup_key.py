@@ -24,18 +24,18 @@ class BackupKeyTests(unittest.TestCase):
         self.env = self.directory / ".env"
 
     def initialize(self):
-        return subprocess.run(["sh", str(ROOT / "build/tools/backup-key.sh"), str(self.env)],
+        return subprocess.run([sys.executable, str(ROOT / "build/tools/backup-key.py"), str(self.env)],
                               capture_output=True, text=True)
 
     def test_missing_and_empty_keys(self):
-        for value in ("", "GPG_PASSPHRASE=\n", 'GPG_PASSPHRASE="" # empty\n',
-                      "export GPG_PASSPHRASE = ''\n", "GPG_PASSPHRASE= # empty\n"):
+        for value in ("", "BACKUP_GPG_PASSPHRASE=\n", 'BACKUP_GPG_PASSPHRASE="" # empty\n',
+                      "export BACKUP_GPG_PASSPHRASE = ''\n", "BACKUP_GPG_PASSPHRASE= # empty\n"):
             with self.subTest(value=value):
                 self.env.write_text("OTHER=unchanged\n" + value)
                 result = self.initialize()
                 self.assertEqual(result.returncode, 0, result.stderr)
                 contents = self.env.read_text()
-                key = re.search(r"^GPG_PASSPHRASE=([a-f0-9]{64})$", contents, re.M)[1]
+                key = re.search(r"^BACKUP_GPG_PASSPHRASE=([a-f0-9]{64})$", contents, re.M)[1]
                 self.assertIn("OTHER=unchanged\n", contents)
                 self.assertEqual(self.env.stat().st_mode & 0o777, 0o600)
                 self.assertNotIn(key, result.stdout + result.stderr)
@@ -44,7 +44,7 @@ class BackupKeyTests(unittest.TestCase):
 
     def test_preserves_custom_key_and_never_executes_dotenv(self):
         marker = self.directory / "must-not-exist"
-        contents = f"OTHER=$(touch {marker})\nexport GPG_PASSPHRASE='custom passphrase $literal' # keep\n"
+        contents = f"OTHER=$(touch {marker})\nexport BACKUP_GPG_PASSPHRASE='custom passphrase $literal' # keep\n"
         self.env.write_text(contents)
         self.assertEqual(self.initialize().returncode, 0)
         self.assertEqual(self.env.read_text(), contents)
@@ -59,9 +59,9 @@ class BackupKeyTests(unittest.TestCase):
         self.assertNotEqual(first, self.env.read_text())
 
     def test_concurrent_initializers_preserve_one_key(self):
-        self.env.write_text("OTHER=unchanged\nGPG_PASSPHRASE=\n")
+        self.env.write_text("OTHER=unchanged\nBACKUP_GPG_PASSPHRASE=\n")
         processes = [subprocess.Popen(
-            ["sh", str(ROOT / "build/tools/backup-key.sh"), str(self.env)],
+            [sys.executable, str(ROOT / "build/tools/backup-key.py"), str(self.env)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         ) for _ in range(8)]
         outputs = []
@@ -71,18 +71,18 @@ class BackupKeyTests(unittest.TestCase):
             outputs.append(stdout)
         self.assertEqual(sum("Generated backup encryption key" in out for out in outputs), 1)
         contents = self.env.read_text()
-        self.assertRegex(contents, r"GPG_PASSPHRASE=[a-f0-9]{64}")
+        self.assertRegex(contents, r"BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}")
         self.assertIn("OTHER=unchanged\n", contents)
         self.assertEqual(self.initialize().returncode, 0)
         self.assertEqual(self.env.read_text(), contents)
 
     def test_last_assignment_controls_key_generation(self):
-        self.env.write_text("GPG_PASSPHRASE=old-key\nGPG_PASSPHRASE=\n")
+        self.env.write_text("BACKUP_GPG_PASSPHRASE=old-key\nBACKUP_GPG_PASSPHRASE=\n")
         self.assertEqual(self.initialize().returncode, 0)
-        keys = re.findall(r"^GPG_PASSPHRASE=([a-f0-9]{64})$", self.env.read_text(), re.M)
+        keys = re.findall(r"^BACKUP_GPG_PASSPHRASE=([a-f0-9]{64})$", self.env.read_text(), re.M)
         self.assertEqual(len(keys), 2)
         self.assertEqual(keys[0], keys[1])
-        contents = "GPG_PASSPHRASE=\nGPG_PASSPHRASE=keep-this\n"
+        contents = "BACKUP_GPG_PASSPHRASE=\nBACKUP_GPG_PASSPHRASE=keep-this\n"
         self.env.write_text(contents)
         self.assertEqual(self.initialize().returncode, 0)
         self.assertEqual(self.env.read_text(), contents)
@@ -100,7 +100,7 @@ class BackupKeyTests(unittest.TestCase):
             "    url = request.full_url\n"
             "    if url.endswith('/SHA256SUMS'):\n"
             "        if os.environ.get('NO_CHECKSUMS'): raise urllib.error.HTTPError(url, 404, 'missing', {}, None)\n"
-            "        files = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.sh', 'build/tools/restore-home.sh')\n"
+            "        files = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.py', 'build/tools/restore-home.sh')\n"
             "        content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files).encode()\n"
             "        if os.environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], b'0' * 64)\n"
             "        return io.BytesIO(content)\n"
@@ -186,7 +186,7 @@ class BackupKeyTests(unittest.TestCase):
         command, env, deployment = self.installer_fixture()
         deployment.mkdir()
         dotenv = deployment / ".env"
-        dotenv.write_text("CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:0.0.1\nGPG_PASSPHRASE=keep-secret\n")
+        dotenv.write_text("CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:0.0.1\nBACKUP_GPG_PASSPHRASE=keep-secret\n")
         result = subprocess.run(command, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:4.141.0-1", dotenv.read_text())
@@ -202,7 +202,7 @@ class BackupKeyTests(unittest.TestCase):
                            f'export CODE_SERVER_IMAGE="{digest}" # verified\n'):
             for explicit_version in (False, True):
                 with self.subTest(assignment=assignment, explicit_version=explicit_version):
-                    original = assignment + "GPG_PASSPHRASE=keep-secret\n"
+                    original = assignment + "BACKUP_GPG_PASSPHRASE=keep-secret\n"
                     dotenv.write_text(original)
                     args = command if explicit_version else command[:2] + command[4:]
                     result = subprocess.run(args, env=env, capture_output=True, text=True)
@@ -232,7 +232,7 @@ class BackupKeyTests(unittest.TestCase):
         self.assertFalse(deployment.exists())
         deployment.mkdir()
         dotenv = deployment / ".env"
-        dotenv.write_text("GPG_PASSPHRASE=private-test-key\n")
+        dotenv.write_text("BACKUP_GPG_PASSPHRASE=private-test-key\n")
         dotenv.chmod(0o644)
         compose = deployment / "compose.yaml"
         compose.write_text("original")
@@ -243,7 +243,7 @@ class BackupKeyTests(unittest.TestCase):
         self.assertIn("Would resolve the latest stable release", result.stdout)
         self.assertIn("compose.yaml.bak", result.stdout)
         self.assertNotIn("private-test-key", result.stdout + result.stderr)
-        self.assertEqual(dotenv.read_text(), "GPG_PASSPHRASE=private-test-key\n")
+        self.assertEqual(dotenv.read_text(), "BACKUP_GPG_PASSPHRASE=private-test-key\n")
         self.assertEqual(dotenv.stat().st_mode & 0o777, 0o644)
         self.assertEqual(compose.read_text(), "original")
         self.assertEqual(sorted(p.name for p in deployment.iterdir()), [".env", "compose.yaml"])
@@ -302,7 +302,7 @@ class BackupKeyTests(unittest.TestCase):
 
     def test_installer_generates_and_preserves_key_on_refresh(self):
         command, env, deployment = self.installer_fixture()
-        for initial in (None, "GPG_PASSPHRASE=\n", "GPG_PASSPHRASE='custom secret'\n"):
+        for initial in (None, "BACKUP_GPG_PASSPHRASE=\n", "BACKUP_GPG_PASSPHRASE='custom secret'\n"):
             with self.subTest(initial=initial):
                 deployment.mkdir(exist_ok=True)
                 dotenv = deployment / ".env"
@@ -319,7 +319,7 @@ class BackupKeyTests(unittest.TestCase):
                 if initial and "custom secret" in initial:
                     self.assertIn(initial, contents)
                 else:
-                    self.assertRegex(contents, r"GPG_PASSPHRASE=[a-f0-9]{64}")
+                    self.assertRegex(contents, r"BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}")
                 self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -334,7 +334,7 @@ class BackupKeyTests(unittest.TestCase):
                     "CODE_SERVER_IMAGE=example/custom:fixed\n"
                     "export CF_ACCESS_AUD='custom audience'\n"
                     "export BACKUP_ID = \n"
-                    "GPG_PASSPHRASE='already-set'\n"
+                    "BACKUP_GPG_PASSPHRASE='already-set'\n"
                     f"CUSTOM=$(touch {marker})\n")
         dotenv.write_text(original)
         result = subprocess.run(command, env=env, capture_output=True, text=True)
@@ -342,8 +342,7 @@ class BackupKeyTests(unittest.TestCase):
         contents = dotenv.read_text()
         self.assertTrue(contents.startswith(original.replace("example/custom:fixed", "ghcr.io/weeks-consulting/code-server-aio:4.141.0-1")))
         self.assertIn("# Settings added by installer for release v4.141.0-1", contents)
-        self.assertIn("# Maximum first-start Homebrew installation duration, in seconds.\nHOMEBREW_INSTALL_TIMEOUT=600", contents)
-        for key in ("CODE_SERVER_IMAGE", "CF_ACCESS_AUD", "BACKUP_ID", "GPG_PASSPHRASE"):
+        for key in ("CODE_SERVER_IMAGE", "CF_ACCESS_AUD", "BACKUP_ID", "BACKUP_GPG_PASSPHRASE"):
             self.assertEqual(len(re.findall(rf"^(?:export )?{key}\s*=", contents, re.M)), 1)
         self.assertFalse(marker.exists())
         result = subprocess.run(command, env=env, capture_output=True, text=True)

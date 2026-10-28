@@ -25,7 +25,7 @@ test: check test-proxy test-smoke test-backup
 test-proxy: build
     ./build/tests/proxy.sh {{quote(image)}}
 
-# Test startup, Homebrew persistence, health, and service recovery.
+# Test startup, home persistence, health, and service recovery.
 test-smoke: build
     ./build/tests/smoke.sh {{quote(image)}}
 
@@ -42,7 +42,7 @@ actions:
 actions-list:
     ./build/tests/actions.sh --list
 
-# Print repository dependency versions without hashes (offline).
+# Print shipped dependency versions without hashes (offline).
 [positional-arguments]
 version *args:
     python3 build/tools/dependencies.py version "$@"
@@ -56,3 +56,22 @@ upgrade *args:
 [positional-arguments]
 outdated *args:
     python3 build/tools/dependencies.py outdated "$@"
+
+# Print build and test tooling versions (offline).
+[positional-arguments]
+build-version *args:
+    python3 build/tools/dependencies.py version --scope build "$@"
+
+# Check upstream build and test tooling versions.
+[positional-arguments]
+build-outdated *args:
+    python3 build/tools/dependencies.py outdated --scope build "$@"
+
+# Review and update build and test tooling pins.
+[positional-arguments]
+build-upgrade *args:
+    python3 build/tools/dependencies.py upgrade --scope build "$@"
+
+# Synchronize Docker and CI literal references from both pin manifests.
+sync-pins:
+    python3 build/tools/dependencies.py sync

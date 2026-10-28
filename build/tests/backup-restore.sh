@@ -21,9 +21,9 @@ PYTHON
 command -v gpg >/dev/null || { echo 'Install gpg to run encrypted backup/restore tests.' >&2; exit 1; }
 # Generate a disposable key through the same initializer as deployed installations.
 touch "$archive_dir/.env"
-sh "$script_dir/../tools/backup-key.sh" "$archive_dir/.env"
-GPG_PASSPHRASE=$(sed -n 's/^GPG_PASSPHRASE=//p' "$archive_dir/.env")
-export GPG_PASSPHRASE
+python3 "$script_dir/../tools/backup-key.py" "$archive_dir/.env"
+BACKUP_GPG_PASSPHRASE=$(sed -n 's/^BACKUP_GPG_PASSPHRASE=//p' "$archive_dir/.env")
+export BACKUP_GPG_PASSPHRASE
 cleanup() {
     docker rm -f "$app_name" >/dev/null 2>&1 || true
     docker volume rm "$source_volume" "${prefix}_docker-data" "$prefix-restored" "$prefix-relative" >/dev/null 2>&1 || true
@@ -51,7 +51,7 @@ docker run -d --name "$app_name" \
     --mount "type=volume,src=$source_volume,dst=/home" \
     --entrypoint /usr/bin/sleep "$image" infinity >/dev/null
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
-LOCAL_BACKUP_UID=$(id -u) LOCAL_BACKUP_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" docker compose --project-directory "$project_dir" \
+BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" docker compose --project-directory "$project_dir" \
     --project-name "$prefix" --env-file "$project_dir/.env.example" \
     -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-local.yaml" \
     run --rm --no-deps --entrypoint backup backup
@@ -71,10 +71,10 @@ docker volume create "$prefix-restored" >/dev/null
 docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data" \
     --entrypoint /bin/sh "$image" -ec 'echo original > /data/original; ln -s original /data/link; chown 1:13 /data/original'
 # A wrong or missing key must fail before changing the original volume.
-if GPG_PASSPHRASE=wrong-key RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
+if BACKUP_GPG_PASSPHRASE=wrong-key RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
     echo 'Encrypted restore accepted the wrong key.' >&2; exit 1
 fi
-if GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
+if BACKUP_GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
     echo 'Encrypted restore accepted a missing key.' >&2; exit 1
 fi
 docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
@@ -99,7 +99,7 @@ cp "$restore_script" "$archive_dir/restore-home.sh"
 # fit even when the caller's temporary directory exceeds the Unix socket limit.
 restore_tmp="$archive_dir/restore-temporary-directory-with-a-long-path-for-agent-socket-coverage"
 mkdir "$restore_tmp"
-env -u GPG_PASSPHRASE TMPDIR="$restore_tmp" RESTORE_IMAGE="$image" sh "$archive_dir/manage" restore \
+env -u BACKUP_GPG_PASSPHRASE TMPDIR="$restore_tmp" RESTORE_IMAGE="$image" sh "$archive_dir/manage" restore \
     --archive "$archive_dir/restore-test.tar.gz.gpg" --volume "$prefix-restored"
 docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
     --entrypoint /bin/sh "$image" -ec '
@@ -112,7 +112,7 @@ test -n "$rollback"
 assert_metadata "$rollback" 600
 assert_metadata "$(dirname -- "$rollback")" 700
 # The caller can read rollback archives without another privileged host command.
-printf '%s\n' "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
+printf '%s\n' "$BACKUP_GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
     --output "$archive_dir/rollback-check.tar.gz" --decrypt "$rollback"
 tar -tzf "$archive_dir/rollback-check.tar.gz" >/dev/null
 echo 'PASS: Rollback archive belongs to the effective caller with mode 600.'
@@ -136,7 +136,7 @@ docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/back
     --mount "type=bind,src=$archive_dir,dst=/archive" --entrypoint /bin/sh "$image" \
     -ec 'tar -C / -czf /archive/relative.tar.gz backup/code-server-home'
 docker volume create "$prefix-relative" >/dev/null
-GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/relative.tar.gz" "$prefix-relative"
+BACKUP_GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/relative.tar.gz" "$prefix-relative"
 docker run --rm --network none --mount "type=volume,src=$prefix-relative,dst=/data,readonly" \
     --entrypoint /bin/sh "$image" -ec 'grep -qx saved-settings /data/cloud-user/.config/sentinel'
 echo 'Backup/restore round trip passed.'

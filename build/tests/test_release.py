@@ -1,5 +1,6 @@
 """Exercise release validation and weekly source selection from the workflow."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = (ROOT / ".github/workflows/container.yaml").read_text()
-VERSION = (ROOT / "build/code-server.version").read_text().strip()
+VERSION = json.loads((ROOT / "build/versions.json").read_text())["packages"]["code-server"]["version"]
 VALIDATION = textwrap.dedent(WORKFLOW.split("python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
 SOURCE = textwrap.dedent(WORKFLOW.split('        run: |\n', 1)[1].split('\n  test:', 1)[0])
 

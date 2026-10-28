@@ -5,6 +5,3 @@ services:
     build:
       context: .
       dockerfile: build/Dockerfile
-      args:
-        # Empty uses build/code-server.version.
-        CODE_SERVER_VERSION: ${CODE_SERVER_VERSION:-}

@@ -17,7 +17,13 @@ import threading
 import time
 import unittest
 
-BOOTSTRAP = json.loads(Path('/etc/envoy/envoy.json').read_text())
+import importlib.util
+
+spec = importlib.util.spec_from_file_location('start_envoy', '/usr/local/lib/start-envoy.py')
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+BOOTSTRAP = launcher.render(Path('/etc/envoy/envoy.json.template').read_text(), {
+    'CF_ACCESS_TEAM_DOMAIN': 'test.cloudflareaccess.com', 'CF_ACCESS_AUD': 'a' * 64})
 AUD = 'a' * 64
 DOMAIN = 'test.cloudflareaccess.com'
 ISSUER = 'https://' + DOMAIN
@@ -163,7 +169,7 @@ class AccessProxyTests(unittest.TestCase):
                        'CF_ACCESS_ALLOWED_EMAILS': ','.join(value for claim, value in identities if claim == 'email'),
                        'CF_ACCESS_ALLOWED_SERVICE_TOKENS': ','.join(value for claim, value in identities if claim == 'common_name'),
                        **(env_override or {})}
-        self.process = subprocess.Popen(['/envoy-bin/envoy', '-c', str(path), '--concurrency', '2',
+        self.process = subprocess.Popen(['/usr/local/bin/envoy', '-c', str(path), '--concurrency', '2',
                                          '--disable-hot-restart', '--log-level', 'warn'],
                                         stdout=self.log, stderr=self.log, preexec_fn=demote, env=environment)
         if expect_ready:

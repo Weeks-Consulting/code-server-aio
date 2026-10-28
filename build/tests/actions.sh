@@ -26,7 +26,7 @@ case "$asset_os" in
     *) echo 'This script requires Linux or macOS.' >&2; exit 1 ;;
 esac
 
-act_version=$(cat "$project_dir/build/tests/act.version")
+act_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packages"]["act"]["version"])' "$project_dir/build/build-versions.json")
 
 act_dir=$(mktemp -d "$project_dir/.test-tmp.XXXXXXXX")
 test_volume=
@@ -43,7 +43,7 @@ temp_mount="$test_tmp:$test_tmp"
 curl --fail --silent --show-error --location --retry 3 \
     "https://github.com/nektos/act/releases/download/v${act_version}/act_${asset_os}_${asset_arch}.tar.gz" \
     --output "$act_dir/act.tar.gz"
-expected=$(awk -v name="act_${asset_os}_${asset_arch}.tar.gz" '$2 == name {print $1}' "$project_dir/build/tests/act.sha256")
+expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packages"]["act"]["sha256"][sys.argv[2]])' "$project_dir/build/build-versions.json" "act_${asset_os}_${asset_arch}.tar.gz")
 python3 - "$act_dir/act.tar.gz" "$expected" <<'PY'
 import hashlib, pathlib, sys
 if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() != sys.argv[2]:
@@ -70,6 +70,7 @@ cd "$project_dir"
     --job test \
     --matrix "arch:$matrix_arch" \
     --container-architecture "linux/$matrix_arch" \
+    --env-file /dev/null \
     --bind \
     --rm \
     --container-options "--volume=$temp_mount" \

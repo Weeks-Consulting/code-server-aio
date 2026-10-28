@@ -1,0 +1,47 @@
+{
+  "packages": {
+    "act": {
+      "version": "0.2.89",
+      "sha256": {
+        "act_Linux_arm64.tar.gz": "daa8679ba9615a74d2d0cec321dc593f21948a2a11bb65862b063d8b930f4bcb",
+        "act_Linux_x86_64.tar.gz": "0191d6f1f3b716b5c55820032605d05fc3c1cdbf581ebeff655019e5dd1524c0",
+        "act_Darwin_arm64.tar.gz": "48ae218af96725f7635a66de2b87e1e346893b02add0f16b92f560296b2151fc",
+        "act_Darwin_x86_64.tar.gz": "41b31488e7c254baec31cce12c7dade3e35973b8a31b9486206ad43f233d814e"
+      }
+    }
+  },
+  "images": {
+    "catthehacker/ubuntu:act-24.04": "c58e2b364da03b0c804c7d660f2ecbedf2f221a382b9baa0b344b0144780ff43",
+    "rustfs/rustfs:1.0.3": "9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b"
+  },
+  "actions": {
+    "actions/checkout": {
+      "version": "v7.0.1",
+      "sha": "3d3c42e5aac5ba805825da76410c181273ba90b1"
+    },
+    "docker/setup-buildx-action": {
+      "version": "v4.4.1",
+      "sha": "f87e5991a6d7451dcb8d9637bfbc97413f497069"
+    },
+    "docker/build-push-action": {
+      "version": "v7.4.0",
+      "sha": "c3c9e263c25d99ce0380d002d59b67737d91b0dc"
+    },
+    "actions/upload-artifact": {
+      "version": "v7.0.2",
+      "sha": "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    },
+    "actions/download-artifact": {
+      "version": "v8.0.2",
+      "sha": "9000827ccba6bdab643e8b6fd33ac0654aef8333"
+    },
+    "docker/login-action": {
+      "version": "v4.7.0",
+      "sha": "81c6f93d4bc991e510b342a00b419b3bb4efc5c6"
+    },
+    "actions/attest-build-provenance": {
+      "version": "v4.2.2",
+      "sha": "4d101475d8b20a2381f78447822ac1eab6504dd8"
+    }
+  }
+}

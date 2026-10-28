@@ -11,17 +11,17 @@ python3 build/tests/test_manage.py
 python3 build/tests/test_install.py
 python3 build/tests/test_release.py
 python3 build/tests/test_actions.py
+python3 build/tools/dependencies.py check
 python3 build/tests/test_dependencies.py
 python3 build/tests/test_backup_key.py
 python3 build/tests/test_start.py
 python3 build/tests/test_supervisor_events.py
-sh -n build/runtime/homebrew.sh
 
 # Configuration checks use a disposable passphrase, never a deployment key.
-export GPG_PASSPHRASE=validation-only
+export BACKUP_GPG_PASSPHRASE=validation-only
 
 # The base file must work with only the tunnel token set.
-CLOUDFLARE_TUNNEL_TOKEN=validation-only docker compose --env-file /dev/null config --quiet
+CF_TUNNEL_TOKEN=validation-only docker compose --env-file /dev/null config --quiet
 for backup in "" compose.backup.yaml compose.backup-local.yaml; do
     for build in "" compose.build.yaml; do
         set -- -f compose.yaml
@@ -49,29 +49,26 @@ for overlay in ("compose.backup.yaml", "compose.backup-local.yaml"):
     result = subprocess.run([
         "docker", "compose", "--env-file", ".env.example", "-f", "compose.yaml",
         "-f", overlay, "config", "--quiet",
-    ], env={**os.environ, "GPG_PASSPHRASE": ""}, capture_output=True, text=True)
-    assert result.returncode != 0 and "GPG_PASSPHRASE" in result.stderr
+    ], env={**os.environ, "BACKUP_GPG_PASSPHRASE": ""}, capture_output=True, text=True)
+    assert result.returncode != 0 and "BACKUP_GPG_PASSPHRASE" in result.stderr
 
-# Only the application and Envoy receive the socket volume. No backend TCP port.
+# The protected listener is in the application; backend/admin stay local.
 base = model("compose.backup.yaml")
 services = base["services"]
-app, envoy, tunnel = (services[name] for name in ("code-server", "envoy", "cloudflared"))
-assert not app.get("ports") and not app.get("expose")
-assert set(app["networks"]).isdisjoint(envoy["networks"])
-assert set(app["networks"]).isdisjoint(tunnel["networks"])
-socket_users = {name for name, service in services.items() if any(
-    volume.get("source") == "code-server-socket" for volume in service.get("volumes", []))}
-assert socket_users == {"code-server", "envoy"}
-assert next(volume for volume in envoy["volumes"] if volume["target"] == "/run/code-server")["read_only"]
-assert envoy["image"].startswith("envoyproxy/envoy:") and not envoy.get("build")
-assert "envoy-config" not in services
-assert next(config for config in envoy["configs"] if config["target"] == "/etc/envoy/envoy.json")["source"] == "envoy-bootstrap"
-bootstrap = json.loads(base["configs"]["envoy-bootstrap"]["content"])
-assert bootstrap["static_resources"]["clusters"][0]["load_assignment"]["endpoints"][0]["lb_endpoints"][0]["endpoint"]["address"]["pipe"]["path"] == "/run/code-server/backend.sock"
-assert envoy["user"] == "envoy" and "10000" in envoy["group_add"]
-assert "ALL" in envoy["cap_drop"]
-assert not envoy.get("privileged")
-assert not any(volume["target"] in ("/home", "/var/run/docker.sock") for volume in envoy["volumes"])
+app, tunnel = (services[name] for name in ("code-server", "cloudflared"))
+assert "envoy" not in services
+assert not app.get("ports") and app["expose"] == ["8080"]
+assert set(base["networks"]) == {"default"}
+assert set(app["networks"]) == set(tunnel["networks"]) == {"default"}
+assert not any(volume.get("source") == "code-server-socket"
+               for service in services.values() for volume in service.get("volumes", []))
+assert "CF_ACCESS_AUD" in app["environment"]
+assert tunnel["environment"]["TUNNEL_TOKEN"] == "replace-with-your-cloudflare-tunnel-token"
+from pathlib import Path
+keys = [line.split("=", 1)[0] for line in Path(".env.example").read_text().splitlines()
+        if line and not line.startswith("#")]
+assert all(key.startswith(("CF_", "BACKUP_", "CODE_SERVER_")) for key in keys)
+assert "HOMEBREW_INSTALL_TIMEOUT" not in app["environment"]
 
 deployments = []
 for project in ("isolation-a", "isolation-b"):

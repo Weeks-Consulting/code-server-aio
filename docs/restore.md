@@ -2,11 +2,11 @@
 
 For local backups, select a `.tar.gz.gpg` archive (or a legacy `.tar.gz` archive) from `BACKUP_LOCAL_PATH`.
 For S3 backups, download it using your storage provider's console or CLI.
-Use the configured `AWS_S3_PATH`; older backups keep their original locations.
+Use the configured `BACKUP_AWS_S3_PATH`; older backups keep their original locations.
 
 For encrypted archives, install `gpg` and `python3` on the Docker host (`sudo apt-get install gpg python3`
-on Debian, or `brew install gnupg python` on macOS). Put the **original** `GPG_PASSPHRASE` in the deployment's `.env`;
-`manage restore` reads it without executing the file. An exported `GPG_PASSPHRASE`
+on Debian, or `brew install gnupg python` on macOS). Put the **original** `BACKUP_GPG_PASSPHRASE` in the deployment's `.env`;
+`manage restore` reads it without executing the file. An exported `BACKUP_GPG_PASSPHRASE`
 can override it to restore an archive encrypted with an older key. Do not generate a
 new key for recovery: it cannot decrypt old backups. On a replacement host, recover
 the original key from your password manager first.
@@ -48,9 +48,9 @@ Inspect and remove that specific directory before restarting after an interrupte
    that installed the deployment. The standalone helper accepts the same archive
    and volume as positional arguments: `sh build/tools/restore-home.sh ARCHIVE VOLUME`
    (installed deployments have `restore-home.sh` beside `manage`). For encrypted
-   archives, the standalone helper requires an exported `GPG_PASSPHRASE`; it does
+   archives, the standalone helper requires an exported `BACKUP_GPG_PASSPHRASE`; it does
    not read `.env`. When using `sudo`, the launcher reads `.env` as root; to use an
-   exported older key on Debian, pass it with `sudo --preserve-env=GPG_PASSPHRASE sh ...`.
+   exported older key on Debian, pass it with `sudo --preserve-env=BACKUP_GPG_PASSPHRASE sh ...`.
 4. Restart with your usual `manage` options and verify files, extensions,
    Homebrew, and sign-in. The volume name stays unchanged; no Compose override is needed.
 
@@ -60,7 +60,7 @@ stopped throughout restoration; the helper does not restart it automatically.
 
 The helper prints the rollback archive path after verifying it and before replacing
 volume contents. Failed extraction leaves no empty rollback directory. It saves
-`original-home.tar.gz.gpg` when `GPG_PASSPHRASE` is available, otherwise
+`original-home.tar.gz.gpg` when `BACKUP_GPG_PASSPHRASE` is available, otherwise
 `original-home.tar.gz`, in a new private `pre-restore.*` directory beside the input
 archive. The rollback uses the supplied key for encryption and has mode `600` inside a
 mode `700` directory. Both belong to the effective user running `manage restore`

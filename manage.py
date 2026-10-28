@@ -126,17 +126,17 @@ def manage(args, directory):
             fail('restore targets an explicit volume; omit --backup and --project-name')
         archive = os.path.abspath(args.archive)
         restore = helper(directory, 'restore-home.sh')
-        if archive.endswith('.gpg') and not os.environ.get('GPG_PASSPHRASE'):
+        if archive.endswith('.gpg') and not os.environ.get('BACKUP_GPG_PASSPHRASE'):
             if not (directory / '.env').is_file():
-                fail('Restore requires GPG_PASSPHRASE or the original .env encryption key.')
+                fail('Restore requires BACKUP_GPG_PASSPHRASE or the original .env encryption key.')
             env = dict(os.environ)
-            env.pop('GPG_PASSPHRASE', None)
+            env.pop('BACKUP_GPG_PASSPHRASE', None)
             settings = subprocess.check_output([
                 'docker', 'compose', '--project-directory', str(directory),
                 '--env-file', str(directory / '.env'), '-f', '-', 'config', '--format', 'json'],
-                input='services:\n  restore-key:\n    image: unused\n    environment:\n      GPG_PASSPHRASE: ${GPG_PASSPHRASE:?Restore requires the original GPG_PASSPHRASE in .env}\n',
+                input='services:\n  restore-key:\n    image: unused\n    environment:\n      BACKUP_GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Restore requires the original BACKUP_GPG_PASSPHRASE in .env}\n',
                 text=True, env=env)
-            os.environ['GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment']['GPG_PASSPHRASE']
+            os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment']['BACKUP_GPG_PASSPHRASE']
         os.execvp('sh', ['sh', str(restore), archive, args.volume])
     if args.archive or args.volume:
         fail('--archive and --volume are only supported by restore')
@@ -161,15 +161,15 @@ def manage(args, directory):
     if args.backup != 'none':
         files.append('compose.backup-local.yaml' if args.backup == 'local' else 'compose.backup.yaml')
     if args.backup == 'local':
-        os.environ.update(LOCAL_BACKUP_UID=str(os.getuid()), LOCAL_BACKUP_GID=str(os.getgid()))
+        os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
     for name in files:
         path = directory / name
         if not path.is_file():
             fail(f'Required Compose file is missing: {path}')
         command += ['-f', str(path)]
     if args.backup != 'none' and args.action in ('start', 'backup'):
-        subprocess.run(['sh', str(helper(directory, 'backup-key.sh')), str(directory / '.env')], check=True)
-        os.environ.pop('GPG_PASSPHRASE', None)
+        subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(directory / '.env')], check=True)
+        os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
     if args.action == 'start':
         if args.pull:
             warn_release(command)
@@ -205,7 +205,7 @@ def warn_release(command):
 
 
 DEPLOYMENT_FILES = ['compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
-                    'manage', 'manage.py', 'restore-home.sh', 'backup-key.sh']
+                    'manage', 'manage.py', 'restore-home.sh', 'backup-key.py']
 TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
 
 
@@ -362,9 +362,9 @@ def install(args):
     sources = {name: name for name in DEPLOYMENT_FILES[:3]}
     sources['.env.example'] = '.env.example'
     files = {name: download(f'{base}/{source}') for name, source in sources.items()}
-    if re.search(rb'^GPG_PASSPHRASE=', files['.env.example'], re.M):
-        sources['backup-key.sh'] = 'build/tools/backup-key.sh'
-        files['backup-key.sh'] = download(f'{base}/build/tools/backup-key.sh')
+    if re.search(rb'^BACKUP_GPG_PASSPHRASE=', files['.env.example'], re.M):
+        sources['backup-key.py'] = 'build/tools/backup-key.py'
+        files['backup-key.py'] = download(f'{base}/build/tools/backup-key.py')
     launcher = download(f'{base}/manage', optional=True)
     if launcher is not None:
         files['manage'] = launcher
@@ -414,8 +414,8 @@ def install(args):
         env.touch(mode=0o600, exist_ok=True)
         env.chmod(0o600)
         env.write_text(text)
-    if 'backup-key.sh' in files:
-        subprocess.run([str(directory / 'backup-key.sh'), str(env)], check=True)
+    if 'backup-key.py' in files:
+        subprocess.run([sys.executable, str(directory / 'backup-key.py'), str(env)], check=True)
     print(f'\nInstalled deployment files in {directory} (release {version}).')
     print(f'Edit {env} to configure Cloudflare Access and your tunnel before starting.')
     print(f'Then run sh "{directory}/manage" to launch. No services have been started.' if launcher is not None else

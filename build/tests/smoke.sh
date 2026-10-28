@@ -7,7 +7,6 @@ project_dir=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 home_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
 chmod 755 "$home_dir"
 home_mount="type=bind,src=$home_dir,dst=/home"
-timeout_mount="type=bind,src=$home_dir/timeout-home,dst=/home"
 home_storage=${TEST_HOME_STORAGE:-bind}
 if [ "$(uname -s)" = Darwin ]; then home_storage=volume; fi
 case "$home_storage" in
@@ -19,7 +18,6 @@ esac
 # Keep the empty bind-mount coverage on native Linux.
 if [ "$home_storage" = volume ]; then
     home_mount="type=volume,src=$name-home,dst=/home,volume-nocopy"
-    timeout_mount="type=volume,src=$name-timeout,dst=/home,volume-nocopy"
 fi
 cleanup() {
     result=$?
@@ -29,7 +27,7 @@ cleanup() {
         --entrypoint /bin/bash "$image" -ec 'find /test-home -mindepth 1 -delete' >/dev/null
     rmdir "$home_dir"
     if [ "$home_storage" = volume ]; then
-        docker volume rm "$name-home" "$name-timeout" >/dev/null 2>&1 || true
+        docker volume rm "$name-home" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
@@ -42,15 +40,18 @@ wait_ready() {
         sleep 2
     done
 }
-docker run -d --name "$name" --privileged --init --restart unless-stopped \
+docker run -d --name "$name" --privileged --init \
+    -e CF_ACCESS_TEAM_DOMAIN=test.cloudflareaccess.com \
+    -e CF_ACCESS_AUD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --restart unless-stopped \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready
 docker exec "$name" /bin/bash -ec '
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
-    /usr/bin/sudo -H -u cloud-user /bin/bash --login -ec "command -v brew; brew --version"
     test "$(stat -c %a /run/code-server/backend.sock)" = 660
     test "$(stat -c %u:%g /run/code-server/backend.sock)" = 10000:10000
-    if curl --silent --max-time 1 http://127.0.0.1:8080/; then exit 1; fi
+    test "$(curl --silent --max-time 2 --output /dev/null --write-out "%{http_code}" http://127.0.0.1:8080/)" = 403
+    envoy_pid=$(/usr/bin/supervisorctl pid envoy)
+    test "$(stat -c %U /proc/$envoy_pid)" = envoy
     if curl --silent --max-time 1 http://127.0.0.1:8081/; then exit 1; fi
     pid=$(/usr/bin/supervisorctl pid code-server)
     grep -q "^Uid:[[:space:]]*10000" "/proc/$pid/status"
@@ -78,16 +79,19 @@ docker logs "$name" 2>&1 | grep 'Critical service dockerd entered FATAL' >/dev/n
 docker exec "$name" /bin/bash -ec '
     touch /home/cloud-user/.ownership-sentinel
     chown 999:999 /home/cloud-user/.ownership-sentinel
+    mkdir -p /home/cloud-user/.local/bin
     # A user-installed Python must never replace Debian Python for infrastructure.
     for helper in python3 containerd runc iptables docker-proxy; do
-        printf "#!/bin/sh\nexit 86\n" > "/home/linuxbrew/.linuxbrew/bin/$helper"
-        chmod +x "/home/linuxbrew/.linuxbrew/bin/$helper"
+        printf "#!/bin/sh\nexit 86\n" > "/home/cloud-user/.local/bin/$helper"
+        chmod +x "/home/cloud-user/.local/bin/$helper"
     done
 '
 docker rm -f "$name" >/dev/null
 
 # Reuse the populated home offline; startup must preserve existing file owners.
-docker run -d --name "$name" --privileged --init --network none \
+docker run -d --name "$name" --privileged --init \
+    -e CF_ACCESS_TEAM_DOMAIN=test.cloudflareaccess.com \
+    -e CF_ACCESS_AUD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --network none \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready
 docker exec "$name" /bin/bash -ec '
@@ -99,8 +103,6 @@ docker exec "$name" /bin/bash -ec '
         resolved=$(PATH="$daemon_path" command -v "$helper" || true)
         case "$resolved" in /home/*) exit 1 ;; esac
     done
-    test ! -f /home/linuxbrew/.homebrew-installing
-    /usr/bin/sudo -H -u cloud-user /bin/bash --login -ec "brew --version"
     /usr/local/bin/container-healthcheck
     # Restarting code-server replaces its stale socket without repeating setup.
     /usr/bin/supervisorctl restart code-server
@@ -108,59 +110,4 @@ docker exec "$name" /bin/bash -ec '
     /usr/bin/supervisorctl stop dockerd
     if /usr/local/bin/container-healthcheck; then exit 1; fi
 '
-if docker logs "$name" 2>&1 | grep 'Installing Homebrew' >/dev/null; then
-    echo 'Offline startup attempted to reinstall Homebrew' >&2; exit 1
-fi
-# Validate timeout settings even when Homebrew is already installed.
-docker run --rm --network none --tmpfs /home:mode=755 -e HOMEBREW_INSTALL_TIMEOUT=invalid \
-    --entrypoint /bin/bash "$image" -ec '
-        mkdir -p /home/linuxbrew/.linuxbrew/bin
-        touch /home/linuxbrew/.linuxbrew/bin/brew
-        chmod +x /home/linuxbrew/.linuxbrew/bin/brew
-        if /bin/bash /usr/local/lib/preinstall.sh > /tmp/result 2>&1; then exit 1; fi
-        grep -q "HOMEBREW_INSTALL_TIMEOUT must be" /tmp/result
-        printf "#!/bin/sh\ntouch /tmp/root-brew-executed\n" > /home/linuxbrew/.linuxbrew/bin/brew
-        /bin/bash --login -c true
-        test ! -e /tmp/root-brew-executed
-    '
-# A deliberately paused installer must leave the backend socket unavailable.
-docker rm -f "$name" >/dev/null
-cat > "$home_dir/paused-installer.sh" <<'INSTALL'
-#!/bin/bash
-while [ ! -f /home/linuxbrew/continue-setup ]; do sleep 1; done
-mkdir -p /home/linuxbrew/.linuxbrew/bin
-printf '%s\n' '#!/bin/bash' 'echo fake-brew' > /home/linuxbrew/.linuxbrew/bin/brew
-chmod +x /home/linuxbrew/.linuxbrew/bin/brew
-INSTALL
-docker run -d --name "$name" --privileged --init --network none --tmpfs /home:mode=755,exec \
-    --mount "type=bind,src=$home_dir/paused-installer.sh,dst=/usr/local/lib/homebrew-install.sh,readonly" \
-    -e HOMEBREW_INSTALL_TIMEOUT=600 "$image" >/dev/null
-deadline=$(($(date +%s) + 60))
-until docker exec "$name" test -f /home/linuxbrew/.homebrew-installing; do
-    if [ "$(date +%s)" -gt "$deadline" ]; then docker logs "$name"; exit 1; fi
-    sleep 1
-done
-docker exec "$name" /bin/bash -ec '
-    test ! -S /run/code-server/backend.sock
-    if curl --unix-socket /run/code-server/backend.sock --fail --silent http://localhost/healthz; then exit 1; fi
-    if /usr/local/bin/container-healthcheck; then exit 1; fi
-    touch /home/linuxbrew/continue-setup
-'
-wait_ready
-# A stalled installer must time out, retain the retry marker, and stop Supervisor.
-docker rm -f "$name" >/dev/null
-mkdir "$home_dir/timeout-home"
-printf '#!/bin/bash\nsleep 60\n' > "$home_dir/timeout-installer.sh"
-docker run -d --name "$name" --privileged --init --network none \
-    --mount "$timeout_mount" \
-    --mount "type=bind,src=$home_dir/timeout-installer.sh,dst=/usr/local/lib/homebrew-install.sh,readonly" \
-    -e HOMEBREW_INSTALL_TIMEOUT=1 "$image" >/dev/null
-deadline=$(($(date +%s) + 90))
-until [ "$(docker inspect -f '{{.State.Running}}' "$name")" = false ]; do
-    if [ "$(date +%s)" -gt "$deadline" ]; then docker logs "$name"; exit 1; fi
-    sleep 1
-done
-docker logs "$name" 2>&1 | grep 'Workspace initialization failed (124)' >/dev/null
-docker run --rm --network none --mount "$timeout_mount" --entrypoint /usr/bin/test \
-    "$image" -f /home/linuxbrew/.homebrew-installing
 echo 'Full-container smoke tests passed.'

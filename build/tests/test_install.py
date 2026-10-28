@@ -23,7 +23,7 @@ class InstallationTests(unittest.TestCase):
         self.files = {name: (ROOT / name).read_bytes() for name in
                       ['compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
                        'manage', 'manage.py', '.env.example',
-                       'build/tools/restore-home.sh', 'build/tools/backup-key.sh']}
+                       'build/tools/restore-home.sh', 'build/tools/backup-key.py']}
         self.checksums = lambda: ''.join(
             hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
             for name, data in self.files.items()).encode()
@@ -47,14 +47,14 @@ class InstallationTests(unittest.TestCase):
         env = self.directory / '.env'
         self.assertEqual(env.stat().st_mode & 0o777, 0o600)
         self.assertIn('CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:1.2.3', env.read_text())
-        self.assertRegex(env.read_text(), r'GPG_PASSPHRASE=[a-f0-9]{64}')
+        self.assertRegex(env.read_text(), r'BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}')
         digest = 'ghcr.io/example/image@sha256:' + 'a' * 64
-        env.write_text('# My settings\nCODE_SERVER_IMAGE=' + digest + '\nSECRET=$(never-execute)\nGPG_PASSPHRASE=existing\n')
+        env.write_text('# My settings\nCODE_SERVER_IMAGE=' + digest + '\nSECRET=$(never-execute)\nBACKUP_GPG_PASSPHRASE=existing\n')
         management.install(self.args)
         self.assertIn('CODE_SERVER_IMAGE=' + digest, env.read_text())
         self.assertIn('SECRET=$(never-execute)', env.read_text())
-        self.assertIn('GPG_PASSPHRASE=existing', env.read_text())
-        self.assertIn('CLOUDFLARE_TUNNEL_TOKEN=', env.read_text())
+        self.assertIn('BACKUP_GPG_PASSPHRASE=existing', env.read_text())
+        self.assertIn('CF_TUNNEL_TOKEN=', env.read_text())
         self.assertEqual((self.directory / 'manage.py.bak').read_bytes(), self.files['manage.py'])
 
     def test_checksum_failure_leaves_deployment_untouched(self):

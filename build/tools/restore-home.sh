@@ -33,10 +33,10 @@ if not archive.is_file():
     sys.exit('Archive does not exist or is not a regular file: ' + str(archive))
 if ',' in str(archive) or ',' in volume:
     sys.exit('Archive paths and volume names must not contain commas')
-key = os.environ.get('GPG_PASSPHRASE', '')
+key = os.environ.get('BACKUP_GPG_PASSPHRASE', '')
 encrypted = archive.name.endswith('.gpg')
 if encrypted and not key:
-    sys.exit('Encrypted restore requires the original GPG_PASSPHRASE (manage reads it from .env).')
+    sys.exit('Encrypted restore requires the original BACKUP_GPG_PASSPHRASE (manage reads it from .env).')
 if key and not shutil.which('gpg'):
     sys.exit('Install gpg on the Docker host to restore encrypted backups or encrypt rollback backups.')
 run('docker', 'volume', 'inspect', volume, stdout=subprocess.DEVNULL)
