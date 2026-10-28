@@ -31,6 +31,8 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+# Keep in sync with compose.yaml; the workspace must not need --privileged.
+run_flags="--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/fuse --security-opt apparmor=unconfined --security-opt seccomp=unconfined --security-opt systempaths=unconfined"
 wait_ready() {
     deadline=$(($(date +%s) + 720))
     until docker exec "$name" /bin/bash -ec '
@@ -40,7 +42,8 @@ wait_ready() {
         sleep 2
     done
 }
-docker run -d --name "$name" --privileged --init \
+# shellcheck disable=SC2086 # run_flags is intentionally word-split.
+docker run -d --name "$name" $run_flags --init \
     -e CF_ACCESS_TEAM_DOMAIN=test.cloudflareaccess.com \
     -e CF_ACCESS_AUD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --restart unless-stopped \
     --mount "$home_mount" "$image" >/dev/null
@@ -51,6 +54,9 @@ docker exec "$name" /bin/bash -ec '
         command -v "$executable" >/dev/null
     done
     test "$(sudo -u cloud-user sudo -n id -u)" = 0
+    # Nested Docker must run containers, without host block devices exposed.
+    sudo -u cloud-user docker run --rm debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad true
+    test ! -e /dev/sda -a ! -e /dev/nvme0n1 -a ! -e /dev/vda
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
     test "$(stat -c %a /run/code-server/backend.sock)" = 660
     test "$(stat -c %u:%g /run/code-server/backend.sock)" = 10000:10000
@@ -94,7 +100,8 @@ docker exec "$name" /bin/bash -ec '
 docker rm -f "$name" >/dev/null
 
 # Reuse the populated home offline; startup must preserve existing file owners.
-docker run -d --name "$name" --privileged --init \
+# shellcheck disable=SC2086 # run_flags is intentionally word-split.
+docker run -d --name "$name" $run_flags --init \
     -e CF_ACCESS_TEAM_DOMAIN=test.cloudflareaccess.com \
     -e CF_ACCESS_AUD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --network none \
     --mount "$home_mount" "$image" >/dev/null

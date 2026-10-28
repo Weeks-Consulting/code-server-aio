@@ -20,6 +20,9 @@ just outdated        # List only outdated pins without changing files
 just upgrade         # Look up latest versions, then confirm updates
 just build           # Build the local test image
 just run             # Build and run locally using .env, attached to logs
+just stop            # Stop and remove all Docker containers
+just cleanup         # Remove all containers, images, build cache and local artifacts
+just cleanup --all   # Also delete all Docker volumes (including workspace data)
 just check           # Check shell syntax and Compose configurations
 just test            # Build once and run all local tests
 just test-proxy      # Build and run only the proxy tests
@@ -41,6 +44,16 @@ To run the project locally, configure `.env` in the checkout (see
 local deployment image and starts code-server and the Cloudflare tunnel with
 logs attached. Open your configured Cloudflare hostname to access code-server.
 Press Ctrl-C to stop the services; named volumes preserve your data.
+
+`just stop` stops every running container and removes all stopped containers on
+the current Docker daemon, including containers left behind by earlier runs.
+Volumes are preserved. `just cleanup` removes all containers
+and images, prunes Docker build cache, and deletes checkout Python caches and
+`.test-tmp.*` directories. These commands affect the current Docker daemon,
+including resources from other projects. Volumes survive normal cleanup;
+`just cleanup --all` also deletes all unused named and anonymous volumes after
+removing containers, including the workspace home and nested Docker data.
+Cleanup does not delete source files, `.env`, or backup archives.
 
 Override the local image tag with `just image=my-image:test test`. Test recipes
 use isolated containers and temporary storage. CI runs the same scripts from
@@ -81,7 +94,7 @@ uploads; GitHub-hosted runs keep those features.
 The wrapper disables act's automatic `.env` loading so deployment settings do not
 override the workflow's test configuration.
 
-The smoke test needs privileged Docker. On macOS it uses named volumes to preserve Linux UID/GID ownership;
+The smoke test needs a Docker host that allows `SYS_ADMIN` and unconfined seccomp/AppArmor/system paths. On macOS it uses named volumes to preserve Linux UID/GID ownership;
 on Linux it also exercises an empty home bind mount. Temporary bind-mounted test
 files are created in ignored `.test-tmp.*` directories under the checkout, which
 must be shared with Docker. The restore test uses temporary volumes and encrypted

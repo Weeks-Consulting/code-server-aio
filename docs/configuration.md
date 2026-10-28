@@ -2,8 +2,9 @@
 
 ## Setup
 
-Anyone granted Cloudflare Access to this privileged development environment
-effectively has root access to the Docker host. Restrict the Access policy to
+Anyone granted Cloudflare Access to this development environment (passwordless
+sudo, Docker group, `SYS_ADMIN` with relaxed seccomp) should be treated as having
+root access to the Docker host. Restrict the Access policy to
 specific trusted users. A Service Auth token also grants root access to the VM;
 protect it as a root credential. For defense in depth, set the optional origin
 allowlists below in addition to restricting the Access policy.
@@ -26,7 +27,7 @@ allowlists below in addition to restricting the Access policy.
    user that installed it. From a checkout, use `./manage --pull`.
 
 Find the AUD under **Zero Trust → Access controls → Applications → Configure →
-Additional settings**. Open `https://<your-hostname>/code/` and sign in through Access.
+Additional settings**. Open your public hostname and sign in through Access.
 
 ## Environment configuration
 
@@ -85,24 +86,6 @@ Compose also accepts `COMPOSE_PROJECT_NAME`, although it is not listed in
 This name scopes Docker volumes, backup stop labels, and the default backup ID.
 Changing it selects a different set of named volumes, so keep it consistent for
 an existing deployment.
-
-## Application routes
-
-Envoy serves code-server at `/code/`, stripping `/code` before forwarding HTTP
-and WebSocket requests to its Unix socket. Requests to `/` and `/code` redirect
-to `/code/`, preserving query parameters such as `folder`. Other paths return
-404 after authentication; they are reserved for future application routes.
-Existing bookmarks to editor paths under `/` must use `/code/` instead.
-
-The tunnel origin remains `http://code-server:8080`. Keep the Cloudflare Access
-application protecting the entire hostname so future application paths also
-receive Access tokens. All Envoy routes, including redirects and unknown paths,
-pass through the existing JWT and identity checks.
-
-Add future application routes before the final catch-all 404 in
-`build/runtime/envoy.json.template`, with a corresponding backend cluster.
-Code-server starts with `--abs-proxy-base-path /code` so its absolute-path
-application proxy can account for the editor prefix.
 
 ## Access protection
 

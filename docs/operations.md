@@ -10,8 +10,10 @@ docker compose down
 ```
 
 code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Docker
-group access. Supervisor manages the services; the container runs privileged for
-Docker-in-Docker. Startup repairs only the home directory owner and preserves ownership of its contents.
+group access. Supervisor manages the services; the container runs with
+`SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse` and relaxed seccomp/AppArmor/system paths for
+Docker-in-Docker, instead of `--privileged`; host devices are not exposed. The entrypoint
+remounts `/sys/fs/cgroup` read-write for nested containers. Startup repairs only the home directory owner and preserves ownership of its contents.
 If any supervised service exhausts its startup retries, Supervisor shuts down so
 Docker's restart policy can restart the container. Missing or invalid Access
 configuration prevents Envoy from starting until corrected.

@@ -18,6 +18,24 @@ build:
 run:
     docker compose --env-file .env -f compose.yaml -f compose.build.yaml up --build
 
+# Stop and remove all containers on the current Docker daemon, preserving volumes.
+stop:
+    #!/bin/sh
+    set -eu
+    containers=$(docker ps -q)
+    if [ -n "$containers" ]; then
+        docker stop $containers
+    fi
+    containers=$(docker ps -aq)
+    if [ -n "$containers" ]; then
+        docker rm $containers
+    fi
+
+# Remove all containers, images, build cache, and local artifacts; --all also deletes volumes.
+[positional-arguments]
+cleanup *args:
+    sh ./build/tools/cleanup.sh "$@"
+
 # Check shell syntax and all Compose file combinations without using .env.
 check:
     ./build/tests/check.sh

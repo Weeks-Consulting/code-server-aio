@@ -16,7 +16,6 @@ import tempfile
 import threading
 import time
 import unittest
-from urllib.parse import urlsplit
 
 import importlib.util
 
@@ -57,7 +56,7 @@ class Backend(http.server.BaseHTTPRequestHandler):
             except (ConnectionResetError, BrokenPipeError):
                 pass
         else:
-            body = self.path.encode()
+            body = b'backend reached'
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -187,7 +186,7 @@ class AccessProxyTests(unittest.TestCase):
         return message + '.' + b64(signature)
 
     @staticmethod
-    def response(token=None, path='/code/', headers=None):
+    def response(token=None, path='/', headers=None):
         connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3)
         request_headers = dict(headers or {})
         if token is not None:
@@ -231,26 +230,6 @@ class AccessProxyTests(unittest.TestCase):
             with self.subTest(audience=audience):
                 self.assertEqual(self.status(self.token({'aud': audience})), 200)
         self.check_health()
-
-    def test_subpath_routing(self):
-        token = self.token()
-        for path in ('/', '/code', '/?folder=/home/cloud-user', '/code?folder=/home/cloud-user'):
-            with self.subTest(path=path):
-                status, headers, _ = self.response(token, path)
-                self.assertEqual(status, 302)
-                location = urlsplit(headers['location'])
-                self.assertEqual(location.path, '/code/')
-                self.assertEqual(location.query, urlsplit(path).query)
-        for suffix in ('', 'static/app.js', 'healthz', 'proxy/3000/', 'absproxy/3000/', '?folder=/home/cloud-user'):
-            with self.subTest(suffix=suffix):
-                status, _, body = self.response(token, '/code/' + suffix)
-                self.assertEqual(status, 200)
-                self.assertEqual(body, '/' + suffix)
-        for path in ('/other', '/coder/', '/code-other', '/healthz', '/static/app.js'):
-            with self.subTest(path=path):
-                self.assertEqual(self.status(token, path), 404)
-        for path in ('/', '/code', '/code/', '/other'):
-            self.assertEqual(self.status(None, path), 403)
 
     def test_invalid_tokens(self):
         tokens = [None, 'garbage', 'a.b.c', self.token(key=1),
@@ -358,7 +337,7 @@ class AccessProxyTests(unittest.TestCase):
 
     def websocket(self):
         connection = socket.create_connection(('127.0.0.1', 8080), timeout=5)
-        connection.sendall(('GET /code/socket HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n'
+        connection.sendall(('GET /socket HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n'
             'Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n'
             'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n'
             'Cf-Access-Jwt-Assertion: ' + self.token() + '\r\n\r\n').encode())

@@ -5,6 +5,11 @@ set -euo pipefail
 # Root setup must never resolve commands from the user's mounted directories.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Without --privileged, Docker mounts cgroups read-only; nested Docker needs them writable.
+if ! mount -o remount,rw /sys/fs/cgroup 2>/dev/null; then
+    echo 'Warning: could not make /sys/fs/cgroup writable; nested containers may fail.' >&2
+fi
+
 # The backend socket stays inside the combined code-server and Envoy container.
 mkdir -p /run/code-server
 chown 10000:10000 /run/code-server

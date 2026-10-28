@@ -1,7 +1,16 @@
 services:
   code-server:
     image: ${CODE_SERVER_IMAGE:-ghcr.io/weeks-consulting/code-server-aio:latest}
-    privileged: true
+    # Nested Docker without full --privileged: no access to host devices.
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+      - systempaths=unconfined
     init: true
     restart: unless-stopped
     stop_grace_period: 150s

@@ -46,38 +46,11 @@
                         "routes": [
                           {
                             "match": {
-                              "path": "/"
-                            },
-                            "redirect": {
-                              "path_redirect": "/code/",
-                              "response_code": "FOUND"
-                            }
-                          },
-                          {
-                            "match": {
-                              "path": "/code"
-                            },
-                            "redirect": {
-                              "path_redirect": "/code/",
-                              "response_code": "FOUND"
-                            }
-                          },
-                          {
-                            "match": {
-                              "prefix": "/code/"
+                              "prefix": "/"
                             },
                             "route": {
                               "cluster": "code_server",
-                              "prefix_rewrite": "/",
                               "timeout": "0s"
-                            }
-                          },
-                          {
-                            "match": {
-                              "prefix": "/"
-                            },
-                            "direct_response": {
-                              "status": 404
                             }
                           }
                         ]
