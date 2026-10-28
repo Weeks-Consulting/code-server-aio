@@ -19,6 +19,7 @@ just build-upgrade   # Review and update build/test tooling
 just outdated        # List only outdated pins without changing files
 just upgrade         # Look up latest versions, then confirm updates
 just build           # Build the local test image
+just run             # Build and run locally using .env, attached to logs
 just check           # Check shell syntax and Compose configurations
 just test            # Build once and run all local tests
 just test-proxy      # Build and run only the proxy tests
@@ -34,6 +35,12 @@ published releases and [Deploy](deployment.md#deploy) to start services.
 
 Builds read the code-server version from the `packages.code-server.version` entry in `build/versions.json`. Building the
 local test image needs no `.env` or Cloudflare credentials.
+
+To run the project locally, configure `.env` in the checkout (see
+[configuration](configuration.md#setup)), then run `just run`. It builds the
+local deployment image and starts code-server and the Cloudflare tunnel with
+logs attached. Open your configured Cloudflare hostname to access code-server.
+Press Ctrl-C to stop the services; named volumes preserve your data.
 
 Override the local image tag with `just image=my-image:test test`. Test recipes
 use isolated containers and temporary storage. CI runs the same scripts from

@@ -78,7 +78,7 @@ def probe(expected, backend_ip):
     status, _ = request('code-server', 8080)
     assert status == 403, status
     _, token = request('fixture', 8088, '/token')
-    status, body = request('code-server', 8080, '/healthz', {'Cf-Access-Jwt-Assertion': token})
+    status, body = request('code-server', 8080, '/code/healthz', {'Cf-Access-Jwt-Assertion': token})
     assert status == int(expected), (status, body)
     if expected == '200':
         assert json.loads(body)['status'] in ('alive', 'expired'), body

@@ -34,6 +34,9 @@ Anyone granted access effectively has root access to the Docker host. Use a
 host dedicated to this workspace and restrict Access to trusted users.
 See [configuration and Access protection](docs/configuration.md) for details.
 
+Open `https://<your-hostname>/code/` after signing in. The hostname root redirects
+to `/code/`.
+
 Save projects under `/home/cloud-user`. Named volumes preserve `/home` and
 nested Docker data across container recreation. Stopping the deployment keeps
 these volumes. See [operations](docs/operations.md) for logs and customization.
@@ -64,7 +67,8 @@ Save `BACKUP_GPG_PASSPHRASE` separately: archives cannot be recovered without it
 See [backups](docs/backups.md) and [restore](docs/restore.md).
 
 For development, run `just` to list recipes, `just check` for host checks,
-`just build` to build the test image, and `just test` for the full suite.
+`just build` to build the test image, `just run` to build and start the local
+deployment using the checkout's `.env`, and `just test` for the full suite.
 See the [development guide](docs/development.md) for requirements and dependency updates.
 
 ## Guides

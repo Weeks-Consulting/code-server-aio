@@ -14,6 +14,10 @@ install:
 build:
     docker buildx build --load -f build/Dockerfile -t {{quote(image)}} .
 
+# Build and run the local deployment using the checkout's .env, attached to logs.
+run:
+    docker compose --env-file .env -f compose.yaml -f compose.build.yaml up --build
+
 # Check shell syntax and all Compose file combinations without using .env.
 check:
     ./build/tests/check.sh

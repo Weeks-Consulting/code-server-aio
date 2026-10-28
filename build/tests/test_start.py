@@ -31,7 +31,7 @@ class StartupTests(unittest.TestCase):
             result = subprocess.run(['sh', '-c', candidate], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ['--socket', str(stale), '--socket-mode',
-                                                         '660', '--auth', 'none', '/home/cloud-user'])
+                                                         '660', '--auth', 'none', '--abs-proxy-base-path', '/code', '/home/cloud-user'])
 
     def test_entrypoint_initializes_before_supervisor_and_aborts_on_failure(self):
         script = (ROOT / 'build/runtime/entrypoint.sh').read_text()

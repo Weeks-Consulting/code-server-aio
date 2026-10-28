@@ -46,11 +46,38 @@
                         "routes": [
                           {
                             "match": {
-                              "prefix": "/"
+                              "path": "/"
+                            },
+                            "redirect": {
+                              "path_redirect": "/code/",
+                              "response_code": "FOUND"
+                            }
+                          },
+                          {
+                            "match": {
+                              "path": "/code"
+                            },
+                            "redirect": {
+                              "path_redirect": "/code/",
+                              "response_code": "FOUND"
+                            }
+                          },
+                          {
+                            "match": {
+                              "prefix": "/code/"
                             },
                             "route": {
                               "cluster": "code_server",
+                              "prefix_rewrite": "/",
                               "timeout": "0s"
+                            }
+                          },
+                          {
+                            "match": {
+                              "prefix": "/"
+                            },
+                            "direct_response": {
+                              "status": 404
                             }
                           }
                         ]
@@ -367,6 +394,7 @@
         "name": "cloudflare_jwks",
         "connect_timeout": "5s",
         "type": "STRICT_DNS",
+        "dns_lookup_family": "V4_PREFERRED",
         "load_assignment": {
           "cluster_name": "cloudflare_jwks",
           "endpoints": [
