@@ -329,6 +329,33 @@
                             "inline_string": "%START_TIME% %REQ(:METHOD)% %PROTOCOL% %RESPONSE_CODE% %RESPONSE_CODE_DETAILS%\n"
                           }
                         }
+                      },
+                      "filter": {
+                        "or_filter": {
+                          "filters": [
+                            {
+                              "header_filter": {
+                                "header": {
+                                  "name": "user-agent",
+                                  "string_match": {
+                                    "exact": "code-server-container-healthcheck"
+                                  },
+                                  "invert_match": true
+                                }
+                              }
+                            },
+                            {
+                              "status_code_filter": {
+                                "comparison": {
+                                  "op": "NE",
+                                  "value": {
+                                    "default_value": 403
+                                  }
+                                }
+                              }
+                            }
+                          ]
+                        }
                       }
                     }
                   ]

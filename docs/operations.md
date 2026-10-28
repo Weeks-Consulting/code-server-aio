@@ -9,6 +9,12 @@ docker compose exec code-server supervisorctl status
 docker compose down
 ```
 
+The container healthcheck deliberately expects HTTP 403 from an unauthenticated
+Envoy request every 30 seconds. It uses the `code-server-container-healthcheck`
+User-Agent; Envoy omits these expected denials from its access log. Unexpected
+response codes and requests with other User-Agents remain logged. This filter
+affects logging only; the probe still checks that authentication is enforced.
+
 code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Docker
 group access. Supervisor manages the services; the container runs with
 `SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse` and relaxed seccomp/AppArmor/system paths for

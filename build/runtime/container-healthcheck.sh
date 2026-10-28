@@ -30,4 +30,5 @@ check_http() {
 
 check_http http://localhost/healthz 200 --unix-socket /run/code-server/backend.sock --location
 check_http http://127.0.0.1:9901/ready 200
-check_http http://127.0.0.1:8080/ 403
+# Mark the expected denial so Envoy can omit this probe from its access log.
+check_http http://127.0.0.1:8080/ 403 --user-agent code-server-container-healthcheck
