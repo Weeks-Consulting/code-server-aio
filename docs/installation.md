@@ -14,6 +14,13 @@ On macOS, keep the deployment, checkout, and backup archives in a folder shared
 with Docker, such as your home directory. Use `--directory "$HOME/code-server"`
 without `sudo` as shown below.
 
+GitHub authentication is required to verify release attestations, including for
+public releases. Run `gh auth login --hostname github.com` as the installing user,
+or export `GH_TOKEN` (a classic personal access token with no scopes is sufficient
+for public releases). `GITHUB_TOKEN` is also accepted. The installer checks for
+credentials before installing packages or downloading files; invalid or expired
+credentials will still fail verification. Dry runs do not require authentication.
+
 Installation and management run through `manage`, a thin shell wrapper around
 `manage.py` using Python's standard library. From a checkout, install with:
 
@@ -29,12 +36,12 @@ no apt repository is added. `just install` installs a compatible CLI in
 `/usr/local/bin` on Debian when needed, or through Homebrew on macOS.
 The bootstrap verifies the release checksum attestation and the downloaded
 `manage.py` checksum before executing it. The Python installer also verifies the
-checksum attestation before replacing deployment files. Authenticate `gh` if
-required by your GitHub access; when using sudo, ensure the privileged process
-has the necessary GitHub authentication. Verification failures stop installation.
+checksum attestation before replacing deployment files. When using sudo, export
+`GH_TOKEN` and preserve it as shown below; your normal user’s `gh` login is
+generally unavailable to root. Verification failures stop installation.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sudo sh -s --
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sudo --preserve-env=GH_TOKEN sh -s --
 ```
 
 Use `--directory PATH` to choose the installation directory. `sudo` is optional

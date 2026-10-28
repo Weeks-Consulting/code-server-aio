@@ -58,7 +58,8 @@ class InstallationTests(unittest.TestCase):
                 return json.dumps({'tag_name': 'v1.2.3'}).encode()
             return self.files[url.split('/refs/tags/v1.2.3/')[1]]
         self.fetch = fetch
-        for mock in (patch.object(management, 'dependencies'),
+        for mock in (patch.object(management, 'require_github_auth'),
+                     patch.object(management, 'dependencies'),
                      patch.object(management, 'verify_release'),
                      patch.object(management.os, 'geteuid', return_value=1000),
                      patch.object(management, 'ensure_gh', return_value='gh'),
@@ -150,10 +151,21 @@ class InstallationTests(unittest.TestCase):
 
     def test_dry_run_has_no_downloads_or_filesystem_changes(self):
         self.args.dry_run = True
-        with patch.object(management, 'download') as download:
+        with patch.object(management, 'download') as download, \
+                patch.object(management, 'require_github_auth') as auth:
             management.install(self.args)
+        auth.assert_not_called()
         download.assert_not_called()
         self.assertFalse(self.directory.exists())
+
+    def test_authentication_precedes_dependencies_and_downloads(self):
+        with patch.object(management, 'require_github_auth', side_effect=ValueError('missing credentials')), \
+                patch.object(management, 'dependencies') as dependencies, \
+                patch.object(management, 'download') as download:
+            with self.assertRaisesRegex(ValueError, 'missing credentials'):
+                management.install(self.args)
+            dependencies.assert_not_called()
+            download.assert_not_called()
 
     def test_validation_precedes_dependencies_and_downloads(self):
         for attr, value in [('version', 'not-a-tag'), ('repository', '../unsafe')]:
@@ -182,6 +194,37 @@ class InstallationTests(unittest.TestCase):
         management.install(self.args)
         self.assertIn('CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:latest',
                       (self.directory / '.env').read_text())
+
+
+class AuthenticationTests(unittest.TestCase):
+    def test_missing_credentials_fail_without_downloads(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(management.shutil, 'which', return_value=None), \
+                patch.object(management, 'download') as download:
+            with self.assertRaisesRegex(ValueError, 'sudo --preserve-env=GH_TOKEN'):
+                management.require_github_auth()
+            download.assert_not_called()
+
+    def test_environment_tokens_need_no_cli(self):
+        for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
+            with self.subTest(name=name), patch.dict(os.environ, {name: 'test-token'}, clear=True), \
+                    patch.object(management.shutil, 'which') as which:
+                management.require_github_auth()
+                which.assert_not_called()
+
+    def test_existing_cli_login_is_checked_for_github_com(self):
+        for status in (0, 1):
+            with self.subTest(status=status), patch.dict(os.environ, {}, clear=True), \
+                    patch.object(management.shutil, 'which', return_value='/bin/gh'), \
+                    patch.object(management.subprocess, 'run',
+                                 return_value=subprocess.CompletedProcess([], status)) as run:
+                if status:
+                    with self.assertRaisesRegex(ValueError, 'GitHub authentication'):
+                        management.require_github_auth()
+                else:
+                    management.require_github_auth()
+                self.assertEqual(run.call_args.args[0],
+                                 ['/bin/gh', 'auth', 'status', '--hostname', 'github.com'])
 
 
 class DependencyTests(unittest.TestCase):
@@ -225,6 +268,23 @@ class DependencyTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_missing_authentication_stops_before_bootstrap_downloads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tools = Path(temporary)
+            for name in ('gh', 'curl'):
+                tool = tools / name
+                tool.write_text('#!/bin/sh\nexit 99\n')
+                tool.chmod(0o755)
+            env = {**os.environ, 'PATH': str(tools) + ':' + os.environ['PATH']}
+            env.pop('GH_TOKEN', None)
+            env.pop('GITHUB_TOKEN', None)
+            result = subprocess.run(['sh', '-s', '--'],
+                                    input=(ROOT / 'build/tools/install.sh').read_text(),
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('GitHub authentication is required', result.stderr)
+            self.assertIn('sudo --preserve-env=GH_TOKEN', result.stderr)
+
     def test_verification_precedes_execution_and_failures_stop_bootstrap(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -256,7 +316,7 @@ class BootstrapTests(unittest.TestCase):
             caller = root / 'caller' / 'nested'
             caller.mkdir(parents=True)
             (root / 'manage.py').write_text('raise RuntimeError("unverified local file executed")')
-            env = {**os.environ, 'PATH': str(tools) + ':' + os.environ['PATH']}
+            env = {**os.environ, 'GH_TOKEN': 'test-token', 'PATH': str(tools) + ':' + os.environ['PATH']}
             for overrides, succeeds in (({'REJECT': '1'}, False), ({'TAMPER': '1'}, False), ({}, True)):
                 result = subprocess.run(['sh', '-s', '--'], input=script.read_text(), cwd=caller, env={**env, **overrides}, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)

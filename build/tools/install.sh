@@ -10,6 +10,15 @@ if [ -f "$0" ] && [ "$(basename -- "$0")" = install.sh ]; then
 fi
 command -v python3 >/dev/null || { echo 'Install python3 before running this installer.' >&2; exit 1; }
 command -v curl >/dev/null || { echo 'Install curl or use manage install from a checkout.' >&2; exit 1; }
+# Check before downloading even the checksum-pinned CLI. sudo may strip tokens.
+if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    if ! command -v gh >/dev/null 2>&1 || ! gh auth status --hostname github.com >/dev/null 2>&1; then
+        echo 'GitHub authentication is required to verify release attestations.' >&2
+        echo 'Run gh auth login --hostname github.com or export GH_TOKEN (a classic token with no scopes suffices for public releases).' >&2
+        echo 'With sudo, use sudo --preserve-env=GH_TOKEN so the privileged process receives the token.' >&2
+        exit 1
+    fi
+fi
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 trap 'exit 129' HUP

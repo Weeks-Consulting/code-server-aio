@@ -9,7 +9,10 @@ The entire project has also been reviewed and tested by a real person.
 
 ## Quick start
 
-Requires Docker with Compose and Python 3. The installer can install missing host
+Requires Docker with Compose, Python 3, and GitHub authentication for release
+attestation verification (`gh auth login --hostname github.com` or an exported
+`GH_TOKEN`). When installing with sudo, use `sudo --preserve-env=GH_TOKEN`
+with an exported token. The installer can install missing host
 dependencies on Debian or macOS; see the [installation guide](docs/installation.md)
 for host setup, installing without a checkout, and release selection.
 

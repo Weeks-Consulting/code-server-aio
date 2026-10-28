@@ -394,6 +394,20 @@ def download(url):
             time.sleep(2 ** attempt)
 
 
+def require_github_auth():
+    """Fail before host changes or downloads when verification cannot authenticate."""
+    if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
+        return
+    gh = shutil.which('gh')
+    if gh and subprocess.run([gh, 'auth', 'status', '--hostname', 'github.com'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        return
+    fail('GitHub authentication is required to verify release attestations. '
+         'Run gh auth login --hostname github.com or export GH_TOKEN (a classic token with no scopes '
+         'is sufficient for public releases). With sudo, use sudo --preserve-env=GH_TOKEN; '
+         'the privileged process must receive the token.')
+
+
 def verify_release(checksums, repository):
     with tempfile.TemporaryDirectory(prefix='release-verification-') as directory:
         path = Path(directory) / 'SHA256SUMS'
@@ -512,6 +526,8 @@ def install(args):
     if version and not re.fullmatch(TAG, version):
         fail(f'Expected a release tag such as v4.141.0 or v4.141.0-1; got: {version}')
     validate_destination(directory, [*DEPLOYMENT_FILES, '.env'])
+    if not args.dry_run:
+        require_github_auth()
     dependencies(args.dry_run)
     image = 'ghcr.io/' + repository.lower() + ':' + (version[1:] if version else 'latest')
     if args.dry_run:
