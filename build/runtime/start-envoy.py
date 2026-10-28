@@ -2,6 +2,8 @@
 import json
 import copy
 import os
+import re
+import sys
 from pathlib import Path
 
 
@@ -34,7 +36,19 @@ def render(template, environment):
     return config
 
 
+def validate(environment):
+    if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.cloudflareaccess\.com',
+                        environment.get('CF_ACCESS_TEAM_DOMAIN', '')):
+        raise ValueError('Set CF_ACCESS_TEAM_DOMAIN to your team.cloudflareaccess.com hostname')
+    if not re.fullmatch(r'[a-fA-F0-9]{64}', environment.get('CF_ACCESS_AUD', '')):
+        raise ValueError('Set CF_ACCESS_AUD to the 64-character application audience')
+
+
 if __name__ == '__main__':
+    try:
+        validate(os.environ)
+    except ValueError as error:
+        sys.exit(str(error))
     config = render(Path('/etc/envoy/envoy.json.template').read_text(), os.environ)
     path = Path('/run/envoy/envoy.json')
     Path('/run/envoy/admin.sock').unlink(missing_ok=True)

@@ -33,28 +33,34 @@ archive = Path(sys.argv[1]).resolve()
 volume = sys.argv[2]
 if not archive.is_file():
     sys.exit('Archive does not exist or is not a regular file: ' + str(archive))
-if ',' in str(archive) or ',' in volume:
-    sys.exit('Archive paths and volume names must not contain commas')
+if ',' in volume:
+    sys.exit('Volume names must not contain commas')
 key = os.environ.get('BACKUP_GPG_PASSPHRASE', '')
 encrypted = archive.name.endswith('.gpg')
 if encrypted and not key:
     sys.exit('Encrypted restore requires the original BACKUP_GPG_PASSPHRASE (manage reads it from .env).')
 if key and not shutil.which('gpg'):
     sys.exit('Install gpg on the Docker host to restore encrypted backups or encrypt rollback backups.')
-run('docker', 'volume', 'inspect', volume, stdout=subprocess.DEVNULL)
-if subprocess.check_output(['docker', 'ps', '-q', '--filter', 'volume=' + volume]).strip():
-    sys.exit('Stop all containers using ' + volume + ' before restoring (use docker compose down).')
+try:
+    run('docker', 'volume', 'inspect', volume, stdout=subprocess.DEVNULL)
+    if subprocess.check_output(['docker', 'ps', '-q', '--filter', 'volume=' + volume]).strip():
+        sys.exit('Stop all containers using ' + volume + ' before restoring (use docker compose down).')
+except (OSError, subprocess.CalledProcessError) as error:
+    sys.exit('Cannot inspect restore volume; check its name and Docker access: ' + str(error))
 parent = archive.parent
 if archive.name in ('original-home.tar.gz', 'original-home.tar.gz.gpg'):
     import re
     while re.fullmatch(r'pre-restore\.[A-Za-z0-9_]{8}', parent.name):
         parent = parent.parent
-rollback = Path(tempfile.mkdtemp(prefix='pre-restore.', dir=parent))
+try:
+    rollback = Path(tempfile.mkdtemp(prefix='pre-restore.', dir=parent))
+except OSError as error:
+    sys.exit('Cannot create rollback directory beside archive; copy the archive to a writable folder: ' + str(error))
 os.chmod(rollback, 0o700)
 name = 'original-home.tar.gz' + ('.gpg' if key else '')
 partial = rollback / ('.' + name + '.partial')
 stage = '.restore-staging-' + uuid.uuid4().hex
-image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad')
+image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4')
 guard = 'code-server-restore-' + hashlib.sha256(volume.encode()).hexdigest()[:24]
 create = ['docker', 'create', '--name', guard, '--network', 'none', '--user', '0:0',
         '--mount', 'type=volume,src=' + volume + ',dst=/restore',

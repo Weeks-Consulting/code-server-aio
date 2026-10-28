@@ -27,7 +27,7 @@ also require a matching version. Pushing a tag alone does not publish.
 
 After both architectures pass, the release publishes
 `ghcr.io/<owner>/<repository>:4.141.0`, by assembling the tested image digests. Tested images are uploaded by digest only;
-no temporary test tags are published. The test jobs have read-only repository
+a single reusable `staging` tag holds the tested manifest during attestation. The test jobs have read-only repository
 permissions. On publishing runs, they transfer the exact tested images as one-day
 artifacts to separate upload jobs with package write permission; images are not rebuilt.
 These image artifacts use GitHub Actions artifact storage. This Docker-load publication path does not generate BuildKit provenance or SBOM attestations. Stable releases

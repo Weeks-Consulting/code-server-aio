@@ -83,6 +83,10 @@ Do not change these without discussing it first.
 - `just install` installs GitHub CLI (`gh`). Bootstrap Python and deployment files
   require verified checksum attestations from the publishing repository/workflow
   before execution or replacement. Do not silently bypass verification.
+- Bootstrap and `manage.py` embed the same checksum-pinned GitHub CLI downloader so
+  neither needs to execute an unverified helper. Pins live in `build/build-versions.json`;
+  `sync-pins` updates both copies and tests check that their implementations match.
+  Installers use temporary binaries; Debian `just install` can install into `/usr/local/bin`.
 - Restores reserve one named container per volume across the whole operation.
   Stop active helpers before staging cleanup, and retain staging/rollback after
   an interrupted replacement. A stale reservation after SIGKILL requires inspection.

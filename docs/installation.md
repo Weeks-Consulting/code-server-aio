@@ -21,9 +21,12 @@ Installation and management run through `manage`, a thin shell wrapper around
 ./manage install --directory "$HOME/code-server"
 ```
 
-For hosts without a checkout, install curl, Python 3, and a GitHub CLI (`gh`) version
-that supports `gh attestation verify` first (`apt-get install gh` on Debian or
-`brew install gh` on macOS). `just install` also installs gh.
+For hosts without a checkout, install curl and Python 3 first. If the installed
+GitHub CLI cannot run `gh attestation verify`, the bootstrap and Python installer
+download an official, version-pinned GitHub CLI binary and verify its SHA256
+before running it. The binary is temporary and supports Linux/macOS on amd64/arm64;
+no apt repository is added. `just install` installs a compatible CLI in
+`/usr/local/bin` on Debian when needed, or through Homebrew on macOS.
 The bootstrap verifies the release checksum attestation and the downloaded
 `manage.py` checksum before executing it. The Python installer also verifies the
 checksum attestation before replacing deployment files. Authenticate `gh` if
@@ -77,7 +80,7 @@ as the same user that installed the deployment. This applies to all launcher
 commands, including updates, backups, and restores, and to direct Docker Compose
 commands that read this `.env`.
 The installer does not start
-or restart services; start them with Docker Compose after configuring `.env`.
+or restart services; start them with `manage --pull` after configuring `.env`.
 All services use `restart: unless-stopped`: once deployed, Docker restarts them
 when they exit or the Docker daemon restarts, unless you explicitly stop them.
 

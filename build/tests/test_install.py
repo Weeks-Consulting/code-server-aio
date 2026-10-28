@@ -61,6 +61,7 @@ class InstallationTests(unittest.TestCase):
         for mock in (patch.object(management, 'dependencies'),
                      patch.object(management, 'verify_release'),
                      patch.object(management.os, 'geteuid', return_value=1000),
+                     patch.object(management, 'ensure_gh', return_value='gh'),
                      patch.object(management, 'download', side_effect=fetch)):
             mock.start()
             self.addCleanup(mock.stop)
@@ -215,7 +216,8 @@ class DependencyTests(unittest.TestCase):
                         subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0),
                         subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)]) as commands, \
                     patch.object(management.subprocess, 'check_output', return_value='/opt/homebrew\n'):
-                management.dependencies(False)
+                with patch.object(management, 'ensure_gh', return_value='gh'):
+                    management.dependencies(False)
             target = Path(directory) / 'cli-plugins/docker-compose'
             self.assertTrue(target.is_symlink())
             self.assertEqual(str(target.readlink()), '/opt/homebrew/lib/docker/cli-plugins/docker-compose')
@@ -245,14 +247,18 @@ class BootstrapTests(unittest.TestCase):
             gh = tools / 'gh'
             gh.write_text(f'#!{sys.executable}\nimport os, pathlib, sys\n'
                           'assert sys.argv[1:3] == ["attestation", "verify"]\n'
+                          'if "--help" in sys.argv: sys.exit(0)\n'
                           'assert "--signer-workflow" in sys.argv\n'
                           f'assert not pathlib.Path({str(root / "executed")!r}).exists()\n'
                           'sys.exit(1 if os.environ.get("REJECT") else 0)\n')
             curl.chmod(0o755)
             gh.chmod(0o755)
+            caller = root / 'caller' / 'nested'
+            caller.mkdir(parents=True)
+            (root / 'manage.py').write_text('raise RuntimeError("unverified local file executed")')
             env = {**os.environ, 'PATH': str(tools) + ':' + os.environ['PATH']}
             for overrides, succeeds in (({'REJECT': '1'}, False), ({'TAMPER': '1'}, False), ({}, True)):
-                result = subprocess.run(['sh', str(script)], env={**env, **overrides}, capture_output=True, text=True)
+                result = subprocess.run(['sh', '-s', '--'], input=script.read_text(), cwd=caller, env={**env, **overrides}, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
                 self.assertEqual((root / 'executed').exists(), succeeds)
 

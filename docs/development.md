@@ -112,9 +112,9 @@ logic; the version bundled with either host is sufficient.
 
 `build/versions.json` holds shipped image and deployment dependencies: code-server, Envoy, the Debian slim base, cloudflared, and the backup service image. `just version`, `just outdated`, and `just upgrade` inspect, check, and update this group.
 
-`build/build-versions.json` holds build/test tooling: act, GitHub Actions, the act runner image, and RustFS for backup tests. Use `just build-version`, `just build-outdated`, and `just build-upgrade` for this group. Debian CI and the restore helper share the shipped Debian slim base pin.
+`build/build-versions.json` holds build/test tooling: act, the installer’s GitHub CLI, GitHub Actions, the act runner image, and RustFS for backup tests. Use `just build-version`, `just build-outdated`, and `just build-upgrade` for this group. Debian CI and the restore helper share the shipped Debian slim base pin.
 
-`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. Each upgrade command updates only its group, including package checksums for every supported architecture and image digests on their existing tag tracks. The build tooling command also updates GitHub Actions commit pins and version comments.
+`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. Each upgrade command updates only its group, including package checksums for every supported architecture and image digests on their existing tag tracks. The build tooling command also updates GitHub Actions commit pins and version comments. `just build-upgrade` updates the GitHub CLI checksums and embedded pins in `manage.py` and `build/tools/install.sh`; `just upgrade` does not update this CLI pin.
 Files are
 staged before replacement; write failures attempt to restore previous contents. A
 process or host crash during replacement can still require recovery using Git. GitHub asset SHA-256 metadata is used when available; otherwise assets are downloaded and hashed. Set `GH_TOKEN` or `GITHUB_TOKEN` if needed for GitHub API rate limits. Lookup failures and a declined or unanswered prompt leave files unchanged. Review `git diff` and run `just test` afterward; rebuilding/redeploying is a separate step.

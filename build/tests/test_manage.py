@@ -159,7 +159,7 @@ class LauncherTests(unittest.TestCase):
             "    assert request.full_url == 'https://api.github.com/repos/example/fork/releases/latest'\n"
             "    assert timeout == 15\n"
             "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
-            "    return io.BytesIO(json.dumps({'tag_name': os.environ.get('TEST_TAG', 'v9.0.0-1')}).encode())\n"
+            "    return io.BytesIO(json.dumps({'tag_name': os.environ.get('TEST_TAG', 'v9.0.0-1'), 'assets': [] if os.environ.get('TEST_PUBLISHING') else [{'name':'SHA256SUMS'}]}).encode())\n"
             "urllib.request.urlopen = release\n")
         self.env["PYTHONPATH"] = str(self.root)
         dotenv = self.deployment / ".env"
@@ -175,7 +175,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
         self.assertFalse(self.log.exists())
         self.assertIn("manage --pull", result.stdout)
-        for overrides in ({"TEST_OFFLINE": "1"}, {"TEST_TAG": "invalid"}):
+        for overrides in ({"TEST_OFFLINE": "1"}, {"TEST_TAG": "invalid"}, {"TEST_PUBLISHING": "1"}):
             with self.subTest(overrides=overrides):
                 self.env.update(overrides)
                 result = self.run_launcher("upgrade")
@@ -188,7 +188,7 @@ class LauncherTests(unittest.TestCase):
         import fcntl
         (self.root / "sitecustomize.py").write_text(
             "import io, urllib.request\n"
-            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\"}')\n")
+            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\",\"assets\":[{\"name\":\"SHA256SUMS\"}]}')\n")
         self.env["PYTHONPATH"] = str(self.root)
         dotenv = self.deployment / ".env"
         for value in ('', "''", 'ghcr.io/example/fork:1.0.0\t# pinned'):
@@ -220,7 +220,7 @@ class LauncherTests(unittest.TestCase):
     def test_upgrade_preserves_another_users_file_and_lock(self):
         (self.root / 'sitecustomize.py').write_text(
             "import io, urllib.request\n"
-            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\"}')\n")
+            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\",\"assets\":[{\"name\":\"SHA256SUMS\"}]}')\n")
         self.env['PYTHONPATH'] = str(self.root)
         dotenv = self.deployment / '.env'
         dotenv.write_text('CODE_SERVER_IMAGE=\n')

@@ -42,7 +42,7 @@ case "$(uname -s)" in
         apt_get() {
             if [ "$(id -u)" -eq 0 ]; then apt-get "$@"; else sudo apt-get "$@"; fi
         }
-        set -- python3 gnupg shellcheck curl ca-certificates gh
+        set -- python3 gnupg shellcheck curl ca-certificates
         # Docker CE and Debian's Docker packages use different plugin names.
         if dpkg-query -W -f='${Status}' docker-ce-cli 2>/dev/null | grep -qx 'install ok installed'; then
             compose_package=docker-compose-plugin
@@ -55,6 +55,12 @@ case "$(uname -s)" in
         if ! docker buildx version >/dev/null 2>&1; then set -- "$@" "$buildx_package"; fi
         apt_get update
         apt_get install -y "$@"
+        project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+        if [ "$(id -u)" -eq 0 ]; then
+            python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import manage; print(manage.ensure_gh("/usr/local/bin"))' "$project_dir"
+        else
+            sudo python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import manage; print(manage.ensure_gh("/usr/local/bin"))' "$project_dir"
+        fi
         ;;
     *)
         echo 'just install supports Debian Linux and macOS with Homebrew.' >&2
@@ -62,6 +68,7 @@ case "$(uname -s)" in
         ;;
 esac
 
+gh attestation verify --help >/dev/null
 docker compose version
 docker buildx version
 echo 'Build and test dependencies installed. Run just test to verify the project.'

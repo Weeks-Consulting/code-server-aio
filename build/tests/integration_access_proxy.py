@@ -171,7 +171,13 @@ class AccessProxyTests(unittest.TestCase):
                        'CF_ACCESS_ALLOWED_EMAILS': ','.join(value for claim, value in identities if claim == 'email'),
                        'CF_ACCESS_ALLOWED_SERVICE_TOKENS': ','.join(value for claim, value in identities if claim == 'common_name'),
                        **(env_override or {})}
-        self.process = subprocess.Popen(['/usr/local/bin/envoy', '-c', str(path), '--concurrency', '2',
+        self.process = subprocess.Popen(['python3', '-c',
+                                         'import importlib.util, os, sys; '
+                                         's=importlib.util.spec_from_file_location("launcher", "/usr/local/lib/start-envoy.py"); '
+                                         'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+                                         '\ntry: m.validate(os.environ)'
+                                         '\nexcept ValueError as e: sys.exit(str(e))'
+                                         '\nos.execv(sys.argv[1], sys.argv[1:])', '/usr/local/bin/envoy', '-c', str(path), '--concurrency', '2',
                                          '--disable-hot-restart', '--log-level', 'warn'],
                                         stdout=self.log, stderr=self.log, preexec_fn=demote, env=environment)
         if expect_ready:
@@ -431,6 +437,9 @@ class AccessProxyTests(unittest.TestCase):
             with self.subTest(name=name, value=value):
                 self.start(env_override={name: value}, expect_ready=False)
                 self.assertNotEqual(self.process.wait(timeout=10), 0)
+                if name in ('CF_ACCESS_TEAM_DOMAIN', 'CF_ACCESS_AUD'):
+                    self.log.seek(0)
+                    self.assertIn('Set ' + name, self.log.read().decode())
                 with self.assertRaises(OSError):
                     self.status()
 

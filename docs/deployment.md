@@ -13,8 +13,10 @@ the default installation with `sudo`. For an installation without `sudo`, run
 Keep `manage` in the same directory as `compose.yaml`.
 The launcher always uses `.env` and Compose files beside itself, regardless of
 your current working directory. It starts services in the background by default
-and is included by the installer. Installed deployments include only runtime Compose
-files, the launcher, the restore helper, and `.env`; build files and source code stay in the checkout.
+and is included by the installer. Installed deployments include runtime Compose files, `manage`, `manage.py`,
+`restore-home.sh`, `backup-key.py`, and `.env`. Management creates `.env.lock`,
+and installer refreshes preserve previous files as `*.bak`. Build files and source
+code stay in the checkout.
 
 ```sh
 sudo /opt/code-server/manage --backup local --pull

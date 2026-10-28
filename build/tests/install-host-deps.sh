@@ -5,10 +5,12 @@ set -eu
 case "$(uname -s)" in
     Linux)
         apt-get update
-        apt-get install -y --no-install-recommends bash python3 shellcheck docker-cli docker-compose
+        apt-get install -y --no-install-recommends bash python3 shellcheck docker-cli docker-compose ca-certificates
+        python3 -c 'import manage; print(manage.ensure_gh("/usr/local/bin"))'
         ;;
     Darwin)
-        brew install python shellcheck docker docker-compose
+        brew install python shellcheck docker docker-compose gh
+        python3 build/tests/check-gh-download.py
         # Isolate CLI plugin registration from the runner's existing Docker config.
         plugin_config="$RUNNER_TEMP/docker-config"
         mkdir -p "$plugin_config/cli-plugins"
@@ -17,3 +19,5 @@ case "$(uname -s)" in
         ;;
     *) echo 'Host checks support Debian Linux and macOS.' >&2; exit 1 ;;
 esac
+
+gh attestation verify --help >/dev/null

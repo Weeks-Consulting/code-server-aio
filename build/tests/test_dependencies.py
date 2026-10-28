@@ -23,6 +23,7 @@ class DependencyTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         for name in ('build', '.github'):
             shutil.copytree(ROOT / name, self.root / name)
+        shutil.copy(ROOT / 'manage.py', self.root / 'manage.py')
         for name in deps.COMPOSE:
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / name, self.root / name)
@@ -35,6 +36,8 @@ class DependencyTests(unittest.TestCase):
                  if repo == 'coder/code-server' else
                  [f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')]
                  if repo == 'envoyproxy/envoy' else
+                 [f'gh_{version}_{system}_{arch}.{suffix}' for system, suffix in (('linux', 'tar.gz'), ('macOS', 'zip')) for arch in ('amd64', 'arm64')]
+                 if repo == 'cli/cli' else
                  [f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
                   for arch in ('arm64', 'x86_64')])
         return {'tag_name': 'v' + version,
