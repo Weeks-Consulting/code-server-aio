@@ -15,8 +15,9 @@ remain mutable to support weekly security rebuilds; digest pins require delibera
 updates. Installer reruns preserve existing digest pins and warn that they were kept.
 `manage upgrade` deliberately replaces a digest pin with the latest release tag;
 verify and set a new digest instead if you want to keep deploying verified bytes.
-Verification requires `gh` and may require GHCR authentication; it is an
-explicit deployment check. Restrict package publishing to trusted maintainers.
+Image verification requires `gh` and may require GHCR authentication; it is an
+explicit deployment check. Bootstrap and deployment checksum attestation verification
+is mandatory and fails closed. Restrict package publishing to trusted maintainers.
 `manage start --pull` also warns when a version-tagged GHCR image differs from its repository's
 latest stable release, with a best-effort check that stays quiet on network errors. Starts without
 `--pull` skip the network check.

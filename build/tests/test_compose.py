@@ -35,6 +35,12 @@ class ComposeTests(unittest.TestCase):
             base = model("compose.backup.yaml")
             services = base["services"]
             app, tunnel = (services[name] for name in ("code-server", "cloudflared"))
+            assert int(tunnel['mem_limit']) == 256 * 1024 * 1024
+            assert tunnel['depends_on']['code-server']['condition'] == 'service_healthy'
+            for service in services.values():
+                assert service['logging']['options'] == {'max-file': '3', 'max-size': '10m'}
+            assert services['backup']['environment']['BACKUP_RETENTION_DAYS'] == '7'
+            assert services['backup']['environment']['BACKUP_PRUNING_PREFIX'] == 'code-server-home-'
             assert "envoy" not in services
             assert not app.get("ports") and app["expose"] == ["8080"]
             assert set(base["networks"]) == {"default"}

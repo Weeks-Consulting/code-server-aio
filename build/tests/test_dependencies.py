@@ -76,6 +76,61 @@ class DependencyTests(unittest.TestCase):
         self.assertEqual(dockerfile.read_text(), original)
         self.assertEqual(deps.references(self.root, pins), {})
 
+    def test_check_rejects_removed_image_pins_in_every_dependency_file(self):
+        pins = deps.load_pins(self.root)
+        for name in deps.reference_files(self.root):
+            path = self.root / name
+            original = path.read_text()
+            for match in deps.IMAGE.finditer(original):
+                if match[1] + ':' + match[2] not in pins['images']:
+                    continue
+                with self.subTest(file=name, image=match[0]):
+                    path.write_text(original[:match.start()] + match[1] + ':' + match[2] + original[match.end():])
+                    with patch.object(deps, 'ROOT', self.root), patch(
+                            'sys.argv', ['dependencies.py', 'check']):
+                        with self.assertRaises(ValueError):
+                            deps.main()
+                    self.assertIn(name, deps.references(self.root, pins))
+                    path.write_text(original)
+
+    def test_check_rejects_action_branches_tags_and_missing_shas(self):
+        path = self.root / deps.WORKFLOW
+        original = path.read_text()
+        sha = deps.load_pins(self.root)['actions']['actions/checkout']['sha']
+        for reference in ('@main', '@v7', '', '@' + '0' * 40):
+            with self.subTest(reference=reference):
+                path.write_text(original.replace('@' + sha, reference))
+                with patch.object(deps, 'ROOT', self.root), patch(
+                        'sys.argv', ['dependencies.py', 'check']):
+                    with self.assertRaises(ValueError):
+                        deps.main()
+        path.write_text(original)
+
+    def test_new_dependency_files_and_unknown_dependencies_fail_closed(self):
+        for name, text in (
+            ('.github/workflows/new.yml', 'steps:\n  - uses: unknown/action@main\n'),
+            ('.github/workflows/new.yml', 'container-image: redis:latest\n'),
+            ('build/tests/compose.new.yaml', 'services:\n  test:\n    image: redis:latest\n'),
+            ('build/tests/new.sh', 'docker run debian true\n'),
+            ('build/tests/new.sh', 'docker run redis:latest true\n'),
+            ('build/new/Dockerfile', 'FROM debian\n'),
+        ):
+            with self.subTest(name=name, text=text):
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                with self.assertRaises(ValueError):
+                    deps.references(self.root, deps.load_pins(self.root))
+                path.unlink()
+
+    def test_missing_package_checksum_is_rejected(self):
+        path = self.root / deps.PIN_FILE
+        manifest = json.loads(path.read_text())
+        manifest['packages']['code-server']['sha256'].popitem()
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'checksums are required'):
+            deps.load_pins(self.root)
+
     def test_invalid_manifest_hash_is_rejected(self):
         pins = deps.load_pins(self.root)
         pins['images']['debian:13-slim'] = 'invalid'

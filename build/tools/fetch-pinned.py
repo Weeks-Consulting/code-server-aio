@@ -36,7 +36,8 @@ def fetch(manifest, name, architecture, destination):
     path = Path(destination)
     try:
         subprocess.run([
-            'curl', '--fail', '--silent', '--show-error', '--location', '--retry', '3',
+            'curl', '--proto', '=https', '--proto-redir', '=https',
+            '--fail', '--silent', '--show-error', '--location', '--retry', '3',
             '--connect-timeout', '10', '--max-time', '300', url, '--output', str(path),
         ], check=True)
         with path.open('rb') as source:

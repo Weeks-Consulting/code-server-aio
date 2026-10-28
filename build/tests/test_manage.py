@@ -36,7 +36,8 @@ class LauncherTests(unittest.TestCase):
             '#!/usr/bin/env python3\nimport json, os, sys\n'
             'from pathlib import Path\n'
             'Path(os.environ["ARGUMENT_LOG"]).write_text(json.dumps(sys.argv[1:]))\n'
-            'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("BACKUP_LOCAL_UID", "BACKUP_LOCAL_GID")}))\n'
+            'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("BACKUP_LOCAL_UID", "BACKUP_LOCAL_GID", "CODE_SERVER_MEMORY_LIMIT")}))\n'
+            'if sys.argv[1:] == ["info", "--format", "{{.MemTotal}}"]: print(os.environ.get("TEST_HOST_MEMORY", "10737418240"))\n'
             'if sys.argv[-3:] == ["config", "--format", "json"]: print(os.environ.get("TEST_MODEL", ""))\n'
             'sys.exit(int(os.environ.get("DOCKER_EXIT", "0")))\n'
         )
@@ -87,10 +88,23 @@ class LauncherTests(unittest.TestCase):
                 result = self.run_launcher("--backup", "local")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 owner = json.loads(Path(str(self.log) + ".env").read_text())
+                self.assertEqual(owner.pop('CODE_SERVER_MEMORY_LIMIT'), '8589934592')
                 self.assertEqual(owner, {
                     "BACKUP_LOCAL_UID": str(os.getuid()),
                     "BACKUP_LOCAL_GID": str(os.getgid()),
                 })
+
+    def test_workspace_memory_uses_docker_host_and_rejects_invalid_totals(self):
+        self.env['TEST_HOST_MEMORY'] = '1000000000'
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        environment = json.loads(Path(str(self.log) + '.env').read_text())
+        self.assertEqual(environment['CODE_SERVER_MEMORY_LIMIT'], '800000000')
+        for value in ('0', '-1', 'invalid'):
+            self.env['TEST_HOST_MEMORY'] = value
+            result = self.run_launcher()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('up', json.loads(self.log.read_text()))
 
     def test_foreground_pull_and_project(self):
         result = self.run_launcher("--foreground", "--pull", "--project-name", "example")

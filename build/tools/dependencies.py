@@ -12,11 +12,11 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
-ACTION = re.compile(r'uses: ([\w-]+/[\w-]+)@([a-f0-9]{40}) # (\S+)')
-IMAGE = re.compile(r'(?<![\w./:-])([\w./-]+(?::[0-9]+)?):([\w.-]+)@sha256:([a-f0-9]{64})')
+ACTION = re.compile(r'(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?uses:[ \t]*)(?P<reference>[^\s#]+)(?:[ \t]+#[ \t]*(?P<version>\S+))?')
+IMAGE = re.compile(r'(?<![\w./:$-])([a-z0-9][a-z0-9_./-]*(?::[0-9]+)?):([\w.-]+)(?:@([^\s\"\'{}]+))?')
 WORKFLOW = '.github/workflows/container.yaml'
 COMPOSE = ('compose.yaml', 'compose.backup-common.yaml',
-           'build/tests/actions.sh', 'build/tests/compose.backup-s3.yaml',
+           'build/tests/actions.sh', 'build/tests/smoke.sh', 'build/tests/compose.backup-s3.yaml',
            'build/Dockerfile', 'build/tools/restore-home.sh', WORKFLOW)
 
 
@@ -158,8 +158,16 @@ def load_pins(root, scope=None):
             if overlap:
                 raise ValueError(f'Duplicate pins in {filename}: {sorted(overlap)}')
             pins[section].update(manifest[section])
-    for package in pins['packages'].values():
-        checked(package['version'], r'\d+\.\d+\.\d+')
+    for name, package in pins['packages'].items():
+        version = checked(package['version'], r'\d+\.\d+\.\d+')
+        assets = {
+            'code-server': {f'code-server_{version}_{arch}.deb' for arch in ('amd64', 'arm64')},
+            'envoy': {f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')},
+            'act': {f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
+                    for arch in ('arm64', 'x86_64')},
+        }
+        if name not in assets or set(package['sha256']) != assets[name]:
+            raise ValueError(f'{name}: checksums are required for every supported package asset')
         for digest in package['sha256'].values():
             checked(digest, r'[a-f0-9]{64}')
     for digest in pins['images'].values():
@@ -185,17 +193,68 @@ def inventory(root, pins=None, scope=None):
     return result
 
 
+def reference_files(root):
+    """Discover dependency-bearing source files, including newly added workflows/tests."""
+    paths = set(COMPOSE)
+    for pattern in ('compose*.yaml', 'build/**/Dockerfile*', 'build/**/*.sh',
+                    'build/**/compose*.yaml', '.github/workflows/*.yaml', '.github/workflows/*.yml'):
+        paths.update(str(path.relative_to(root)) for path in root.glob(pattern))
+    return sorted(paths)
+
+
 def references(root, pins):
-    """Render literal pins required by Docker and GitHub Actions from the manifest."""
+    """Render required pins even when their digest/SHA has been removed."""
     edits = {}
-    for file in COMPOSE:
+    for file in reference_files(root):
         original = (root / file).read_text()
+
         def image(match):
             repo, tag, _ = match.groups()
-            return f'{repo}:{tag}@sha256:{pins["images"][repo + ":" + tag]}'
-        content = IMAGE.sub(image, original)
-        if file == WORKFLOW:
-            content = ACTION.sub(lambda m: f'uses: {m[1]}@{pins["actions"][m[1]]["sha"]} # {pins["actions"][m[1]]["version"]}', content)
+            key = repo + ':' + tag
+            if repo in ('dir', 'docker-daemon'):
+                return match[0]
+            if key not in pins['images'] and not (
+                    '/' in repo or declaration or 'docker run ' in line or match[3]):
+                return match[0]
+            if key not in pins['images']:
+                raise ValueError(f'{file}: image {key} has no manifest pin')
+            return f'{key}@sha256:{pins["images"][key]}'
+
+        lines = []
+        for line in original.splitlines(keepends=True):
+            # The shipped workspace image is this project's mutable output;
+            # compose.build.yaml uses the image built from the local checkout.
+            if ('image: ${CODE_SERVER_IMAGE:-' in line or
+                    (file == 'compose.build.yaml' and line.strip() == 'image: code-server-cloudflare:local')):
+                lines.append(line)
+                continue
+            if line.lstrip().startswith('#'):
+                lines.append(line)
+                continue
+            # Bare image names in Docker/Compose still require a tag and digest.
+            declaration = re.match(r'\s*(?:FROM|image:|container:|container-image:)\s+([^\s]+)', line)
+            # The host matrix's Debian literal is checked separately below;
+            # its macOS entry intentionally has no container.
+            if (declaration and line.strip() != 'container: ${{ matrix.container-image }}'
+                    and not IMAGE.fullmatch(declaration[1])):
+                raise ValueError(f'{file}: image {declaration[1]} requires a manifest tag and digest')
+            for key in pins['images']:
+                repo = key.rsplit(':', 1)[0]
+                if re.search(r'(?<![\w./:-])' + re.escape(repo) + r'(?=[\s\"\']|$)', line):
+                    raise ValueError(f'{file}: image {repo} requires a manifest tag and digest')
+            lines.append(IMAGE.sub(image, line))
+        content = ''.join(lines)
+        if file.startswith('.github/workflows/'):
+            def action(match):
+                reference = match['reference']
+                if reference.startswith('./'):
+                    return match[0]
+                repo, _, _ = reference.partition('@')
+                if repo not in pins['actions']:
+                    raise ValueError(f'{file}: action {repo} has no manifest pin')
+                pin = pins['actions'][repo]
+                return f'{match["prefix"]}{repo}@{pin["sha"]} # {pin["version"]}'
+            content = ACTION.sub(action, content)
         if content != original:
             edits[file] = content
     return edits
@@ -274,7 +333,7 @@ def main():
     if args.command in ('sync', 'check'):
         edits = references(ROOT, load_pins(ROOT))
         if args.command == 'check' and edits:
-            raise ValueError('Pin references differ from build/versions.json; run just sync-pins')
+            raise ValueError('Dependency references must match the pin manifests; run just sync-pins')
         if args.command == 'sync':
             apply_edits(ROOT, edits)
         return

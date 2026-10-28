@@ -1,9 +1,9 @@
 {
   "admin": {
     "address": {
-      "socket_address": {
-        "address": "127.0.0.1",
-        "port_value": 9901
+      "pipe": {
+        "path": "/run/envoy/admin.sock",
+        "mode": 384
       }
     }
   },
@@ -59,45 +59,6 @@
                   },
                   "local_reply_config": {
                     "mappers": [
-                      {
-                        "filter": {
-                          "status_code_filter": {
-                            "comparison": {
-                              "op": "EQ",
-                              "value": {
-                                "default_value": 401,
-                                "runtime_key": "unused"
-                              }
-                            }
-                          }
-                        },
-                        "status_code": 403,
-                        "body": {
-                          "inline_string": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>Cloudflare Access authentication required</title>\n  <style>\n    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }\n    body { margin: 0; padding: 3rem 1.25rem; }\n    main { max-width: 42rem; margin: auto; }\n    h1 { line-height: 1.2; font-size: 2rem; }\n    h2 { font-size: 1.15rem; margin-top: 2rem; }\n    .status { font-size: .85rem; letter-spacing: .08em; }\n    code { font-size: .9em; overflow-wrap: anywhere; }\n  </style>\n</head>\n<body>\n  <main>\n    <p class=\"status\">403 &middot; ACCESS DENIED</p>\n    <h1>Cloudflare Access authentication required</h1>\n    <p>This service requires a valid Cloudflare Access session. Your request did not include a token that this service could accept.</p>\n    <h2>If you are trying to sign in</h2>\n    <p>Open the protected hostname and sign in through Cloudflare Access. If your session has expired, sign in again. Contact the administrator if access is still denied.</p>\n    <h2>If you administer this service</h2>\n    <p>Configure a Cloudflare Access application and an Allow or Service Auth policy for this hostname. A Tunnel alone does not provide Access authentication. Bypass policies do not supply the required authentication.</p>\n    <p>Verify that <code>CF_ACCESS_TEAM_DOMAIN</code> and <code>CF_ACCESS_AUD</code> match that application, and that the tunnel forwards requests to the protected proxy on port 8080.</p>\n    <p>A missing policy, an expired session, or an invalid token can cause this response. Access remains blocked until a valid application token is supplied.</p>\n  </main>\n</body>\n</html>\n"
-                        },
-                        "body_format_override": {
-                          "text_format_source": {
-                            "inline_string": "%LOCAL_REPLY_BODY%"
-                          },
-                          "content_type": "text/html; charset=utf-8"
-                        },
-                        "headers_to_add": [
-                          {
-                            "header": {
-                              "key": "cache-control",
-                              "value": "no-store"
-                            },
-                            "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
-                          },
-                          {
-                            "header": {
-                              "key": "x-content-type-options",
-                              "value": "nosniff"
-                            },
-                            "append_action": "OVERWRITE_IF_EXISTS_OR_ADD"
-                          }
-                        ]
-                      },
                       {
                         "filter": {
                           "status_code_filter": {
@@ -184,7 +145,7 @@
                       "typed_config": {
                         "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua",
                         "default_source_code": {
-                          "inline_string": "-- Validate startup settings without interpolating user data into Lua source.\nlocal domain = os.getenv(\"CF_ACCESS_TEAM_DOMAIN\") or \"\"\nlocal team = domain:match(\"^(.-)%.cloudflareaccess%.com$\")\nassert(team and (team:match(\"^[a-z0-9]$\") or team:match(\"^[a-z0-9][a-z0-9%-]*[a-z0-9]$\")),\n       \"Set CF_ACCESS_TEAM_DOMAIN to your team.cloudflareaccess.com hostname\")\nlocal audience = os.getenv(\"CF_ACCESS_AUD\") or \"\"\nassert(#audience == 64 and audience:match(\"^[a-fA-F0-9]+$\"),\n       \"Set CF_ACCESS_AUD to the 64-character application audience\")\nfunction envoy_on_request(handle)\n  if handle:headers():getNumValues(\"cf-access-jwt-assertion\") ~= 1 then\n    handle:respond({[\":status\"] = \"403\"}, \"A single Access JWT header is required\")\n  end\nend\n"
+                          "inline_string": "-- Validate startup settings without interpolating user data into Lua source.\nlocal domain = os.getenv(\"CF_ACCESS_TEAM_DOMAIN\") or \"\"\nlocal team = domain:match(\"^(.-)%.cloudflareaccess%.com$\")\nassert(team and (team:match(\"^[a-z0-9]$\") or team:match(\"^[a-z0-9][a-z0-9%-]*[a-z0-9]$\")),\n       \"Set CF_ACCESS_TEAM_DOMAIN to your team.cloudflareaccess.com hostname\")\nlocal audience = os.getenv(\"CF_ACCESS_AUD\") or \"\"\nassert(#audience == 64 and audience:match(\"^[a-fA-F0-9]+$\"),\n       \"Set CF_ACCESS_AUD to the 64-character application audience\")\nfunction envoy_on_request(handle)\n  local headers = handle:headers()\n  local assertions = headers:getNumValues(\"cf-access-jwt-assertion\")\n  if assertions ~= 1 then\n    local metadata = handle:streamInfo():dynamicMetadata()\n    metadata:set(\"workspace.access\", \"denial_reason\",\n                 assertions == 0 and \"missing_assertion\" or \"multiple_assertions\")\n    -- Only this exact local probe's missing-token rejection may be quiet.\n    -- Use the physical peer, never a client-supplied forwarding header.\n    local peer = handle:streamInfo():downstreamDirectRemoteAddress()\n    if assertions == 0 and peer:match(\"^127%.0%.0%.1:%d+$\")\n        and headers:get(\":method\") == \"GET\" and headers:get(\":path\") == \"/\"\n        and headers:get(\"user-agent\") == \"code-server-container-healthcheck\" then\n      metadata:set(\"workspace.access\", \"quiet_healthcheck\", true)\n    end\n    handle:respond({[\":status\"] = \"403\"}, \"A single Access JWT header is required\")\n  end\nend\n"
                         }
                       }
                     },
@@ -325,8 +286,20 @@
                       "typed_config": {
                         "@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
                         "log_format": {
-                          "text_format_source": {
-                            "inline_string": "%START_TIME% %REQ(:METHOD)% %PROTOCOL% %RESPONSE_CODE% %RESPONSE_CODE_DETAILS%\n"
+                          "json_format": {
+                            "timestamp": "%START_TIME%",
+                            "method": "%REQ(:METHOD)%",
+                            "path": "%PATH(NQ:PATH)%",
+                            "host": "%REQ(:AUTHORITY)%",
+                            "protocol": "%PROTOCOL%",
+                            "status": "%RESPONSE_CODE%",
+                            "response_details": "%RESPONSE_CODE_DETAILS%",
+                            "denial_reason": "%DYNAMIC_METADATA(workspace.access:denial_reason)%",
+                            "response_flags": "%RESPONSE_FLAGS%",
+                            "peer": "%DOWNSTREAM_DIRECT_REMOTE_ADDRESS%",
+                            "duration_ms": "%DURATION%",
+                            "user_agent": "%REQ(USER-AGENT)%",
+                            "request_id": "%REQ(X-REQUEST-ID)%"
                           }
                         }
                       },
@@ -334,14 +307,19 @@
                         "or_filter": {
                           "filters": [
                             {
-                              "header_filter": {
-                                "header": {
-                                  "name": "user-agent",
-                                  "string_match": {
-                                    "exact": "code-server-container-healthcheck"
-                                  },
-                                  "invert_match": true
-                                }
+                              "metadata_filter": {
+                                "matcher": {
+                                  "filter": "workspace.access",
+                                  "path": [
+                                    {
+                                      "key": "quiet_healthcheck"
+                                    }
+                                  ],
+                                  "value": {
+                                    "bool_match": false
+                                  }
+                                },
+                                "match_if_key_not_found": true
                               }
                             },
                             {

@@ -2,7 +2,10 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -15,6 +18,26 @@ spec.loader.exec_module(management)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_dotenv_helpers_reject_multiline_values(self):
+        for quote in ("'", '"'):
+            original = ("OTHER=" + quote + "first line\n"
+                        "CODE_SERVER_IMAGE=ghcr.io/example/other:latest\n" + quote + "\n")
+            for operation in (
+                lambda: management.image_repository(original),
+                lambda: management.merge_settings(original, "NEW=value\n", "v1.2.3"),
+                lambda: management.merge_settings("", original, "v1.2.3"),
+                lambda: management.select_image(original, "replacement"),
+                lambda: management.replace_image_setting(original, "replacement"),
+            ):
+                with self.subTest(quote=quote, operation=operation):
+                    with self.assertRaisesRegex(ValueError, "Multiline or unterminated"):
+                        operation()
+
+    def test_dotenv_validation_accepts_single_line_quotes_and_comments(self):
+        management.validate_dotenv(
+            "# OTHER='ignored\nSINGLE='literal' # comment\n"
+            'DOUBLE="escaped \\" quote"\nEMPTY=""\nAPOSTROPHE=it\'s fine\n')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -36,6 +59,7 @@ class InstallationTests(unittest.TestCase):
             return self.files[url.split('/refs/tags/v1.2.3/')[1]]
         self.fetch = fetch
         for mock in (patch.object(management, 'dependencies'),
+                     patch.object(management, 'verify_release'),
                      patch.object(management.os, 'geteuid', return_value=1000),
                      patch.object(management, 'download', side_effect=fetch)):
             mock.start()
@@ -67,6 +91,45 @@ class InstallationTests(unittest.TestCase):
             management.install(self.args)
         self.assertEqual(env.read_text(), 'SECRET=original\n')
         self.assertEqual(list(self.directory.iterdir()), [env])
+
+    def test_attestation_failure_leaves_deployment_untouched(self):
+        self.directory.mkdir()
+        env = self.directory / '.env'
+        env.write_text('BACKUP_GPG_PASSPHRASE=original\n')
+        with patch.object(management, 'verify_release', side_effect=ValueError('untrusted release')):
+            with self.assertRaisesRegex(ValueError, 'untrusted release'):
+                management.install(self.args)
+        self.assertEqual(env.read_text(), 'BACKUP_GPG_PASSPHRASE=original\n')
+        self.assertEqual(list(self.directory.iterdir()), [env])
+
+    def test_failed_refresh_restores_deployment_and_encryption_key(self):
+        management.install(self.args)
+        names = [*management.DEPLOYMENT_FILES, '.env']
+        before = {name: (self.directory / name).read_bytes() for name in names}
+        replace = management.os.replace
+        def fail_env(source, destination):
+            if Path(source).name.startswith('new-') and Path(destination).name == '.env':
+                raise OSError('simulated replacement failure')
+            return replace(source, destination)
+        with patch.object(management.os, 'replace', side_effect=fail_env):
+            with self.assertRaisesRegex(OSError, 'simulated replacement'):
+                management.install(self.args)
+        self.assertEqual(before, {name: (self.directory / name).read_bytes() for name in names})
+        self.assertFalse(list(self.directory.glob('.install-*')))
+
+    def test_failed_staging_leaves_existing_configuration_untouched(self):
+        management.install(self.args)
+        before = (self.directory / '.env').read_bytes()
+        write = Path.write_bytes
+        def fail_candidate(path, data):
+            if path.name.startswith('new-'):
+                raise OSError('simulated disk full')
+            return write(path, data)
+        with patch.object(Path, 'write_bytes', fail_candidate):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                management.install(self.args)
+        self.assertEqual((self.directory / '.env').read_bytes(), before)
+        self.assertFalse(list(self.directory.glob('.install-*')))
 
     def test_missing_required_release_files_preserves_existing_deployment(self):
         self.directory.mkdir()
@@ -157,6 +220,41 @@ class DependencyTests(unittest.TestCase):
             self.assertTrue(target.is_symlink())
             self.assertEqual(str(target.readlink()), '/opt/homebrew/lib/docker/cli-plugins/docker-compose')
             self.assertIn(['brew', 'install', 'docker-compose'], [call.args[0] for call in commands.call_args_list])
+
+
+class BootstrapTests(unittest.TestCase):
+    def test_verification_precedes_execution_and_failures_stop_bootstrap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'bootstrap/tools/install.sh'
+            script.parent.mkdir(parents=True)
+            script.write_bytes((ROOT / 'build/tools/install.sh').read_bytes())
+            tools = root / 'bin'
+            tools.mkdir()
+            payload = (f'from pathlib import Path\nPath({str(root / "executed")!r}).touch()\n').encode()
+            manifest = hashlib.sha256(payload).hexdigest() + '  manage.py\n'
+            curl = tools / 'curl'
+            curl.write_text(
+                f'#!{sys.executable}\nimport os, pathlib, sys\n'
+                'args = sys.argv[1:]\n'
+                'url = args[args.index("--output") - 1]\n'
+                f'payload = {payload!r}\nmanifest = {manifest!r}\n'
+                'data = b\'{"tag_name":"v1.2.3"}\' if url.endswith("/releases/latest") else '
+                'manifest.encode() if url.endswith("/SHA256SUMS") else payload + (b"# tampered" if os.environ.get("TAMPER") else b"")\n'
+                'pathlib.Path(args[args.index("--output") + 1]).write_bytes(data)\n')
+            gh = tools / 'gh'
+            gh.write_text(f'#!{sys.executable}\nimport os, pathlib, sys\n'
+                          'assert sys.argv[1:3] == ["attestation", "verify"]\n'
+                          'assert "--signer-workflow" in sys.argv\n'
+                          f'assert not pathlib.Path({str(root / "executed")!r}).exists()\n'
+                          'sys.exit(1 if os.environ.get("REJECT") else 0)\n')
+            curl.chmod(0o755)
+            gh.chmod(0o755)
+            env = {**os.environ, 'PATH': str(tools) + ':' + os.environ['PATH']}
+            for overrides, succeeds in (({'REJECT': '1'}, False), ({'TAMPER': '1'}, False), ({}, True)):
+                result = subprocess.run(['sh', str(script)], env={**env, **overrides}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                self.assertEqual((root / 'executed').exists(), succeeds)
 
 
 if __name__ == '__main__':

@@ -9,12 +9,21 @@ services:
     # Root reads files belonging to every archived UID/GID.
     user: "0:0"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
       TZ: ${BACKUP_TIMEZONE:-America/Chicago}
       BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}
       BACKUP_FILENAME: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-%Y-%m-%dT%H-%M-%S.tar.gz
       BACKUP_STOP_DURING_BACKUP_LABEL: ${COMPOSE_PROJECT_NAME}-home
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_PRUNING_PREFIX: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-
+      NOTIFICATION_URLS: ${BACKUP_NOTIFICATION_URLS:-}
+      NOTIFICATION_LEVEL: ${BACKUP_NOTIFICATION_LEVEL:-error}
     volumes:
       - code-server-home:/backup/code-server-home:ro
       # :ro does not restrict Docker API access; this container controls the host.

@@ -50,6 +50,21 @@ class BackupKeyTests(unittest.TestCase):
         self.assertEqual(self.env.read_text(), contents)
         self.assertFalse(marker.exists())
 
+    def test_rejects_multiline_values_without_changing_file(self):
+        for quote in ("'", '"'):
+            for suffix in (quote + "\n", ""):
+                contents = ("BACKUP_GPG_PASSPHRASE=keep-secret\nOTHER=" + quote +
+                            "first line\nBACKUP_GPG_PASSPHRASE=\n" + suffix)
+                with self.subTest(quote=quote, suffix=suffix):
+                    self.env.write_text(contents)
+                    self.env.chmod(0o644)
+                    result = self.initialize()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Multiline or unterminated", result.stderr)
+                    self.assertNotIn("keep-secret", result.stderr)
+                    self.assertEqual(self.env.read_text(), contents)
+                    self.assertEqual(self.env.stat().st_mode & 0o777, 0o644)
+
     def test_different_deployments_get_different_keys(self):
         self.env.touch()
         self.assertEqual(self.initialize().returncode, 0)
@@ -114,6 +129,7 @@ class BackupKeyTests(unittest.TestCase):
         for name, body in {
             "docker": "exit 0",
             "gpg": "exit 0",
+            "gh": "exit 0",
             "dpkg-query": "printf 'install ok installed\\n'",
             "brew": "exit 99",
             "apt-get": "exit 99",

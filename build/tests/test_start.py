@@ -1,6 +1,7 @@
 """Exercise the proxy startup gate without starting workspace services."""
 
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -77,6 +78,14 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
         self.assertEqual(provider['audiences'], ['a' * 64])
         self.assertEqual(renderer.render(template, {})['static_resources']['clusters'][1]
                          ['transport_socket']['typed_config']['sni'], '')
+        self.assertEqual(rendered['admin']['address'],
+                         {'pipe': {'path': '/run/envoy/admin.sock', 'mode': 0o600}})
+        mappers = manager(rendered)['local_reply_config']['mappers']
+        self.assertEqual(mappers[0]['body'], mappers[1]['body'])
+        self.assertEqual([item['filter']['status_code_filter']['comparison']['value']['default_value']
+                          for item in mappers], [401, 403, 503])
+        self.assertEqual(renderer.render(json.dumps(rendered),
+                                        {'CF_ACCESS_TEAM_DOMAIN': domain, 'CF_ACCESS_AUD': 'a' * 64}), rendered)
 
     def test_healthcheck_requires_running_services(self):
         script = (ROOT / 'build/runtime/container-healthcheck.sh').read_text()
@@ -88,10 +97,25 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
     return 0
 }
 fake_docker() { echo 1; }
-fake_curl() { case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"127.0.0.1:9901/ready"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac; }
+fake_curl() { case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac; }
 '''
         result = subprocess.run(['bash', '-c', functions + script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        online = functions.replace('*) return 1 ;; esac; }',
+                                   '*"https://test.cloudflareaccess.com/cdn-cgi/access/certs"*) echo 200 ;; *) return 1 ;; esac; }')
+        result = subprocess.run(['bash', '-c', online + script, 'healthcheck', '--access'],
+                                env={**os.environ, 'CF_ACCESS_TEAM_DOMAIN': 'test.cloudflareaccess.com'},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(['bash', '-c', functions + script, 'healthcheck', '--access'],
+                                env={**os.environ, 'CF_ACCESS_TEAM_DOMAIN': 'test.cloudflareaccess.com'},
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        for unexpected in ('200', '503'):
+            result = subprocess.run(['bash', '-c', functions.replace('echo 403', 'echo ' + unexpected) + script],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('expected 403', result.stderr)
         for transition in ('code-server STARTING', 'envoy FATAL', 'dockerd STOPPED', 'service-events BACKOFF'):
             before = transition.split()[0] + ' RUNNING'
             result = subprocess.run(['bash', '-c', functions.replace(before, transition) + script],

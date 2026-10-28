@@ -1,14 +1,16 @@
 #!/bin/sh
 # Check shell syntax and Compose configurations without using .env.
 set -eu
+export PYTHONDONTWRITEBYTECODE=1
 cd -- "$(dirname -- "$0")/../.."
+
+python3 build/tools/dependencies.py check
 
 for script in manage build/tools/*.sh build/tests/*.sh; do sh -n "$script"; done
 for script in build/runtime/*.sh; do bash -n "$script"; done
 command -v shellcheck >/dev/null || { echo 'Install shellcheck to run checks.' >&2; exit 1; }
 shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runtime/*.sh
 python3 -m unittest discover -s build/tests -p "test_*.py"
-python3 build/tools/dependencies.py check
 
 # Configuration checks use a disposable passphrase, never a deployment key.
 export BACKUP_GPG_PASSPHRASE=validation-only

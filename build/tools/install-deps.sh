@@ -13,7 +13,7 @@ case "$(uname -s)" in
             echo 'Install Homebrew first, then rerun just install.' >&2
             exit 1
         }
-        set -- python gnupg shellcheck curl
+        set -- python gnupg shellcheck curl gh
         if ! docker compose version >/dev/null 2>&1; then set -- "$@" docker-compose; fi
         if ! docker buildx version >/dev/null 2>&1; then set -- "$@" docker-buildx; fi
         brew install "$@"
@@ -42,7 +42,7 @@ case "$(uname -s)" in
         apt_get() {
             if [ "$(id -u)" -eq 0 ]; then apt-get "$@"; else sudo apt-get "$@"; fi
         }
-        set -- python3 gnupg shellcheck curl ca-certificates
+        set -- python3 gnupg shellcheck curl ca-certificates gh
         # Docker CE and Debian's Docker packages use different plugin names.
         if dpkg-query -W -f='${Status}' docker-ce-cli 2>/dev/null | grep -qx 'install ok installed'; then
             compose_package=docker-compose-plugin

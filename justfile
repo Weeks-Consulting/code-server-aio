@@ -12,29 +12,19 @@ install:
 
 # Build with BuildKit and load the image into Docker for the integration tests.
 build:
+    python3 build/tools/dependencies.py check
     docker buildx build --load -f build/Dockerfile -t {{quote(image)}} .
 
 # Build and run the local deployment using the checkout's .env, attached to logs.
 run:
-    docker compose --env-file .env -f compose.yaml -f compose.build.yaml up --build
-
-# Stop and remove all containers on the current Docker daemon, preserving volumes.
-stop:
     #!/bin/sh
     set -eu
-    containers=$(docker ps -q)
-    if [ -n "$containers" ]; then
-        docker stop $containers
-    fi
-    containers=$(docker ps -aq)
-    if [ -n "$containers" ]; then
-        docker rm $containers
-    fi
-
-# Remove all containers, images, build cache, and local artifacts; --all also deletes volumes.
-[positional-arguments]
-cleanup *args:
-    sh ./build/tools/cleanup.sh "$@"
+    python3 build/tools/dependencies.py check
+    trap 'docker compose --env-file .env -f compose.yaml -f compose.build.yaml down --remove-orphans' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    docker compose --env-file .env -f compose.yaml -f compose.build.yaml up --build
 
 # Check shell syntax and all Compose file combinations without using .env.
 check:

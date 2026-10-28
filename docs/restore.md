@@ -23,7 +23,8 @@ backup before removing original entries. Staged files move into place on the sam
 filesystem. Allow free space on the volume for one extracted home tree, plus space
 beside the archive for the compressed rollback. The helper container runs as root
 (`--user 0:0`) to preserve numeric ownership, permissions, and symlinks; the host
-command can run as any user with Docker access. Catchable termination cleans staging;
+command can run as any user with Docker access. Catchable termination stops the restore container before cleaning staging;
+if replacement has begun, staging and the verified rollback are retained.
 SIGKILL or power loss can leave a `.restore-staging-*` directory on the home volume.
 Inspect and remove that specific directory before restarting after an interrupted restore.
 
@@ -80,3 +81,11 @@ Archives made before the `/home` mount change need their user files moved into
 
 Run `just test-backup` to exercise archive creation, in-place restoration, rollback
 contents, hidden files, shared home directories, and ownership for local and S3 backups.
+
+Restores reserve a Docker container named `code-server-restore-<volume hash>` for
+their entire lifetime, so two restores against the same volume cannot overlap.
+If the coordinator is killed with SIGKILL or loses contact with Docker, the
+reservation can remain. Keep the stack stopped, inspect that container and its
+volume mount, and remove that specific container only after confirming the prior
+restore is no longer active. Review any staging and rollback files before retrying.
+An interrupted replacement prints a recovery command using the verified rollback.

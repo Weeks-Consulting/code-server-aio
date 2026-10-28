@@ -20,9 +20,6 @@ just outdated        # List only outdated pins without changing files
 just upgrade         # Look up latest versions, then confirm updates
 just build           # Build the local test image
 just run             # Build and run locally using .env, attached to logs
-just stop            # Stop and remove all Docker containers
-just cleanup         # Remove all containers, images, build cache and local artifacts
-just cleanup --all   # Also delete all Docker volumes (including workspace data)
 just check           # Check shell syntax and Compose configurations
 just test            # Build once and run all local tests
 just test-proxy      # Build and run only the proxy tests
@@ -33,7 +30,7 @@ just actions-list    # List workflow jobs without running them
 ```
 
 `just install` prepares a development machine using Homebrew on macOS or apt on
-Debian. It does not install or launch a deployment; use [Install](installation.md#install) for
+Debian, including GitHub CLI (`gh`) for release attestation verification. It does not install or launch a deployment; use [Install](installation.md#install) for
 published releases and [Deploy](deployment.md#deploy) to start services.
 
 Builds read the code-server version from the `packages.code-server.version` entry in `build/versions.json`. Building the
@@ -43,17 +40,13 @@ To run the project locally, configure `.env` in the checkout (see
 [configuration](configuration.md#setup)), then run `just run`. It builds the
 local deployment image and starts code-server and the Cloudflare tunnel with
 logs attached. Open your configured Cloudflare hostname to access code-server.
-Press Ctrl-C to stop the services; named volumes preserve your data.
+Press Ctrl-C to stop and remove the services and network; named volumes preserve your data.
 
-`just stop` stops every running container and removes all stopped containers on
-the current Docker daemon, including containers left behind by earlier runs.
-Volumes are preserved. `just cleanup` removes all containers
-and images, prunes Docker build cache, and deletes checkout Python caches and
-`.test-tmp.*` directories. These commands affect the current Docker daemon,
-including resources from other projects. Volumes survive normal cleanup;
-`just cleanup --all` also deletes all unused named and anonymous volumes after
-removing containers, including the workspace home and nested Docker data.
-Cleanup does not delete source files, `.env`, or backup archives.
+Daemon-wide stop and cleanup commands are not provided. Use `./manage stop` to
+remove this deployment's containers and network while preserving volumes.
+Build images and Docker build cache are intentional outputs; disposable test
+containers, volumes, and temporary files are cleaned up by their owning commands.
+`just run` removes its Compose containers and network when it exits, preserving volumes.
 
 Override the local image tag with `just image=my-image:test test`. Test recipes
 use isolated containers and temporary storage. CI runs the same scripts from
@@ -100,7 +93,18 @@ files are created in ignored `.test-tmp.*` directories under the checkout, which
 must be shared with Docker. The restore test uses temporary volumes and encrypted
 local archives, without S3.
 
-Host scripts are checked as POSIX `sh` and tested on Debian and macOS in CI.
+Host scripts are checked as POSIX `sh` through one Debian/macOS CI matrix. Both
+platforms use the same checkout and `build/tests/check.sh`; only package-manager
+setup and macOS CLI plugin registration differ. Debian checks run in the pinned
+Debian container; macOS checks run on the native runner. Container builds and
+integration tests use the same Linux workflow on both local host platforms via
+`just actions`, with Docker Desktop socket and volume setup confined to the wrapper.
+
+Release installer assets and their attested checksums upload only after the
+multi-platform image is successfully published. Publication waits for both image
+architectures and every host check. A failed or skipped image publication leaves
+release assets unpublished. The release event still starts from published GitHub
+release metadata; installers fail closed until the required checksums exist.
 Bash is still used to check the container's Linux runtime scripts and CI release
 logic; the version bundled with either host is sufficient.
 
@@ -122,6 +126,13 @@ GitHub Actions remain pinned to full 40-character commit SHAs in `uses:`. During
 The `build-` commands have the same output, confirmation, and offline behavior as their counterparts. Add `--hashes` to any dependency command to include commit SHAs and image digests: `just version --hashes`, `just outdated --hashes`, or `just upgrade --hashes`. Hash changes are still detected and reported as available updates when hashes are hidden.
 
 Code-server packages are verified against `packages.code-server.sha256` in `build/versions.json`. When updating the `packages.code-server.version` entry in `build/versions.json`, update both architecture checksums from the upstream release metadata.
+
+`just build`, `just run`, and the CI checks require image digests and Action SHAs
+to match the manifests, even if a pin has been removed. The check includes the
+smoke test and discovers workflows, Dockerfiles, Compose files, and shell scripts
+under `build/`. Downloaded packages require checksums for every supported asset.
+The workspace release tag and locally built image remain mutable by design.
+Use `just sync-pins` to restore literal references from the manifests.
 
 Actions and service images are pinned to immutable revisions; update those pins deliberately and run the integration suite. The temporary act download is pinned and checked against `packages.act.sha256` in `build/build-versions.json`.
 

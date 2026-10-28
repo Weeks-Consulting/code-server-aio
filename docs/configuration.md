@@ -31,6 +31,10 @@ Additional settings**. Open your public hostname and sign in through Access.
 
 ## Environment configuration
 
+Multiline values are unsupported in `.env`. Keep each value on one physical line;
+installation, image updates, and backup key initialization reject multiline or
+unterminated quoted values before changing settings.
+
 Edit `.env` beside the Compose files. Values such as `replace-with-...` and
 `your-team` in `.env.example` are placeholders to replace, not working defaults.
 Compose uses the defaults below when an optional value is unset or empty.
@@ -64,11 +68,15 @@ These properties apply when either backup overlay is included. S3 settings apply
 only to `compose.backup.yaml`; local backups need no S3 credentials. Backups stop
 the code-server container while archiving all of `/home`, then restart it. They
 exclude nested Docker's `/var/lib/docker`. For S3, create the destination bucket
-first and configure retention through its lifecycle rules. Local archives are
-kept until you remove them; automatic pruning is not configured.
+first and allow listing and deleting matching objects for automatic pruning. Local and S3
+archives older than seven days are pruned by default, restricted to the deployment's
+archive filename prefix.
 
 | Property | Required / default | Description |
 | --- | --- | --- |
+| `BACKUP_RETENTION_DAYS` | Optional; `7`. | Prune matching local and S3 archives older than this many days. Set `-1` to disable pruning. |
+| `BACKUP_NOTIFICATION_URLS` | Optional; empty. | Comma-separated Shoutrrr notification URLs; empty disables notifications. |
+| `BACKUP_NOTIFICATION_LEVEL` | Optional; `error`. | Use `error` for failures or `info` for all completed runs. |
 | `BACKUP_TIMEZONE` | Optional; `America/Chicago`. | Timezone used by the backup schedule. Use an IANA timezone such as `America/Chicago` or `Etc/UTC`. The schedule follows that timezone, including its daylight-saving changes. |
 | `BACKUP_CRON_EXPRESSION` | Optional; `0 3 * * *`. | Five-field cron schedule: minute, hour, day of month, month, day of week. The default runs daily at 03:00 in `BACKUP_TIMEZONE`. Quote the value in `.env`, for example `BACKUP_CRON_EXPRESSION="0 3 * * *"`. |
 | `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Host folder receiving `.tar.gz` archives. Relative paths resolve beside the Compose files, so the installer's default is `/opt/code-server/backups`. Use an absolute path such as `/mnt/backups/code-server` to select another location. Compose creates the folder if it does not exist and mounts it at `/archive` in the backup container. S3 settings are not passed to the local backup container. |
@@ -94,7 +102,7 @@ Traffic flows through cloudflared → Envoy (`:8080`) → code-server over
 `http://code-server:8080`. Code-server has **no TCP listener** and no published ports.
 The backend socket stays inside the workspace container; cloudflared and backup
 containers have no socket mount. Envoy listens on port 8080, while its admin
-interface listens only on loopback port 9901. Services share the project-scoped
+interface uses `/run/envoy/admin.sock`, a mode `600` Unix socket owned by Envoy. Services share the project-scoped
 Compose default network and reach the protected listener; the backend has no TCP listener.
 
 The application build downloads a static Envoy executable pinned by
@@ -153,3 +161,13 @@ backend Unix socket, Envoy listener readiness, and rejection of unauthenticated
 requests. It does not prove that a JWKS fetch will succeed or that a particular
 user can authenticate. Initialization failures exit the container so Docker's
 restart policy can retry.
+
+## Memory and logs
+
+`manage start` asks the active Docker daemon for its host memory total and limits
+the workspace to 80% of that value. With Docker Desktop or a remote Docker context,
+this is the daemon's VM or host, not the client machine. CPU use is unlimited.
+cloudflared has a fixed 256 MiB memory limit. Direct Compose users can export
+`CODE_SERVER_MEMORY_LIMIT` as a byte count or Docker memory quantity; its default
+is unlimited without `manage`. All deployment services use JSON logs rotated at
+10 MiB per file, keeping three files per container.

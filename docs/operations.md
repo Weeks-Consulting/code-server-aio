@@ -9,11 +9,20 @@ docker compose exec code-server supervisorctl status
 docker compose down
 ```
 
-The container healthcheck deliberately expects HTTP 403 from an unauthenticated
-Envoy request every 30 seconds. It uses the `code-server-container-healthcheck`
-User-Agent; Envoy omits these expected denials from its access log. Unexpected
-response codes and requests with other User-Agents remain logged. This filter
-affects logging only; the probe still checks that authentication is enforced.
+The container healthcheck expects HTTP 403 from an unauthenticated request to the
+real Envoy listener every 30 seconds. Only the exact `GET /` probe with the
+`code-server-container-healthcheck` User-Agent, no JWT assertion header, and a
+physical TCP peer of `127.0.0.1` is quiet. Suppression is marked inside the
+missing-token rejection code and requires a 403 response. Forwarding headers do
+not establish local origin. Other denials and unexpected probe responses remain
+logged. The probe verifies anonymous access is denied without requiring online
+key retrieval; JWT signature validation is also covered by integration tests.
+
+Envoy writes JSON access logs containing timestamp, method, actual request path
+without query parameters, host, protocol, status, response details, denial reason
+when available, response flags, direct peer address, duration, User-Agent, and
+request ID. JWT headers and cookies are not logged. The peer is the immediate TCP
+connection (normally cloudflared), not an inferred end-user IP.
 
 code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Docker
 group access. Supervisor manages the services; the container runs with
@@ -58,3 +67,8 @@ embedded in `build/runtime/envoy.json.template`. Build-only version and checksum
 files stay beside `build/Dockerfile`. Host installation and restore helpers live
 in `build/tools/`; tests stay in `build/tests/`. Compose files stay at the project root.
 
+
+For a separate online JWKS reachability probe, run
+`docker compose exec -T code-server /usr/local/bin/container-healthcheck --access`.
+Normal Docker health deliberately works offline and does not fetch keys. The
+optional probe checks HTTPS connectivity and HTTP success, not a user's authorization.

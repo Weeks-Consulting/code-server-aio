@@ -143,6 +143,8 @@ class AccessProxyTests(unittest.TestCase):
     def start(self, identities=(), change=None, env_override=None, expect_ready=True):
         self.stop()
         config = copy.deepcopy(BOOTSTRAP)
+        # Fixture clients use loopback TCP; production uses a private Unix socket.
+        config['admin']['address'] = {'socket_address': {'address': '127.0.0.1', 'port_value': 9901}}
         resources = config['static_resources']
         manager = resources['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
         provider = manager['http_filters'][2]['typed_config']['providers']['cloudflare']
@@ -186,13 +188,14 @@ class AccessProxyTests(unittest.TestCase):
         return message + '.' + b64(signature)
 
     @staticmethod
-    def response(token=None, path='/', headers=None):
-        connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3)
+    def response(token=None, path='/', headers=None, method='GET', source='127.0.0.1'):
+        connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3,
+                                                source_address=(source, 0))
         request_headers = dict(headers or {})
         if token is not None:
             request_headers['Cf-Access-Jwt-Assertion'] = token
         try:
-            connection.request('GET', path, headers=request_headers)
+            connection.request(method, path, headers=request_headers)
             response = connection.getresponse()
             return response.status, dict(response.getheaders()), response.read().decode()
         finally:
@@ -224,6 +227,61 @@ class AccessProxyTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(self.status(), 403)
+
+    def test_access_logs_only_suppress_the_exact_local_denial_probe(self):
+        marker = {'User-Agent': 'code-server-container-healthcheck'}
+        cases = [
+            ('quiet', {}, 403, False),
+            ('remote', {'source': '127.0.0.2', 'headers': {
+                **marker, 'X-Forwarded-For': '127.0.0.1'}}, 403, True),
+            ('path', {'path': '/proxy/3000/private?secret=do-not-log', 'headers': {
+                **marker, 'x-envoy-original-path': '/forged'}}, 403, True),
+            ('query', {'path': '/?secret=do-not-log'}, 403, True),
+            ('method', {'method': 'POST'}, 403, True),
+            ('invalid', {'token': 'garbage'}, 403, True),
+            ('signature', {'token': self.token(key=1)}, 403, True),
+            ('empty', {'token': ''}, 403, True),
+            ('accepted', {'token': self.token()}, 200, True),
+            ('ordinary', {'headers': {'User-Agent': 'ordinary-client'}}, 403, True),
+        ]
+        for name, arguments, expected, _ in cases:
+            arguments = dict(arguments)
+            arguments['headers'] = {**arguments.get('headers', marker), 'X-Request-ID': name}
+            self.assertEqual(self.status(**arguments), expected, name)
+        self.stop()  # Flush access logs before asserting both presence and absence.
+        self.log.seek(0)
+        entries = [json.loads(line) for line in self.log.read().decode().splitlines()
+                   if line.startswith('{')]
+        records = {entry['request_id']: entry for entry in entries}
+        for name, _, expected, logged in cases:
+            with self.subTest(name=name):
+                if not logged:
+                    self.assertNotIn(name, records)
+                    continue
+                entry = records[name]
+                self.assertEqual(int(entry['status']), expected)
+                self.assertIn('response_details', entry)
+                self.assertIn('duration_ms', entry)
+        self.assertTrue(records['remote']['peer'].startswith('127.0.0.2:'))
+        self.assertEqual(records['path']['path'], '/proxy/3000/private')
+        self.assertEqual(records['path']['denial_reason'], 'missing_assertion')
+        self.assertNotIn('do-not-log', json.dumps(entries))
+        self.assertNotIn('garbage', json.dumps(entries))
+
+    def test_unexpected_probe_response_is_logged(self):
+        def change(config, manager, provider):
+            manager['http_filters'][0]['typed_config']['default_source_code']['inline_string'] = (
+                manager['http_filters'][0]['typed_config']['default_source_code']['inline_string']
+                .replace('[":status"] = "403"', '[":status"] = "503"'))
+        self.start(change=change, expect_ready=False)
+        self.wait_status(None, 503)
+        self.assertEqual(self.status(headers={'User-Agent': 'code-server-container-healthcheck',
+                                              'X-Request-ID': 'unexpected-probe'}), 503)
+        self.stop()
+        self.log.seek(0)
+        entries = [json.loads(line) for line in self.log.read().decode().splitlines()
+                   if line.startswith('{')]
+        self.assertTrue(any(entry['request_id'] == 'unexpected-probe' for entry in entries))
 
     def test_valid_tokens(self):
         for audience in (AUD, [AUD], ['other', AUD]):

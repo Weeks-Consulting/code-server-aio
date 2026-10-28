@@ -31,6 +31,9 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # Keep in sync with compose.yaml; the workspace must not need --privileged.
 run_flags="--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/fuse --security-opt apparmor=unconfined --security-opt seccomp=unconfined --security-opt systempaths=unconfined"
 wait_ready() {
@@ -63,6 +66,9 @@ docker exec "$name" /bin/bash -ec '
     test "$(curl --silent --max-time 2 --output /dev/null --write-out "%{http_code}" http://127.0.0.1:8080/)" = 403
     envoy_pid=$(/usr/bin/supervisorctl pid envoy)
     test "$(stat -c %U /proc/$envoy_pid)" = envoy
+    test "$(stat -c %a /run/envoy/admin.sock)" = 600
+    test "$(stat -c %U /run/envoy/admin.sock)" = envoy
+    if sudo -u cloud-user curl --silent --max-time 2 --unix-socket /run/envoy/admin.sock http://localhost/ready; then exit 1; fi
     if curl --silent --max-time 1 http://127.0.0.1:8081/; then exit 1; fi
     pid=$(/usr/bin/supervisorctl pid code-server)
     grep -q "^Uid:[[:space:]]*10000" "/proc/$pid/status"

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import sys
 import tempfile
@@ -169,4 +170,8 @@ if __name__ == '__main__':
     elif sys.argv[1] == '--probe':
         probe(*sys.argv[2:])
     else:
+        def interrupted(signum, frame):
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, interrupted)
+        signal.signal(signal.SIGHUP, interrupted)
         integration(sys.argv[1])

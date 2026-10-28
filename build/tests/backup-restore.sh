@@ -26,6 +26,8 @@ touch "$archive_dir/.env"
 python3 "$script_dir/../tools/backup-key.py" "$archive_dir/.env"
 BACKUP_GPG_PASSPHRASE=$(sed -n 's/^BACKUP_GPG_PASSPHRASE=//p' "$archive_dir/.env")
 export BACKUP_GPG_PASSPHRASE
+BACKUP_ID=$prefix
+export BACKUP_ID
 cleanup() {
     docker rm -f "$app_name" >/dev/null 2>&1 || true
     docker volume rm "$source_volume" "${prefix}_docker-data" "$prefix-restored" "$prefix-relative" >/dev/null 2>&1 || true
@@ -33,6 +35,18 @@ cleanup() {
     remove_test_archives
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Retention prunes only this deployment's prefix, leaving unrelated files alone.
+old_archive="$archive_dir/$prefix-home-2000-01-01T00-00-00.tar.gz.gpg"
+printf 'old archive' > "$old_archive"
+printf 'unrelated' > "$archive_dir/unrelated.txt"
+python3 - "$old_archive" "$archive_dir/unrelated.txt" <<'PY'
+import os, sys
+for name in sys.argv[1:]:
+    os.utime(name, (946684800, 946684800))
+PY
 # A lightweight application verifies backup stop/restart behavior.
 start_backup_fixture
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
@@ -41,6 +55,8 @@ BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_
     -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup-local.yaml" \
     run --rm --no-deps --entrypoint backup backup
 assert_backup_restarted_app
+test ! -e "$old_archive"
+test -f "$archive_dir/unrelated.txt"
 echo 'PASS: Local backup stopped and restarted the labeled application.'
 archive=$(find "$archive_dir" -maxdepth 1 -name '*.tar.gz.gpg' -print -quit)
 test -n "$archive"
@@ -119,3 +135,4 @@ BACKUP_GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_d
 docker run --rm --network none --mount "type=volume,src=$prefix-relative,dst=/data,readonly" \
     --entrypoint /bin/sh "$image" -ec 'grep -qx saved-settings /data/cloud-user/.config/sentinel'
 echo 'Backup/restore round trip passed.'
+python3 "$script_dir/integration_restore.py" "$image"

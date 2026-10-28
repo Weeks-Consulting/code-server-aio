@@ -35,6 +35,9 @@ cleanup() {
     if [ -n "$test_volume" ]; then docker volume rm "$test_volume" >/dev/null || true; fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # Docker bind sources are resolved by the daemon, outside act's runner container.
 # Share temporary test data at the same absolute path in both environments.
 mkdir "$act_dir/tmp"

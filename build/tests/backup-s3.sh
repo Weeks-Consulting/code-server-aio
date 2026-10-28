@@ -38,6 +38,9 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 s3() {
     docker run --rm --network "${prefix}_default" \
         -e BACKUP_AWS_ACCESS_KEY_ID -e BACKUP_AWS_SECRET_ACCESS_KEY --entrypoint /bin/sh "$image" -ec '

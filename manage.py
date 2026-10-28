@@ -34,7 +34,28 @@ def helper(directory, name):
     fail(f"{name} helper is missing; reinstall this release.")
 
 
+def validate_dotenv(text):
+    """Require quoted dotenv values to end on the same physical line."""
+    assignment = re.compile(r"^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(.*)$")
+    for number, line in enumerate(text.splitlines(), 1):
+        match = assignment.match(line)
+        if not match or not match[1].startswith(("'", '"')):
+            continue
+        value = match[1]
+        escaped = False
+        for character in value[1:]:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == value[0]:
+                break
+        else:
+            raise ValueError(f"Multiline or unterminated quoted .env value at line {number}; use a single-line value.")
+
+
 def image_repository(original):
+    validate_dotenv(original)
     matches = list(IMAGE_SETTING.finditer(original))
     image = DEFAULT_IMAGE
     if matches:
@@ -183,6 +204,11 @@ def manage(args, directory):
         subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(directory / '.env')], check=True)
         os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
     if args.action == 'start':
+        total = int(subprocess.check_output(
+            ['docker', 'info', '--format', '{{.MemTotal}}'], text=True).strip())
+        if total <= 0:
+            fail('Docker did not report a positive host memory total.')
+        os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
         if args.pull:
             warn_release(command)
         command += ['up', '--remove-orphans']
@@ -251,6 +277,8 @@ def dependencies(dry_run):
             subprocess.run(command, check=True)
     compose_missing = not available(['docker', 'compose', 'version'])
     packages = [] if shutil.which('gpg') else ['gnupg']
+    if not shutil.which('gh'):
+        packages.append('gh')
     system = platform.system()
     if system == 'Darwin':
         if compose_missing:
@@ -305,7 +333,17 @@ def download(url):
                 raise
 
 
+def verify_release(checksums, repository):
+    with tempfile.TemporaryDirectory(prefix='release-verification-') as directory:
+        path = Path(directory) / 'SHA256SUMS'
+        path.write_bytes(checksums)
+        subprocess.run(['gh', 'attestation', 'verify', str(path), '--repo', repository,
+                        '--signer-workflow', repository + '/.github/workflows/container.yaml'], check=True)
+
+
 def merge_settings(original, template, version):
+    validate_dotenv(original)
+    validate_dotenv(template)
     key = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=')
     existing = {m[1] for line in original.splitlines() if (m := key.match(line))}
     additions, notes = [], []
@@ -324,6 +362,7 @@ def merge_settings(original, template, version):
 
 
 def select_image(text, image):
+    validate_dotenv(text)
     values = list(IMAGE_SETTING.finditer(text))
     if values and re.search(r'@sha256:[a-fA-F0-9]{64}(?=[\s"\x27#]|$)', values[-1][1]):
         print('Warning: keeping existing CODE_SERVER_IMAGE digest pin; verify a new digest or run manage upgrade to deliberately replace it.', file=sys.stderr)
@@ -332,10 +371,75 @@ def select_image(text, image):
 
 
 def replace_image_setting(text, image):
+    validate_dotenv(text)
     setting = 'CODE_SERVER_IMAGE=' + image
     if IMAGE_SETTING.search(text):
         return IMAGE_SETTING.sub(lambda _: setting, text)
     return text + ('' if not text or text.endswith('\n') else '\n') + setting + '\n'
+
+
+def install_files(directory, files, template, version, image):
+    """Serialize refreshes, stage complete files, and roll back failed replacements."""
+    env = directory / '.env'
+    with env_lock(env):
+        validate_destination(directory, [*files, '.env'])
+        text = merge_settings(env.read_text(), template, version) if env.exists() else template
+        text = select_image(text, image)
+        staging = Path(tempfile.mkdtemp(prefix='.install-', dir=directory))
+        replaced = []
+        originals = {}
+        recoverable = True
+        try:
+            staged_env = staging / '.env'
+            staged_env.write_text(text)
+            staged_env.chmod(0o600)
+            key_helper = staging / 'backup-key.py'
+            key_helper.write_bytes(files['backup-key.py'])
+            subprocess.run([sys.executable, str(key_helper), str(staged_env)], check=True)
+            contents = {**files, '.env': staged_env.read_bytes()}
+            for index, (name, data) in enumerate(contents.items()):
+                destination = directory / name
+                original = staging / f'original-{index}'
+                if destination.exists():
+                    shutil.copy2(destination, original)
+                    info = destination.stat()
+                    os.chown(original, info.st_uid, info.st_gid)
+                    originals[name] = original
+                else:
+                    originals[name] = None
+                candidate = staging / f'new-{index}'
+                candidate.write_bytes(data)
+                candidate.chmod(0o600 if name == '.env' else
+                                0o755 if name == 'manage' or name.endswith('.sh') else 0o644)
+                if name == '.env' and destination.exists():
+                    os.chown(candidate, info.st_uid, info.st_gid)
+            # Keep the previous release files for manual rollback as before.
+            for index, name in enumerate(contents):
+                if name != '.env' and originals[name] is not None:
+                    backup = staging / f'backup-{index}'
+                    shutil.copy2(originals[name], backup)
+                    os.replace(backup, directory / (name + '.bak'))
+            try:
+                for index, name in enumerate(contents):
+                    os.replace(staging / f'new-{index}', directory / name)
+                    replaced.append(name)
+            except BaseException:
+                for name in reversed(replaced):
+                    try:
+                        if originals[name] is None:
+                            (directory / name).unlink()
+                        else:
+                            os.replace(originals[name], directory / name)
+                    except OSError:
+                        recoverable = False
+                if not recoverable:
+                    print(f'Installation rollback incomplete; recovery files retained in {staging}', file=sys.stderr)
+                raise
+        finally:
+            if recoverable:
+                shutil.rmtree(staging)
+    for name in files:
+        print(f'Updated {directory / name}')
 
 
 def install(args):
@@ -384,25 +488,13 @@ def install(args):
     for name, data in files.items():
         if expected.get(sources[name]) != hashlib.sha256(data).hexdigest():
             fail('Release checksum missing or incorrect: ' + name)
+    verify_release(checksums, repository)
     template = select_image(files.pop('.env.example').decode(), image)
     # Finish downloads and validation before changing any deployment files.
     directory.mkdir(parents=True, exist_ok=True)
     validate_destination(directory, list(files) + ['.env'])
-    for name, data in files.items():
-        destination = directory / name
-        if destination.exists():
-            destination.replace(directory / (name + '.bak'))
-        destination.write_bytes(data)
-        destination.chmod(0o755 if name == 'manage' or name.endswith('.sh') else 0o644)
-        print(f'Updated {destination}')
     env = directory / '.env'
-    with env_lock(env):
-        text = merge_settings(env.read_text(), template, version) if env.exists() else template
-        text = select_image(text, image)
-        env.touch(mode=0o600, exist_ok=True)
-        env.chmod(0o600)
-        env.write_text(text)
-    subprocess.run([sys.executable, str(directory / 'backup-key.py'), str(env)], check=True)
+    install_files(directory, files, template, version, image)
     print(f'\nInstalled deployment files in {directory} (release {version}).')
     print(f'Edit {env} to configure Cloudflare Access and your tunnel before starting.')
     print(f'Then run sh "{directory}/manage" to launch. No services have been started.')

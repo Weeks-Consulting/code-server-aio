@@ -21,8 +21,14 @@ Installation and management run through `manage`, a thin shell wrapper around
 ./manage install --directory "$HOME/code-server"
 ```
 
-For hosts without a checkout, the bootstrap needs curl and Python 3.
-It downloads the latest released `manage.py`, which performs the installation:
+For hosts without a checkout, install curl, Python 3, and a GitHub CLI (`gh`) version
+that supports `gh attestation verify` first (`apt-get install gh` on Debian or
+`brew install gh` on macOS). `just install` also installs gh.
+The bootstrap verifies the release checksum attestation and the downloaded
+`manage.py` checksum before executing it. The Python installer also verifies the
+checksum attestation before replacing deployment files. Authenticate `gh` if
+required by your GitHub access; when using sudo, ensure the privileged process
+has the necessary GitHub authentication. Verification failures stop installation.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sudo sh -s --
@@ -61,8 +67,8 @@ files before replacing any files. The current installer requires releases with a
 `compose.backup-common.yaml`), Python management, backup helpers, and `SHA256SUMS`.
 To deploy an earlier release, use that release's own installer. Missing files or
 checksums abort installation before deployment files are changed.
-Checksums detect mismatched downloads; GitHub and the release publisher remain
-the trust anchor. Rerunning the installer refreshes the
+Attestations must identify the selected repository and its container publishing
+workflow. GitHub and the release publisher remain the trust anchor. Rerunning the installer refreshes the
 Compose files, saving their previous contents as `.bak` files. Existing `.env`
 values and comments are preserved except for `CODE_SERVER_IMAGE`, which is set to the selected tag unless it contains a digest pin; missing settings are appended with notes from
 the new release. `.env` is readable only by its owner. If you run the installer
@@ -102,3 +108,10 @@ cd /opt/code-server
 sudoedit .env
 ```
 
+
+Installer refreshes serialize on `.env.lock`. Complete replacements, including
+the encryption key, are staged before installation; failed replacements restore
+the previous deployment. If rollback itself fails, the installer reports the
+private `.install-*` directory containing recovery files. A process or host crash
+can still leave mixed release files: inspect the deployment and its `.bak` files
+before restarting.

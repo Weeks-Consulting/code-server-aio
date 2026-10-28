@@ -4,9 +4,11 @@ set -eu
 command -v python3 >/dev/null || { echo 'Install python3 to restore backups.' >&2; exit 1; }
 exec python3 - "$@" <<'PYTHON'
 import os
+import hashlib
 from pathlib import Path
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -53,13 +55,25 @@ name = 'original-home.tar.gz' + ('.gpg' if key else '')
 partial = rollback / ('.' + name + '.partial')
 stage = '.restore-staging-' + uuid.uuid4().hex
 image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad')
-base = ['docker', 'run', '--rm', '--network', 'none', '--user', '0:0',
+guard = 'code-server-restore-' + hashlib.sha256(volume.encode()).hexdigest()[:24]
+create = ['docker', 'create', '--name', guard, '--network', 'none', '--user', '0:0',
         '--mount', 'type=volume,src=' + volume + ',dst=/restore',
-        '--env', 'STAGE=' + stage, '--entrypoint', '/bin/sh', image, '-euc']
+        '--env', 'STAGE=' + stage, '--entrypoint', '/bin/sh', image, '-c', 'exec sleep infinity']
+base = ['docker', 'exec', '-i', guard, '/bin/sh', '-euc']
+processes = []
+acquired = False
+replacement_started = False
+restored = False
+
+
+def spawn(arguments, **kwargs):
+    process = subprocess.Popen(arguments, **kwargs)
+    processes.append(process)
+    return process
 
 
 def helper(script, **kwargs):
-    return subprocess.Popen(base[:-4] + ['-i'] + base[-4:] + [script], **kwargs)
+    return spawn(base + [script], **kwargs)
 
 
 # Keys travel over an inherited pipe, never argv or a plaintext disk file.
@@ -70,7 +84,7 @@ def gpg(arguments, **kwargs):
     finally:
         os.close(writer)
     try:
-        return subprocess.Popen(['gpg', '--homedir', gpg_home, '--batch', '--yes',
+        return spawn(['gpg', '--homedir', gpg_home, '--batch', '--yes',
                                  '--pinentry-mode', 'loopback', '--passphrase-fd', str(reader),
                                  *arguments], pass_fds=(reader,), **kwargs)
     finally:
@@ -84,6 +98,17 @@ def finish(processes):
 
 
 try:
+    # Docker reserves names atomically across clients of this daemon. Keep one
+    # container alive for the entire restore, rather than checking between helpers.
+    reservation = subprocess.run(create, capture_output=True, text=True)
+    if reservation.returncode:
+        raise RuntimeError(f'Could not reserve restore container {guard}: {reservation.stderr.strip()}')
+    acquired = True
+    run('docker', 'start', guard, stdout=subprocess.DEVNULL)
+    own_id = reservation.stdout.strip()
+    attached = subprocess.check_output(['docker', 'ps', '-q', '--no-trunc', '--filter', 'volume=' + volume]).decode().split()
+    if any(container != own_id for container in attached):
+        raise RuntimeError('Another container is using the target volume; keep the stack stopped during restore.')
     # GPG's agent creates Unix sockets here. Shared Docker TMPDIR paths (act,
     # Docker Desktop) can exceed their length limit; this directory is host-only.
     with tempfile.TemporaryDirectory(prefix='restore-gpg-', dir='/tmp') as gpg_home:
@@ -142,6 +167,7 @@ try:
         partial.rename(rollback / name)
         print('Original volume backup: ' + str(rollback / name), flush=True)
         print('Original volume backup complete; replacing volume contents.', flush=True)
+        replacement_started = True
         finish([helper('''
             find /restore -mindepth 1 -maxdepth 1 ! -name "$STAGE" -exec rm -rf -- {} +
             source="/restore/$STAGE/backup/code-server-home"
@@ -151,13 +177,36 @@ try:
             find "$source" -mindepth 1 -maxdepth 1 -exec mv -t /restore -- {} +
             touch -r "$source" /restore
         ''')])
+        restored = True
     print('Restored ' + volume + '. Restart the deployment with its usual launch options.')
 except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
     sys.exit('Restore failed: ' + str(error))
 finally:
-    # A verified rollback survives all failures. An interrupted replacement may
-    # leave staging after SIGKILL; never remove other restores' staging trees.
-    subprocess.run(base + ['rm -rf -- "/restore/$STAGE"'], check=False)
+    if acquired:
+        # Kill the container first: terminating a Docker CLI does not guarantee
+        # that its remote extraction/replacement process has stopped.
+        stopped = subprocess.run(['docker', 'kill', guard], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL).returncode == 0
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if stopped and (not replacement_started or restored):
+            subprocess.run(['docker', 'start', guard], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(base + ['rm -rf -- "/restore/$STAGE"'], check=True)
+        elif replacement_started and not restored:
+            print(f'Replacement interrupted; staged files remain at /{stage} in {volume}.', file=sys.stderr)
+        if stopped:
+            subprocess.run(['docker', 'rm', '-f', guard], check=True, stdout=subprocess.DEVNULL)
+        else:
+            print(f'Could not stop restore container {guard}; inspect it before removing staging or restarting.', file=sys.stderr)
+    if replacement_started and not restored and (rollback / name).exists():
+        print(f'Keep the stack stopped. Recover with: manage restore --archive '
+              f'{shlex.quote(str(rollback / name))} --volume {shlex.quote(volume)}', file=sys.stderr)
     partial.unlink(missing_ok=True)
     try:
         rollback.rmdir()

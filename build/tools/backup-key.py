@@ -12,6 +12,27 @@ import sys
 import tempfile
 
 
+# Kept in sync with manage.py: both helpers ship as standalone release files.
+def validate_dotenv(text):
+    """Require quoted dotenv values to end on the same physical line."""
+    assignment = re.compile(r"^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(.*)$")
+    for number, line in enumerate(text.splitlines(), 1):
+        match = assignment.match(line)
+        if not match or not match[1].startswith(("'", '"')):
+            continue
+        value = match[1]
+        escaped = False
+        for character in value[1:]:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == value[0]:
+                break
+        else:
+            raise ValueError(f"Multiline or unterminated quoted .env value at line {number}; use a single-line value.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("env_file", type=Path, help="deployment .env file")
@@ -29,8 +50,12 @@ def main():
         fcntl.flock(guard, fcntl.LOCK_EX)
         if path.is_symlink() or not path.is_file():
             sys.exit("Backup key initialization requires a regular .env file.")
-        path.chmod(0o600)
         contents = path.read_text()
+        try:
+            validate_dotenv(contents)
+        except ValueError as error:
+            sys.exit(str(error))
+        path.chmod(0o600)
         pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?BACKUP_GPG_PASSPHRASE[ \t]*=")
         value = ""
         for line in contents.splitlines():

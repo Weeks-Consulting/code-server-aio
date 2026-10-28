@@ -59,8 +59,10 @@ docker compose -f compose.yaml -f compose.backup-common.yaml -f compose.backup-l
 Archives are stored in the host folder with names such as
 `code-server-home-2026-10-21T03-00-00.tar.gz.gpg`. The schedule defaults to 03:00 in
 `BACKUP_TIMEZONE`, using the same stop/archive/restart behavior as S3 backups.
-S3 settings in `.env` are ignored by this overlay. Archives are not automatically
-deleted; manage local retention yourself. See [Restoring a backup](restore.md)
+S3 settings in `.env` are ignored by this overlay. Matching archives older than
+`BACKUP_RETENTION_DAYS` (default seven days) are automatically pruned. Set `-1`
+to disable pruning. Pruning is restricted to the `<BACKUP_ID or project>-home-`
+filename prefix; use a dedicated directory and a unique backup ID. See [Restoring a backup](restore.md)
 to restore directly from a local archive.
 
 Use the same three-file combination for subsequent commands, including `down`. To
@@ -82,7 +84,10 @@ Backups run daily at **03:00 America/Chicago**, configurable through
 `BACKUP_TIMEZONE` and `BACKUP_CRON_EXPRESSION`. The backup service uses the host
 Docker socket to stop code-server while archiving the entire `/home` volume, then restart it.
 Nested Docker data is excluded. Timestamped archives upload to an existing bucket;
-configure bucket lifecycle rules for retention.
+matching archives older than seven days are pruned by default. Set
+`BACKUP_RETENTION_DAYS` to change this policy (`-1` disables pruning), and ensure
+the S3 credentials allow listing and deleting matching objects. Bucket lifecycle
+rules can impose additional retention.
 
 Backup stop labels and archive names are scoped to the Compose project. The
 default S3 prefix is `<project>/home`. If multiple hosts share a bucket, set a
@@ -106,3 +111,13 @@ for more options.
 For recovery instructions, see [Restoring a backup](restore.md). The restore
 helper backs up the original volume before replacing its contents in place.
 
+
+## Backup monitoring
+
+Set `BACKUP_NOTIFICATION_URLS` to a comma-separated list of Shoutrrr notification
+URLs. `BACKUP_NOTIFICATION_LEVEL=error` reports failures; `info` reports every
+completed run. Notification credentials stay in `.env`. See the upstream
+[notification guide](https://offen.github.io/docker-volume-backup/how-tos/set-up-notifications.html).
+Use success notifications or storage monitoring to detect a stopped scheduler as
+well as failed runs, and periodically run `just test-backup` and restore a real archive
+to a disposable volume to check recovery.

@@ -1,6 +1,10 @@
 #!/bin/bash
 # Readiness: all services running, nested Docker ready, workspace socket ready.
 set -euo pipefail
+if [[ $# -gt 1 || ($# -eq 1 && $1 != --access) ]]; then
+    echo 'Usage: container-healthcheck [--access]' >&2
+    exit 2
+fi
 
 not_ready() {
     printf 'Not ready: %s\n' "$1" >&2
@@ -29,6 +33,10 @@ check_http() {
 }
 
 check_http http://localhost/healthz 200 --unix-socket /run/code-server/backend.sock --location
-check_http http://127.0.0.1:9901/ready 200
-# Mark the expected denial so Envoy can omit this probe from its access log.
+check_http http://localhost/ready 200 --unix-socket /run/envoy/admin.sock
+# The missing-token denial is quiet only for this exact loopback GET / probe.
 check_http http://127.0.0.1:8080/ 403 --user-agent code-server-container-healthcheck
+# Optional monitoring probe; normal container health remains usable offline.
+if [[ ${1:-} == --access ]]; then
+    check_http "https://${CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs" 200
+fi

@@ -114,7 +114,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck python3 gnupg
-      - name: Check shell syntax and Compose configurations
+      - name: Check dependency pins, shell syntax, and Compose configurations
         run: sh build/tests/check.sh
       - name: Build test image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -169,28 +169,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  check-debian:
-    name: Host scripts (Debian sh)
+  check-host:
+    name: Host scripts (${{ matrix.host }} sh)
     needs: source
-    runs-on: ubuntu-24.04
-    container: debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.source.outputs.ref }}
-          persist-credentials: false
-      - name: Install host check dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends bash python3 shellcheck docker-cli docker-compose
-      - name: Check host scripts with Debian sh
-        run: sh build/tests/check.sh
-
-  check-macos:
-    name: Host scripts (macOS sh)
-    needs: source
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: Debian
+            runner: ubuntu-24.04
+            container-image: debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+          - host: macOS
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    # macOS runs on the host; Debian retains its pinned userland and /bin/sh.
+    container: ${{ matrix.container-image }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,17 +191,13 @@ jobs:
           ref: ${{ needs.source.outputs.ref }}
           persist-credentials: false
       - name: Install host check dependencies
-        run: |
-          brew install python shellcheck docker docker-compose
-          mkdir -p "$RUNNER_TEMP/docker-config/cli-plugins"
-          ln -s "$(brew --prefix)/bin/docker-compose" "$RUNNER_TEMP/docker-config/cli-plugins/docker-compose"
-          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
-      - name: Check host scripts with macOS sh
+        run: sh build/tests/install-host-deps.sh
+      - name: Check dependency pins, shell syntax, and Compose configurations
         run: sh build/tests/check.sh
 
   push:
     name: Push tested image (${{ matrix.arch }})
-    needs: [source, test, check-debian, check-macos]
+    needs: [source, test, check-host]
     if: needs.source.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     strategy:
@@ -331,7 +320,7 @@ jobs:
 
   release-assets:
     name: Publish installer and deployment checksums
-    needs: [source, test, check-debian, check-macos]
+    needs: [source, publish]
     if: github.event_name == 'release'
     runs-on: ubuntu-24.04
     permissions:
