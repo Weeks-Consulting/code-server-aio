@@ -28,7 +28,7 @@ class LauncherTests(unittest.TestCase):
         (self.deployment / "restore-home.sh").write_bytes(
             (SCRIPT.parent / "build/tools/restore-home.sh").read_bytes())
         for name in (".env", "compose.yaml",
-                     "compose.backup.yaml", "compose.backup-local.yaml"):
+                     "compose.backup-common.yaml", "compose.backup.yaml", "compose.backup-local.yaml"):
             (self.deployment / name).touch()
         self.log = self.root / "arguments"
         docker = self.root / "docker"
@@ -60,7 +60,8 @@ class LauncherTests(unittest.TestCase):
                             "--env-file", str(self.deployment / ".env"),
                             "-f", str(self.deployment / "compose.yaml")]
                 if overlay:
-                    expected += ["-f", str(self.deployment / overlay)]
+                    expected += ["-f", str(self.deployment / "compose.backup-common.yaml"),
+                                 "-f", str(self.deployment / overlay)]
                 expected += ["up", "--remove-orphans", "-d"]
                 self.assertEqual(json.loads(self.log.read_text()), expected)
 

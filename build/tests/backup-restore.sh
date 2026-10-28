@@ -53,7 +53,7 @@ docker run -d --name "$app_name" \
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
 BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" docker compose --project-directory "$project_dir" \
     --project-name "$prefix" --env-file "$project_dir/.env.example" \
-    -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-local.yaml" \
+    -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup-local.yaml" \
     run --rm --no-deps --entrypoint backup backup
 test "$(docker inspect -f '{{.State.Running}}' "$app_name")" = true
 test "$(docker inspect -f '{{.State.StartedAt}}' "$app_name")" != "$started_before"

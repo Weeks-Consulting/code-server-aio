@@ -100,7 +100,7 @@ class BackupKeyTests(unittest.TestCase):
             "    url = request.full_url\n"
             "    if url.endswith('/SHA256SUMS'):\n"
             "        if os.environ.get('NO_CHECKSUMS'): raise urllib.error.HTTPError(url, 404, 'missing', {}, None)\n"
-            "        files = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.py', 'build/tools/restore-home.sh')\n"
+            "        files = ('compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.py', 'build/tools/restore-home.sh')\n"
             "        content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files).encode()\n"
             "        if os.environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], b'0' * 64)\n"
             "        return io.BytesIO(content)\n"
@@ -128,12 +128,12 @@ class BackupKeyTests(unittest.TestCase):
         env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "PYTHONPATH": str(tools)}
         return command, env, deployment
 
-    def test_older_release_without_checksums_warns(self):
+    def test_older_release_without_checksums_is_rejected(self):
         command, env, deployment = self.installer_fixture()
         result = subprocess.run(command, env={**env, "NO_CHECKSUMS": "1"}, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("no SHA256SUMS", result.stderr)
-        self.assertTrue((deployment / ".env").exists())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lacks required deployment files or SHA256SUMS", result.stderr)
+        self.assertFalse(deployment.exists())
 
     def test_installer_rejects_tampered_downloads(self):
         command, env, deployment = self.installer_fixture()

@@ -1,4 +1,4 @@
-# Test-only override, used with compose.yaml and compose.backup.yaml.
+# Test-only override, used with the base, common backup, and S3 destination files.
 services:
   backup:
     environment:

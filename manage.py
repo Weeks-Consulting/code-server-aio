@@ -159,7 +159,8 @@ def manage(args, directory):
         command += ['--project-name', args.project_name]
     files = ['compose.yaml']
     if args.backup != 'none':
-        files.append('compose.backup-local.yaml' if args.backup == 'local' else 'compose.backup.yaml')
+        files += ['compose.backup-common.yaml',
+                  'compose.backup-local.yaml' if args.backup == 'local' else 'compose.backup.yaml']
     if args.backup == 'local':
         os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
     for name in files:
@@ -204,8 +205,13 @@ def warn_release(command):
         pass  # Remain usable offline and with custom images.
 
 
-DEPLOYMENT_FILES = ['compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
-                    'manage', 'manage.py', 'restore-home.sh', 'backup-key.py']
+DEPLOYMENT_FILES = {name: name for name in (
+    'compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml',
+    'compose.backup-local.yaml', 'manage', 'manage.py')}
+DEPLOYMENT_FILES.update({
+    'restore-home.sh': 'build/tools/restore-home.sh',
+    'backup-key.py': 'build/tools/backup-key.py',
+})
 TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
 
 
@@ -281,17 +287,12 @@ def dependencies(dry_run):
         subprocess.run(['docker', 'compose', 'version'], check=True)
 
 
-def download(url, optional=False):
+def download(url):
     for attempt in range(4):
         try:
             request = urllib.request.Request(url, headers={'User-Agent': 'code-server-aio-manage'})
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.read()
-        except urllib.error.HTTPError as error:
-            if optional and error.code == 404:
-                return None
-            if attempt == 3:
-                raise
         except OSError:
             if attempt == 3:
                 raise
@@ -335,7 +336,7 @@ def install(args):
         fail('Repository must be owner/repo.')
     if version and not re.fullmatch(TAG, version):
         fail(f'Expected a release tag such as v4.141.0 or v4.141.0-1; got: {version}')
-    validate_destination(directory, DEPLOYMENT_FILES + ['.env'])
+    validate_destination(directory, [*DEPLOYMENT_FILES, '.env'])
     dependencies(args.dry_run)
     image = 'ghcr.io/' + repository.lower() + ':' + (version[1:] if version else 'latest')
     if args.dry_run:
@@ -346,7 +347,7 @@ def install(args):
         for name in DEPLOYMENT_FILES:
             if (directory / name).is_file():
                 print(f'Would save {directory / name} as {name}.bak before replacing it.')
-            print(f'Would download and install {directory / name} (helpers only when included in the release).')
+            print(f'Would download and install {directory / name} (all files are required).')
         print(f'Would preserve existing {directory}/.env values and append missing release settings.' if (directory / '.env').exists() else
               f'Would create {directory}/.env from the release template with its image selected.')
         print(f'Would set CODE_SERVER_IMAGE={image} in .env unless an existing digest pin is present.')
@@ -359,35 +360,22 @@ def install(args):
         if release.get('draft') or release.get('prerelease') or not re.fullmatch(TAG, version):
             fail('GitHub returned an invalid stable release tag')
     base = f'https://raw.githubusercontent.com/{repository}/refs/tags/{version}'
-    sources = {name: name for name in DEPLOYMENT_FILES[:3]}
-    sources['.env.example'] = '.env.example'
-    files = {name: download(f'{base}/{source}') for name, source in sources.items()}
-    if re.search(rb'^BACKUP_GPG_PASSPHRASE=', files['.env.example'], re.M):
-        sources['backup-key.py'] = 'build/tools/backup-key.py'
-        files['backup-key.py'] = download(f'{base}/build/tools/backup-key.py')
-    launcher = download(f'{base}/manage', optional=True)
-    if launcher is not None:
-        files['manage'] = launcher
-        sources['manage'] = 'manage'
-        # Older releases contain a standalone shell launcher.
-        python_launcher = b'manage.py' in launcher
-        for name, source in [('manage.py', 'manage.py'), ('restore-home.sh', 'build/tools/restore-home.sh')]:
-            data = download(f'{base}/{source}', optional=not (name == 'manage.py' and python_launcher))
-            if data is not None:
-                files[name], sources[name] = data, source
-    else:
-        print(f'Release {version} does not include manage; use Docker Compose to launch.')
-    checksums = download(f'https://github.com/{repository}/releases/download/{version}/SHA256SUMS', optional=True)
-    if checksums is None:
-        print('Warning: this older release has no SHA256SUMS; downloads cannot be checksum-verified.', file=sys.stderr)
-    else:
-        expected = {}
-        for line in checksums.decode().splitlines():
-            digest, name = line.split(maxsplit=1)
-            expected[name] = digest
-        for name, data in files.items():
-            if expected.get(sources[name]) != hashlib.sha256(data).hexdigest():
-                fail('Release checksum missing or incorrect: ' + name)
+    sources = {**DEPLOYMENT_FILES, '.env.example': '.env.example'}
+    try:
+        files = {name: download(f'{base}/{source}') for name, source in sources.items()}
+        checksums = download(f'https://github.com/{repository}/releases/download/{version}/SHA256SUMS')
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            fail(f'Release {version} lacks required deployment files or SHA256SUMS; '
+                 "use that release's own installer.")
+        raise
+    expected = {}
+    for line in checksums.decode().splitlines():
+        digest, name = line.split(maxsplit=1)
+        expected[name] = digest
+    for name, data in files.items():
+        if expected.get(sources[name]) != hashlib.sha256(data).hexdigest():
+            fail('Release checksum missing or incorrect: ' + name)
     template = select_image(files.pop('.env.example').decode(), image)
     # Finish downloads and validation before changing any deployment files.
     directory.mkdir(parents=True, exist_ok=True)
@@ -414,12 +402,10 @@ def install(args):
         env.touch(mode=0o600, exist_ok=True)
         env.chmod(0o600)
         env.write_text(text)
-    if 'backup-key.py' in files:
-        subprocess.run([sys.executable, str(directory / 'backup-key.py'), str(env)], check=True)
+    subprocess.run([sys.executable, str(directory / 'backup-key.py'), str(env)], check=True)
     print(f'\nInstalled deployment files in {directory} (release {version}).')
     print(f'Edit {env} to configure Cloudflare Access and your tunnel before starting.')
-    print(f'Then run sh "{directory}/manage" to launch. No services have been started.' if launcher is not None else
-          'Then run Docker Compose from that directory. No services have been started.')
+    print(f'Then run sh "{directory}/manage" to launch. No services have been started.')
 
 
 def main():

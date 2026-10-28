@@ -60,7 +60,6 @@ ENV LANG=en_US.UTF-8 \
 WORKDIR /home/cloud-user
 
 COPY --chmod=755 build/runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY build/runtime/initialize-workspace.sh /usr/local/lib/initialize-workspace.sh
 COPY build/runtime/start-code-server.sh /usr/local/lib/start-code-server.sh
 COPY build/runtime/supervisord.conf /etc/supervisor/supervisord.conf
 COPY build/runtime/supervisor-events.py /usr/local/lib/supervisor-events.py

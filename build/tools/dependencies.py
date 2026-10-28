@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ACTION = re.compile(r'uses: ([\w-]+/[\w-]+)@([a-f0-9]{40}) # (\S+)')
 IMAGE = re.compile(r'(?<![\w./:-])([\w./-]+(?::[0-9]+)?):([\w.-]+)@sha256:([a-f0-9]{64})')
 WORKFLOW = '.github/workflows/container.yaml'
-COMPOSE = ('compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
+COMPOSE = ('compose.yaml', 'compose.backup-common.yaml',
            'build/tests/actions.sh', 'build/tests/compose.backup-s3.yaml',
            'build/Dockerfile', 'build/tools/restore-home.sh', WORKFLOW)
 

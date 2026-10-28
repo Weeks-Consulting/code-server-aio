@@ -52,7 +52,7 @@ class DependencyTests(unittest.TestCase):
         build_pins = json.loads(edits[deps.PIN_FILES['build']])
         self.assertEqual(len(build_pins['packages']['act']['sha256']), 4)
         self.assertEqual(len(pins['packages']['code-server']['sha256']), 2)
-        for name in ('compose.backup.yaml', 'compose.backup-local.yaml'):
+        for name in ('compose.backup-common.yaml',):
             self.assertIn('sha256:' + 'c' * 64, edits[name])
         self.assertNotIn('# v6\n', edits[deps.WORKFLOW])
         self.assertEqual(latest['envoy'], '99.0.0')

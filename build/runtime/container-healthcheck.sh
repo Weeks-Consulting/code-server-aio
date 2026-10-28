@@ -7,14 +7,10 @@ not_ready() {
     exit 1
 }
 
-# Supervisor reports EXITED initializers with a nonzero status. Inspect states
-# explicitly so readiness cannot race its pending `start code-server` command.
-result=0
-status=$(timeout 3 /usr/bin/supervisorctl status service-events dockerd code-server envoy initialize-workspace 2>&1) || result=$?
-[[ "$result" == 0 || "$result" == 3 ]] || not_ready "$status"
+status=$(timeout 3 /usr/bin/supervisorctl status service-events dockerd code-server envoy 2>&1) || not_ready "$status"
 while read -r service state _; do
     case "$service:$state" in
-        service-events:RUNNING|dockerd:RUNNING|code-server:RUNNING|envoy:RUNNING|initialize-workspace:EXITED) ;;
+        service-events:RUNNING|dockerd:RUNNING|code-server:RUNNING|envoy:RUNNING) ;;
         *) not_ready "services not ready: $status" ;;
     esac
 done <<< "$status"

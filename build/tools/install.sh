@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compatibility bootstrap; deployment installation lives in manage.py.
+# Bootstrap; deployment installation lives in manage.py.
 set -eu
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 if [ -f "$repository_root/manage.py" ]; then

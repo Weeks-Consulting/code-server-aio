@@ -23,7 +23,7 @@ export BACKUP_AWS_S3_BUCKET_NAME BACKUP_AWS_ENDPOINT BACKUP_AWS_S3_BUCKET_LOOKUP
 compose() {
     docker compose --project-directory "$project_dir" --project-name "$prefix" \
         --env-file "$project_dir/.env.example" -f "$project_dir/compose.yaml" \
-        -f "$project_dir/compose.backup.yaml" -f "$script_dir/compose.backup-s3.yaml" "$@"
+        -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup.yaml" -f "$script_dir/compose.backup-s3.yaml" "$@"
 }
 cleanup() {
     result=$?

@@ -33,35 +33,34 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(result.stdout.splitlines(), ['--socket', str(stale), '--socket-mode',
                                                          '660', '--auth', 'none', '/home/cloud-user'])
 
-    def test_initialization_starts_service_and_shuts_down_on_failure(self):
-        script = (ROOT / 'build/runtime/initialize-workspace.sh').read_text()
-        script = script.replace('/usr/bin/supervisorctl', 'fake_supervisorctl')
-        functions = '''mkdir() { printf 'mkdir %s\\n' "$*"; }
+    def test_entrypoint_initializes_before_supervisor_and_aborts_on_failure(self):
+        script = (ROOT / 'build/runtime/entrypoint.sh').read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = Path(directory) / 'supervisord'
+            supervisor.write_text('#!/bin/sh\nprintf "supervisord %s\\n" "$*"\n')
+            supervisor.chmod(0o755)
+            script = script.replace('/usr/bin/supervisord', str(supervisor))
+            functions = """mkdir() { printf 'mkdir %s\\n' "$*"; }
 chown() { printf 'chown %s\\n' "$*"; }
 chmod() { printf 'chmod %s\\n' "$*"; }
 getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
-fake_supervisorctl() {
-    printf 'supervisorctl %s\\n' "$*"
-    if [[ "$*" == 'start code-server' ]]; then return "$START_RESULT"; fi
-}
-'''
-        for failure in ('none', 'start', 'mkdir', 'getent'):
-            with self.subTest(failure=failure):
-                setup = functions + ('START_RESULT=7\n' if failure == 'start' else 'START_RESULT=0\n')
-                if failure in ('mkdir', 'getent'):
-                    setup += failure + '() { return 9; }\n'
-                result = subprocess.run(['bash', '-c', setup + script], capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0 if failure == 'none' else 1, result.stderr)
-                if failure == 'none':
-                    self.assertEqual(result.stdout.splitlines(), [
-                        'mkdir -p /run/code-server', 'chown 10000:10000 /run/code-server',
-                        'chmod 0750 /run/code-server', 'mkdir -p /home/cloud-user',
-                        'chown 123:456 /home/cloud-user', 'supervisorctl start code-server'])
-                else:
-                    self.assertIn('supervisorctl shutdown', result.stdout)
-                    self.assertIn('Workspace initialization failed', result.stderr)
-                    if failure != 'start':
-                        self.assertNotIn('supervisorctl start code-server', result.stdout)
+"""
+            for failure in ('none', 'mkdir', 'chown', 'chmod', 'getent'):
+                with self.subTest(failure=failure):
+                    setup = functions
+                    if failure != 'none':
+                        setup += failure + '() { return 9; }\n'
+                    result = subprocess.run(['bash', '-c', setup + script, 'entrypoint', '--test'],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0 if failure == 'none' else 9, result.stderr)
+                    if failure == 'none':
+                        self.assertEqual(result.stdout.splitlines(), [
+                            'mkdir -p /run/code-server', 'chown 10000:10000 /run/code-server',
+                            'chmod 0750 /run/code-server', 'mkdir -p /home/cloud-user',
+                            'chown 123:456 /home/cloud-user',
+                            'supervisord -c /etc/supervisor/supervisord.conf --test'])
+                    else:
+                        self.assertNotIn('supervisord', result.stdout)
 
     def test_envoy_renderer_escapes_values_and_preserves_lua(self):
         import json
@@ -79,22 +78,22 @@ fake_supervisorctl() {
         self.assertEqual(renderer.render(template, {})['static_resources']['clusters'][1]
                          ['transport_socket']['typed_config']['sni'], '')
 
-    def test_healthcheck_requires_running_services_and_completed_initializer(self):
+    def test_healthcheck_requires_running_services(self):
         script = (ROOT / 'build/runtime/container-healthcheck.sh').read_text()
         script = script.replace('timeout 3 /usr/bin/supervisorctl', 'fake_supervisorctl').replace(
             'timeout 3 /usr/bin/docker', 'fake_docker').replace('code=$(curl ', 'code=$(fake_curl ')
         functions = '''fake_supervisorctl() {
-    test "$*" = "status service-events dockerd code-server envoy initialize-workspace" || return 1
-    printf '%s\\n' 'service-events RUNNING' 'dockerd RUNNING' 'code-server RUNNING' 'envoy RUNNING' 'initialize-workspace EXITED'
-    return 3
+    test "$*" = "status service-events dockerd code-server envoy" || return 1
+    printf '%s\\n' 'service-events RUNNING' 'dockerd RUNNING' 'code-server RUNNING' 'envoy RUNNING'
+    return 0
 }
 fake_docker() { echo 1; }
 fake_curl() { case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"127.0.0.1:9901/ready"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac; }
 '''
         result = subprocess.run(['bash', '-c', functions + script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for transition in ('code-server STARTING', 'envoy FATAL', 'initialize-workspace RUNNING'):
-            before = 'code-server RUNNING' if transition.startswith('code-server') else 'envoy RUNNING' if transition.startswith('envoy') else 'initialize-workspace EXITED'
+        for transition in ('code-server STARTING', 'envoy FATAL', 'dockerd STOPPED', 'service-events BACKOFF'):
+            before = transition.split()[0] + ' RUNNING'
             result = subprocess.run(['bash', '-c', functions.replace(before, transition) + script],
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)

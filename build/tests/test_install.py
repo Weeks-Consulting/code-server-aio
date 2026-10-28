@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,13 +22,13 @@ class InstallationTests(unittest.TestCase):
         self.args = management.parser().parse_args([
             'install', '--directory', str(self.directory), '--version', 'v1.2.3'])
         self.files = {name: (ROOT / name).read_bytes() for name in
-                      ['compose.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
+                      ['compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
                        'manage', 'manage.py', '.env.example',
                        'build/tools/restore-home.sh', 'build/tools/backup-key.py']}
         self.checksums = lambda: ''.join(
             hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
             for name, data in self.files.items()).encode()
-        def fetch(url, optional=False):
+        def fetch(url):
             if url.endswith('/SHA256SUMS'):
                 return self.checksums()
             if url.endswith('/releases/latest'):
@@ -66,6 +67,22 @@ class InstallationTests(unittest.TestCase):
             management.install(self.args)
         self.assertEqual(env.read_text(), 'SECRET=original\n')
         self.assertEqual(list(self.directory.iterdir()), [env])
+
+    def test_missing_required_release_files_preserves_existing_deployment(self):
+        self.directory.mkdir()
+        env = self.directory / '.env'
+        env.write_text('SECRET=original\n')
+        for missing in ('compose.backup-common.yaml', 'manage.py', 'restore-home.sh', 'SHA256SUMS'):
+            with self.subTest(missing=missing):
+                def fetch(url):
+                    if url.endswith('/' + missing):
+                        raise urllib.error.HTTPError(url, 404, 'missing', {}, None)
+                    return self.fetch(url)
+                with patch.object(management, 'download', side_effect=fetch):
+                    with self.assertRaisesRegex(ValueError, 'lacks required deployment files'):
+                        management.install(self.args)
+                self.assertEqual(env.read_text(), 'SECRET=original\n')
+                self.assertEqual(list(self.directory.iterdir()), [env])
 
     def test_dry_run_has_no_downloads_or_filesystem_changes(self):
         self.args.dry_run = True

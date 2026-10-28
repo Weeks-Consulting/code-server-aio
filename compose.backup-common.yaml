@@ -1,0 +1,21 @@
+# Shared backup settings; include before one destination overlay.
+services:
+  code-server:
+    labels:
+      docker-volume-backup.stop-during-backup: ${COMPOSE_PROJECT_NAME}-home
+
+  backup:
+    image: offen/docker-volume-backup:v2@sha256:49fcfb2bdc6194ed4d7563d5ede75ff94f3a7435d15cbebae2ef816627944831
+    # Root reads files belonging to every archived UID/GID.
+    user: "0:0"
+    restart: unless-stopped
+    environment:
+      GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
+      TZ: ${BACKUP_TIMEZONE:-America/Chicago}
+      BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}
+      BACKUP_FILENAME: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-%Y-%m-%dT%H-%M-%S.tar.gz
+      BACKUP_STOP_DURING_BACKUP_LABEL: ${COMPOSE_PROJECT_NAME}-home
+    volumes:
+      - code-server-home:/backup/code-server-home:ro
+      # :ro does not restrict Docker API access; this container controls the host.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
