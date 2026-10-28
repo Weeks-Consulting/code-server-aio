@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     SHELL=/bin/bash
 
 COPY build/versions.json /tmp/versions.json
+COPY build/tools/fetch-pinned.py /tmp/fetch-pinned.py
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
@@ -21,27 +22,16 @@ RUN apt-get update && \
         supervisor && \
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
     locale-gen && \
-    # Install code-server
-    version=$(python3 -c 'import json; print(json.load(open("/tmp/versions.json"))["packages"]["code-server"]["version"])') && \
-    arch=$(dpkg --print-architecture) && \
-    package="code-server_${version}_${arch}.deb" && \
-    curl -fsSL "https://github.com/coder/code-server/releases/download/v${version}/${package}" -o "/tmp/${package}" && \
-    python3 -c 'import json,sys; p=json.load(open("/tmp/versions.json"))["packages"]["code-server"]; print(p["sha256"][sys.argv[1]] + "  /tmp/" + sys.argv[1])' "$package" | sha256sum --check --strict - && \
-    apt-get install -y --no-install-recommends "/tmp/${package}" && \
-    rm "/tmp/${package}" && \
+    # Install the verified code-server package.
+    python3 /tmp/fetch-pinned.py /tmp/versions.json code-server "$(dpkg --print-architecture)" /tmp/code-server.deb && \
+    apt-get install -y --no-install-recommends /tmp/code-server.deb && \
+    rm /tmp/code-server.deb && \
     rm -rf /var/lib/apt/lists/*
 
 # Install the pinned static Envoy executable for this image's architecture.
-RUN mkdir /tmp/envoy && \
-    version=$(python3 -c 'import json; print(json.load(open("/tmp/versions.json"))["packages"]["envoy"]["version"])') && \
-    printf '%s\n' "$version" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+' && \
-    case "$(dpkg --print-architecture)" in amd64) arch=x86_64 ;; arm64) arch=aarch_64 ;; *) exit 1 ;; esac && \
-    binary="envoy-${version}-linux-${arch}" && \
-    curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 300 \
-        "https://github.com/envoyproxy/envoy/releases/download/v${version}/${binary}" -o "/tmp/envoy/${binary}" && \
-    cd /tmp/envoy && python3 -c 'import json,sys; p=json.load(open("/tmp/versions.json"))["packages"]["envoy"]; print(p["sha256"][sys.argv[1]] + "  " + sys.argv[1])' "$binary" | sha256sum --check --strict - && \
-    install -m 755 "$binary" /usr/local/bin/envoy && \
-    rm -rf /tmp/envoy /tmp/versions.json
+RUN python3 /tmp/fetch-pinned.py /tmp/versions.json envoy "$(dpkg --print-architecture)" /tmp/envoy && \
+    install -m 755 /tmp/envoy /usr/local/bin/envoy && \
+    rm /tmp/envoy /tmp/versions.json /tmp/fetch-pinned.py
 
 RUN groupadd --gid 10000 cloud-user && \
     useradd --uid 10000 --gid 10000 --create-home --shell /bin/bash --groups sudo,docker cloud-user && \

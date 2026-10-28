@@ -46,6 +46,11 @@ docker run -d --name "$name" --privileged --init \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready
 docker exec "$name" /bin/bash -ec '
+    # Guard the workspace prerequisites used by Linux Homebrew.
+    for executable in gcc make git curl file ps sudo; do
+        command -v "$executable" >/dev/null
+    done
+    test "$(sudo -u cloud-user sudo -n id -u)" = 0
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
     test "$(stat -c %a /run/code-server/backend.sock)" = 660
     test "$(stat -c %u:%g /run/code-server/backend.sock)" = 10000:10000

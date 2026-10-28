@@ -28,6 +28,56 @@ def helper(directory, name):
     fail(f"{name} helper is missing; reinstall this release.")
 
 
+def read_image_setting(original):
+    pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
+    matches = list(pattern.finditer(original))
+    image = "ghcr.io/weeks-consulting/code-server-aio:latest"
+    if matches:
+        value = matches[-1].group(1).strip()
+        if value.startswith(("\"", "'")):
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end < 0 or (value[end + 1:].strip() and not value[end + 1:].strip().startswith("#")):
+                raise ValueError("Invalid CODE_SERVER_IMAGE quoting")
+            image = value[1:end]
+        else:
+            image = re.split(r"\s+#", value, 1)[0].strip()
+    image = image or "ghcr.io/weeks-consulting/code-server-aio:latest"
+    match = re.fullmatch(r"ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+)(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?", image)
+    if not match:
+        raise ValueError("CODE_SERVER_IMAGE must name a ghcr.io/owner/repo image")
+    repository = match[1]
+    return pattern, matches, repository
+
+
+def latest_tag(repository):
+    request = urllib.request.Request(
+        "https://api.github.com/repos/" + repository + "/releases/latest",
+        headers={"User-Agent": "code-server-aio-manage", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        release = json.load(response)
+    tag = release["tag_name"]
+    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[1-9]\d*)?", tag):
+        raise ValueError("GitHub returned an invalid stable release tag")
+    return tag
+
+
+def write_env_atomic(path, updated, owner):
+    # Finish the lookup and validation before replacing the configuration.
+    descriptor, temporary = tempfile.mkstemp(prefix=".env-upgrade-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            current = os.fstat(output.fileno())
+            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+                os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(output.fileno(), 0o600)
+            output.write(updated)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def upgrade(directory):
     path = directory / ".env"
     try:
@@ -44,50 +94,13 @@ def upgrade(directory):
             raise ValueError("Expected a regular .env file")
         owner = path.stat()
         original = path.read_text()
-        pattern = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
-        matches = list(pattern.finditer(original))
-        image = "ghcr.io/weeks-consulting/code-server-aio:latest"
-        if matches:
-            value = matches[-1].group(1).strip()
-            if value.startswith(("\"", "'")):
-                quote = value[0]
-                end = value.find(quote, 1)
-                if end < 0 or (value[end + 1:].strip() and not value[end + 1:].strip().startswith("#")):
-                    raise ValueError("Invalid CODE_SERVER_IMAGE quoting")
-                image = value[1:end]
-            else:
-                image = re.split(r"\s+#", value, 1)[0].strip()
-        image = image or "ghcr.io/weeks-consulting/code-server-aio:latest"
-        match = re.fullmatch(r"ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+)(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?", image)
-        if not match:
-            raise ValueError("CODE_SERVER_IMAGE must name a ghcr.io/owner/repo image")
-        repository = match[1]
-        request = urllib.request.Request(
-            "https://api.github.com/repos/" + repository + "/releases/latest",
-            headers={"User-Agent": "code-server-aio-manage", "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(request, timeout=15) as response:
-            release = json.load(response)
-        tag = release["tag_name"]
-        if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[1-9]\d*)?", tag):
-            raise ValueError("GitHub returned an invalid stable release tag")
-        selected = "ghcr.io/" + repository + ":" + tag[1:]
+        pattern, matches, repository = read_image_setting(original)
+        selected = "ghcr.io/" + repository + ":" + latest_tag(repository)[1:]
         setting = "CODE_SERVER_IMAGE=" + selected
         updated = pattern.sub(lambda _: setting, original)
         if not matches:
             updated += ("" if not updated or updated.endswith("\n") else "\n") + setting + "\n"
-        # Finish the lookup and validation before replacing the configuration.
-        descriptor, temporary = tempfile.mkstemp(prefix=".env-upgrade-", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "w") as output:
-                current = os.fstat(output.fileno())
-                if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
-                    os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
-                os.fchmod(output.fileno(), 0o600)
-                output.write(updated)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        write_env_atomic(path, updated, owner)
         print("Set CODE_SERVER_IMAGE=" + selected)
         print("Run manage --pull with your usual launch options to apply the upgrade.")
     except Exception as error:
