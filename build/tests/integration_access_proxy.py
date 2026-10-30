@@ -343,10 +343,12 @@ class AccessProxyTests(unittest.TestCase):
             self.assertEqual(self.status(self.token({'email': 'user@example.com'}, key=1)), 403)
 
     def test_allowlist_whitespace_and_literal_matching(self):
-        self.start(env_override={'CF_ACCESS_ALLOWED_EMAILS': ' user+tag@example.com , other@example.com '})
+        # Valid local parts such as apostrophes must not stop Envoy from starting.
+        self.start(env_override={'CF_ACCESS_ALLOWED_EMAILS': " user+tag@example.com , o'brien&co@example.com "})
         self.assertEqual(self.status(self.token({'email': 'user+tag@example.com'})), 200)
-        self.assertEqual(self.status(self.token({'email': 'other@example.com'})), 200)
+        self.assertEqual(self.status(self.token({'email': "o'brien&co@example.com"})), 200)
         self.assertEqual(self.status(self.token({'email': 'usertag@example.com'})), 403)
+        self.assertEqual(self.status(self.token({'email': 'obrien&co@example.com'})), 403)
 
     def test_rotation_without_process_restart(self):
         pid = self.process.pid
@@ -433,6 +435,8 @@ class AccessProxyTests(unittest.TestCase):
         for name, value in (('CF_ACCESS_TEAM_DOMAIN', ''), ('CF_ACCESS_AUD', ''),
                             ('CF_ACCESS_TEAM_DOMAIN', DOMAIN + '/path'), ('CF_ACCESS_AUD', 'bad'),
                             ('CF_ACCESS_ALLOWED_EMAILS', 'user@example.com,'),
+                            ('CF_ACCESS_ALLOWED_EMAILS', 'first last@example.com'),
+                            ('CF_ACCESS_ALLOWED_EMAILS', 'user@@example.com'),
                             ('CF_ACCESS_ALLOWED_SERVICE_TOKENS', 'bad identity')):
             with self.subTest(name=name, value=value):
                 self.start(env_override={name: value}, expect_ready=False)

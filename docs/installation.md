@@ -14,12 +14,9 @@ On macOS, keep the deployment, checkout, and backup archives in a folder shared
 with Docker, such as your home directory. Use `--directory "$HOME/code-server"`
 without `sudo` as shown below.
 
-GitHub authentication is required to verify release attestations, including for
-public releases. Run `gh auth login --hostname github.com` as the installing user,
-or export `GH_TOKEN` (a classic personal access token with no scopes is sufficient
-for public releases). `GITHUB_TOKEN` is also accepted. The installer checks for
-credentials before installing packages or downloading files; invalid or expired
-credentials will still fail verification. Dry runs do not require authentication.
+No GitHub account, token, or GitHub CLI is needed. Release files download over
+HTTPS from the public GitHub release, and each one is checked against the release's
+`SHA256SUMS` before it is executed or installed.
 
 Installation and management run through `manage`, a thin shell wrapper around
 `manage.py` using Python's standard library. From a checkout, install with:
@@ -28,20 +25,13 @@ Installation and management run through `manage`, a thin shell wrapper around
 ./manage install --directory "$HOME/code-server"
 ```
 
-For hosts without a checkout, install curl and Python 3 first. If the installed
-GitHub CLI cannot run `gh attestation verify`, the bootstrap and Python installer
-download an official, version-pinned GitHub CLI binary and verify its SHA256
-before running it. The binary is temporary and supports Linux/macOS on amd64/arm64;
-no apt repository is added. `just install` installs a compatible CLI in
-`/usr/local/bin` on Debian when needed, or through Homebrew on macOS.
-The bootstrap verifies the release checksum attestation and the downloaded
-`manage.py` checksum before executing it. The Python installer also verifies the
-checksum attestation before replacing deployment files. When using sudo, export
-`GH_TOKEN` and preserve it as shown below; your normal user’s `gh` login is
-generally unavailable to root. Verification failures stop installation.
+For hosts without a checkout, install curl and Python 3 first. The bootstrap
+checks the downloaded `manage.py` against the release's `SHA256SUMS` before
+executing it, and the Python installer checks every deployment file before
+replacing anything. Checksum failures stop installation.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sudo --preserve-env=GH_TOKEN sh -s --
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sudo sh -s --
 ```
 
 Use `--directory PATH` to choose the installation directory. `sudo` is optional
@@ -77,8 +67,9 @@ files before replacing any files. The current installer requires releases with a
 `compose.backup-common.yaml`), Python management, backup helpers, and `SHA256SUMS`.
 To deploy an earlier release, use that release's own installer. Missing files or
 checksums abort installation before deployment files are changed.
-Attestations must identify the selected repository and its container publishing
-workflow. GitHub and the release publisher remain the trust anchor. Rerunning the installer refreshes the
+Checksums detect corrupted or altered downloads; GitHub (over HTTPS) and the release
+publisher remain the trust anchor. Releases also carry signed GitHub provenance that
+you can check yourself; see [verification](verification.md). Rerunning the installer refreshes the
 Compose files, saving their previous contents as `.bak` files. Existing `.env`
 values and comments are preserved except for `CODE_SERVER_IMAGE`, which is set to the selected tag unless it contains a digest pin; missing settings are appended with notes from
 the new release. `.env` is readable only by its owner. If you run the installer

@@ -37,13 +37,20 @@ options when applying updates so the same services and project are selected.
 
 ### Upgrade to the latest release
 
-Run `sudo /opt/code-server/manage upgrade` to set `CODE_SERVER_IMAGE` in
-`.env` to the latest stable GitHub release version, then run
-`sudo /opt/code-server/manage --pull` with your usual launch options to apply it.
-Omit `sudo` for installations owned by your user. The upgrade command uses the
-GitHub owner/repository from the configured GHCR image, preserves other settings,
-and does not pull images or restart services. Failed release lookups leave
-`.env` unchanged. It replaces an existing image digest pin with the release tag.
+Run `sudo /opt/code-server/manage upgrade` to install the latest stable GitHub
+release, then run `sudo /opt/code-server/manage --pull` with your usual launch
+options to apply it. Omit `sudo` for installations owned by your user. No GitHub
+account is needed. The upgrade uses the GitHub owner/repository from the configured
+GHCR image and installs that release the same way as `manage install --version`:
+it checks every file against the release's `SHA256SUMS`, refreshes the Compose files
+and helpers (saving `.bak` copies), appends new `.env` settings, and sets
+`CODE_SERVER_IMAGE` to the release tag. Unlike an installer refresh, it replaces an
+existing image digest pin. Updating the files with the image keeps a new image from
+running against an older release's Compose configuration. It does not pull images or
+restart services. Failed lookups or checksum failures leave the deployment
+unchanged. Review any new `.env` settings before restarting.
+In a source checkout, `manage upgrade` refuses to overwrite tracked files; check
+out the release tag with git and set `CODE_SERVER_IMAGE` instead.
 
 ### Shut down containers
 
@@ -78,7 +85,12 @@ The examples below use `./manage`; add `sudo` if you installed with `sudo`.
 Use the same `--project-name` as the running deployment, if you set one. Start
 the deployment with the matching `--backup` mode first so code-server has the
 label that allows the backup service to stop it while archiving and restart it
-afterward. The command waits for the backup to finish.
+afterward. Manual backups execute inside the running backup service, sharing its
+exclusive lock with scheduled backups and other manual runs. The command waits
+for the lock and the backup to finish; it fails if that service is stopped.
+It uses the running service's configuration. After editing backup settings or
+the encryption key in `.env`, rerun `manage start` with the matching backup mode
+before triggering a backup.
 
 List local `.tar.gz.gpg` archives (and legacy `.tar.gz` archives) with their sizes and modification times:
 

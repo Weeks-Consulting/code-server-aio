@@ -72,21 +72,31 @@ Do not change these without discussing it first.
   need list/delete permissions when pruning is enabled.
 - The backup sidecar intentionally uses the host Docker socket to stop/restart
   the workspace. Its `:ro` mount is not a Docker API permission boundary.
+- Manual backups execute inside the running backup sidecar so they share its
+  filesystem lock with scheduled runs. Do not use a separate `compose run`
+  container for manual backups; its private lock permits overlapping archives.
 - Mutable release tags and weekly security rebuilds are intentional. Installers
   preserve existing digest pins; `manage upgrade` deliberately replaces them.
+- Scheduled and branch-requested rebuilds dispatch a `workflow_dispatch` run on the
+  latest stable tag instead of building directly. Provenance records the run's own
+  ref, so this is what makes rebuilt images attest to their tag. Rebuilds therefore
+  use the tag's workflow and files, not `main`'s; that is intended.
+- PR and `main` push runs never publish, so they skip documentation-only changes
+  and newer commits cancel them. Release, schedule, and manual runs always complete.
 
 ### Host tooling and cleanup
 
 - Do not add daemon-wide `just stop` or `just cleanup` commands. Each command must
   clean up its own temporary files, containers, networks, and volumes; preserve
   deployment volumes, built images, and reusable build cache.
-- `just install` installs GitHub CLI (`gh`). Bootstrap Python and deployment files
-  require verified checksum attestations from the publishing repository/workflow
-  before execution or replacement. Do not silently bypass verification.
-- Bootstrap and `manage.py` embed the same checksum-pinned GitHub CLI downloader so
-  neither needs to execute an unverified helper. Pins live in `build/build-versions.json`;
-  `sync-pins` updates both copies and tests check that their implementations match.
-  Installers use temporary binaries; Debian `just install` can install into `/usr/local/bin`.
+- End users need no GitHub account, token, or GitHub CLI. The bootstrap, `manage
+  install`, and `manage upgrade` check every downloaded file against the release's
+  `SHA256SUMS` (fetched over HTTPS) before execution or replacement; never skip or
+  weaken that check. Release attestations are not verified by the installers: the
+  maintainer is the only account holder and accepts GitHub as the trust anchor. CI
+  still attests images and `SHA256SUMS` for optional manual verification.
+- `manage upgrade` installs the new release's files together with its image and
+  replaces digest pins; it refuses to run in a source checkout.
 - Restores reserve one named container per volume across the whole operation.
   Stop active helpers before staging cleanup, and retain staging/rollback after
   an interrupted replacement. A stale reservation after SIGKILL requires inspection.

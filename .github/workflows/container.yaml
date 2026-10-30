@@ -1,9 +1,12 @@
 name: Build and publish container
 
 on:
+  # Documentation-only changes cannot affect the image, scripts, or tests.
   pull_request:
+    paths-ignore: ['docs/**', '**.md']
   push:
-    branches: [main, master]
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md']
   release:
     types: [published]
   workflow_dispatch:
@@ -19,20 +22,29 @@ permissions:
   contents: read
 
 concurrency:
-  # Only PR checks supersede earlier runs; every other run must reach completion.
-  group: container-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # PR and branch-push checks never publish, so newer commits supersede them.
+  # Release, schedule, and manual runs must each reach completion.
+  group: container-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.event_name == 'push') && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   source:
     name: Select source release
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Latest-release rebuilds requested off the tag dispatch a run on the tag.
+      actions: write
     outputs:
-      ref: ${{ steps.source.outputs.ref }}
       tag: ${{ steps.source.outputs.tag }}
       publish: ${{ steps.source.outputs.publish }}
-      rebuild: ${{ steps.source.outputs.rebuild }}
+      dispatched: ${{ steps.source.outputs.dispatched }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The local act wrapper already bind-mounts the working checkout.
+        if: ${{ !env.ACT }}
+        with:
+          persist-credentials: false
       - name: Select source and publication mode
         id: source
         env:
@@ -40,30 +52,15 @@ jobs:
           GH_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PUBLISH_LATEST: ${{ inputs.publish_latest && 'true' || 'false' }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF: ${{ github.ref }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
           RELEASE_TAG: ${{ github.event.release.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
-        run: |
-          ref="$SOURCE_SHA"
-          tag="$RELEASE_TAG"
-          publish=false
-          rebuild=false
-          if [[ "$EVENT_NAME" == schedule || ( "$EVENT_NAME" == workflow_dispatch && "$PUBLISH_LATEST" == true ) ]]; then
-            publish=true
-            rebuild=true
-            tag=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
-            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]] || {
-              echo "Latest stable release must use a vX.Y.Z or vX.Y.Z-N tag (N >= 1); got: $tag" >&2
-              exit 1
-            }
-            ref="refs/tags/$tag"
-          elif [[ "$EVENT_NAME" == release ]]; then
-            publish=true
-          fi
-          printf 'ref=%s\ntag=%s\npublish=%s\nrebuild=%s\n' "$ref" "$tag" "$publish" "$rebuild" >> "$GITHUB_OUTPUT"
+        run: bash build/ci/select-source.sh
 
   test:
     name: Test (${{ matrix.arch }})
     needs: source
+    if: needs.source.outputs.dispatched != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -81,27 +78,12 @@ jobs:
         # The local act wrapper already bind-mounts the working checkout.
         if: ${{ !env.ACT }}
         with:
-          ref: ${{ needs.source.outputs.ref }}
           persist-credentials: false
       - name: Validate code-server version and release tag
         id: version
         env:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
-        run: |
-          python3 - <<'PY'
-          import json, os, re
-          from pathlib import Path
-          version = json.loads(Path("build/versions.json").read_text())["packages"]["code-server"]["version"]
-          if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-              raise SystemExit("build/versions.json must contain a version such as 4.141.0")
-          expected = "v" + version
-          tag = os.environ["RELEASE_TAG"]
-          if tag and not re.fullmatch(re.escape(expected) + r"(?:-[1-9][0-9]*)?", tag):
-              raise SystemExit(f"Release tag must be {expected} or {expected}-N (N >= 1) to match build/versions.json (got {tag})")
-          print(f"Building code-server {version}" + (f" for release {tag}" if tag else ""))
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"version={version}\n")
-          PY
+        run: python3 build/ci/release-version.py
       - name: Derive image name from repository
         id: image
         env:
@@ -114,11 +96,12 @@ jobs:
         if: ${{ env.ACT }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck python3 gnupg
-      - name: Check dependency pins, shell syntax, and Compose configurations
-        run: sh build/tests/check.sh
+          sudo apt-get install -y --no-install-recommends python3 gnupg
       - name: Build test image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # The job summary still reports the build; skip the unused record artifact.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: build/Dockerfile
@@ -173,6 +156,7 @@ jobs:
   check-host:
     name: Host scripts (${{ matrix.host }} sh)
     needs: source
+    if: needs.source.outputs.dispatched != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -189,57 +173,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.source.outputs.ref }}
           persist-credentials: false
       - name: Install host check dependencies
         run: sh build/tests/install-host-deps.sh
       - name: Check dependency pins, shell syntax, and Compose configurations
         run: sh build/tests/check.sh
-
-  push:
-    name: Push tested image (${{ matrix.arch }})
-    needs: [source, test, check-host]
-    if: needs.source.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    permissions:
-      contents: read
-      packages: write
-    timeout-minutes: 30
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: tested-image-${{ matrix.arch }}
-          path: tested-image
-      - name: Push tested image by digest
-        env:
-          REPOSITORY: ${{ github.repository }}
-          ARCH: ${{ matrix.arch }}
-          REGISTRY_USER: ${{ github.actor }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends skopeo
-          image="ghcr.io/${REPOSITORY,,}"
-          digest=$(cat tested-image/digest)
-          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          [[ "$(skopeo manifest-digest tested-image/image/manifest.json)" == "$digest" ]]
-          staging=$(mktemp -d)
-          trap 'rm -rf -- "$staging"' EXIT
-          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$staging/auth.json" \
-            ghcr.io -u "$REGISTRY_USER" --password-stdin
-          mkdir -p digests
-          skopeo copy --preserve-digests --authfile "$staging/auth.json" \
-            --digestfile "digests/$ARCH" dir:tested-image/image "docker://$image@$digest"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: digest-${{ matrix.arch }}
-          path: digests/*
-          if-no-files-found: error
-          retention-days: 1
 
   publish:
     name: Publish multi-platform image
@@ -248,7 +186,7 @@ jobs:
       cancel-in-progress: false
       # Keep the shared staging tag serialized without displacing pending publishes.
       queue: max
-    needs: [source, push]
+    needs: [source, test, check-host]
     if: needs.source.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -260,15 +198,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.source.outputs.ref }}
           persist-credentials: false
       - name: Derive image name from repository
         id: image
         env:
           REPOSITORY: ${{ github.repository }}
-        run: |
-          echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -277,25 +212,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: digest-*
-          path: digests
-          merge-multiple: true
-      - name: Stage tested manifests
+          pattern: tested-image-*
+          path: tested-images
+      - name: Push tested images by digest and stage their manifest
         id: manifest
         env:
           IMAGE: ${{ steps.image.outputs.name }}
-          STAGING_TAG: staging
+          REGISTRY_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sources=()
-          for arch in amd64 arm64; do
-            digest=$(cat "digests/$arch")
-            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-            sources+=("$IMAGE@$digest")
-          done
-          docker buildx imagetools create --metadata-file manifest-metadata.json --tag "$IMAGE:$STAGING_TAG" "${sources[@]}"
-          digest=$(jq -r '."containerimage.descriptor".digest' manifest-metadata.json)
-          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+          bash build/ci/stage-images.sh "$IMAGE" tested-images
       - name: Attest staged image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -310,16 +238,7 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.manifest.outputs.digest }}
           PRERELEASE: ${{ github.event.release.prerelease || false }}
-        run: |
-          args=(--tag "$IMAGE:${RELEASE_TAG#v}")
-          if [[ "$PRERELEASE" != true ]]; then
-            latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
-            if [[ "$latest" == "$RELEASE_TAG" ]]; then
-              args+=(--tag "$IMAGE:latest")
-            fi
-          fi
-          docker buildx imagetools create "${args[@]}" "$IMAGE@$DIGEST"
-          printf 'Published attested image: %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+        run: bash build/ci/publish-tags.sh
 
   release-assets:
     name: Publish installer and deployment checksums
@@ -333,7 +252,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.source.outputs.ref }}
           persist-credentials: false
       - name: Generate deployment checksums
         env:

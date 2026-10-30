@@ -19,7 +19,13 @@ while read -r service state _; do
     esac
 done <<< "$status"
 
-docker_info=$(timeout 3 /usr/bin/docker info --format '{{.ServerVersion}}' 2>&1) \
+# The CLI can exit 0 with an empty version when it cannot connect; require a
+# labeled, nonempty server version rather than trusting the exit status.
+docker_status=0
+docker_info=$(timeout 3 /usr/bin/docker info --format 'server-version={{.ServerVersion}}' 2>&1) \
+    || docker_status=$?
+[[ $docker_status -ne 124 ]] || not_ready 'Docker did not respond within 3 seconds'
+[[ $docker_status -eq 0 && $docker_info =~ (^|$'\n')server-version=[^[:space:]] ]] \
     || not_ready "Docker is not ready: $docker_info"
 
 check_http() {

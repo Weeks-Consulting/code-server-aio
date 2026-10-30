@@ -96,7 +96,7 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
     printf '%s\\n' 'service-events RUNNING' 'dockerd RUNNING' 'code-server RUNNING' 'envoy RUNNING'
     return 0
 }
-fake_docker() { echo 1; }
+fake_docker() { echo server-version=26.1.5; }
 fake_curl() { case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac; }
 '''
         result = subprocess.run(['bash', '-c', functions + script], capture_output=True, text=True)
@@ -116,6 +116,18 @@ fake_curl() { case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--u
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('expected 403', result.stderr)
+        # Docker CLI 26 exits 0 with an empty version when it cannot connect.
+        for docker, message in (
+                ('fake_docker() { echo server-version=; echo "Cannot connect to the Docker daemon" >&2; }',
+                 'Cannot connect to the Docker daemon'),
+                ('fake_docker() { return 124; }', 'did not respond within 3 seconds'),
+                ('fake_docker() { echo server-version=26.1.5; return 1; }', 'Docker is not ready')):
+            with self.subTest(docker=docker):
+                result = subprocess.run(['bash', '-c', functions.replace(
+                    'fake_docker() { echo server-version=26.1.5; }', docker) + script],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
         for transition in ('code-server STARTING', 'envoy FATAL', 'dockerd STOPPED', 'service-events BACKOFF'):
             before = transition.split()[0] + ' RUNNING'
             result = subprocess.run(['bash', '-c', functions.replace(before, transition) + script],

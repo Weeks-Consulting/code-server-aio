@@ -30,7 +30,7 @@ just actions-list    # List workflow jobs without running them
 ```
 
 `just install` prepares a development machine using Homebrew on macOS or apt on
-Debian, including GitHub CLI (`gh`) for release attestation verification. It does not install or launch a deployment; use [Install](installation.md#install) for
+Debian. It does not install or launch a deployment; use [Install](installation.md#install) for
 published releases and [Deploy](deployment.md#deploy) to start services.
 
 Builds read the code-server version from the `packages.code-server.version` entry in `build/versions.json`. Building the
@@ -73,6 +73,11 @@ prefix and filename, encryption, and a restore with numeric ownership preserved.
 It uses temporary credentials and storage with no published ports or real S3 account.
 Run it directly with `./build/tests/backup-s3.sh code-server-cloudflare:test`.
 
+The local backup suite also runs the real installed launcher against a running
+backup sidecar. It holds one backup at an archive hook and verifies that a second
+manual invocation waits on the same lock, covering both manual/manual and
+scheduled/manual overlap. A stopped sidecar must reject a manual backup.
+
 `just actions` downloads the pinned, checksum-verified `act` into a temporary directory, runs the native amd64
 or arm64 test job as a pull request (without publishing), and removes the binary
 afterward. Docker images and caches remain. Supports Debian Linux and macOS on
@@ -82,8 +87,8 @@ also accessible to sibling Docker containers.
 On macOS, it uses the active Docker CLI endpoint for the host connection and
 `/var/run/docker.sock` inside the Linux runner. Temporary test storage uses a
 disposable Docker volume to preserve Linux ownership. The local run uses the
-mounted checkout without a GitHub token and disables GitHub cache and build-record
-uploads; GitHub-hosted runs keep those features.
+mounted checkout without a GitHub token and disables the GitHub build cache, which
+GitHub-hosted runs keep. Neither uploads BuildKit build-record artifacts.
 The wrapper disables act's automatic `.env` loading so deployment settings do not
 override the workflow's test configuration.
 
@@ -96,7 +101,9 @@ local archives, without S3.
 Host scripts are checked as POSIX `sh` through one Debian/macOS CI matrix. Both
 platforms use the same checkout and `build/tests/check.sh`; only package-manager
 setup and macOS CLI plugin registration differ. Debian checks run in the pinned
-Debian container; macOS checks run on the native runner. Container builds and
+Debian container; macOS checks run on the native runner. These are the only CI jobs
+that run `check.sh`; the per-architecture image jobs run only the integration tests,
+so run `just check` alongside `just actions` locally. Container builds and
 integration tests use the same Linux workflow on both local host platforms via
 `just actions`, with Docker Desktop socket and volume setup confined to the wrapper.
 
@@ -105,16 +112,17 @@ multi-platform image is successfully published. Publication waits for both image
 architectures and every host check. A failed or skipped image publication leaves
 release assets unpublished. The release event still starts from published GitHub
 release metadata; installers fail closed until the required checksums exist.
-Bash is still used to check the container's Linux runtime scripts and CI release
-logic; the version bundled with either host is sufficient.
+Bash is still used to check the container's Linux runtime scripts and the CI release
+scripts in `build/ci/`, which the workflow calls and the unit tests exercise directly;
+the version bundled with either host is sufficient.
 
 ### Dependency updates
 
 `build/versions.json` holds shipped image and deployment dependencies: code-server, Envoy, the Debian slim base, cloudflared, and the backup service image. `just version`, `just outdated`, and `just upgrade` inspect, check, and update this group.
 
-`build/build-versions.json` holds build/test tooling: act, the installer’s GitHub CLI, GitHub Actions, the act runner image, and RustFS for backup tests. Use `just build-version`, `just build-outdated`, and `just build-upgrade` for this group. Debian CI and the restore helper share the shipped Debian slim base pin.
+`build/build-versions.json` holds build/test tooling: act, GitHub Actions, the act runner image, and RustFS for backup tests. Use `just build-version`, `just build-outdated`, and `just build-upgrade` for this group. Debian CI and the restore helper share the shipped Debian slim base pin.
 
-`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. Each upgrade command updates only its group, including package checksums for every supported architecture and image digests on their existing tag tracks. The build tooling command also updates GitHub Actions commit pins and version comments. `just build-upgrade` updates the GitHub CLI checksums and embedded pins in `manage.py` and `build/tools/install.sh`; `just upgrade` does not update this CLI pin.
+`just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. Each upgrade command updates only its group, including package checksums for every supported architecture and image digests on their existing tag tracks. The build tooling command also updates GitHub Actions commit pins and version comments.
 Files are
 staged before replacement; write failures attempt to restore previous contents. A
 process or host crash during replacement can still require recovery using Git. GitHub asset SHA-256 metadata is used when available; otherwise assets are downloaded and hashed. Set `GH_TOKEN` or `GITHUB_TOKEN` if needed for GitHub API rate limits. Lookup failures and a declined or unanswered prompt leave files unchanged. Review `git diff` and run `just test` afterward; rebuilding/redeploying is a separate step.

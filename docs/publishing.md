@@ -11,7 +11,10 @@ rebuild, use **Actions → Build and publish container → Run workflow** and en
 release source, bypasses the build cache, and applies the same tests and latest-release
 checks as the weekly rebuild. Every Monday at 08:17 UTC
 (03:17 in Chicago during daylight saving time, 02:17 during standard time), the
-scheduled build checks out the latest stable GitHub release tag, uses the pinned
+scheduled build looks up the latest stable GitHub release tag and starts a manual
+rebuild run on that tag. A rebuild requested from a branch is redirected the same way.
+The rebuild therefore uses the tag's workflow and files, and its image provenance
+records the tag. It uses the pinned
 Debian base image and refreshes its packages, and bypasses cached package layers. It republishes
 that release's version tag and `latest` only after both architectures pass all tests.
 The build fails without publishing if no stable release exists or its tag is invalid.
@@ -29,7 +32,7 @@ After both architectures pass, the release publishes
 `ghcr.io/<owner>/<repository>:4.141.0`, by assembling the tested image digests. Tested images are uploaded by digest only;
 a single reusable `staging` tag holds the tested manifest during attestation. The test jobs have read-only repository
 permissions. On publishing runs, they transfer the exact tested images as one-day
-artifacts to separate upload jobs with package write permission; images are not rebuilt.
+artifacts to a single publish job with package write permission; images are not rebuilt.
 These image artifacts use GitHub Actions artifact storage. This Docker-load publication path does not generate BuildKit provenance or SBOM attestations. Stable releases
 also update `latest`; prereleases publish only the version tag. Stable version
 tags receive weekly Debian dependency rebuilds, so they can point to new image

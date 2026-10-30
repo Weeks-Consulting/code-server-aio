@@ -24,7 +24,9 @@ filesystem. Allow free space on the volume for one extracted home tree, plus spa
 beside the archive for the compressed rollback. The helper container runs as root
 (`--user 0:0`) to preserve numeric ownership, permissions, and symlinks; the host
 command can run as any user with Docker access. Catchable termination stops the restore container before cleaning staging;
-if replacement has begun, staging and the verified rollback are retained.
+if replacement has begun, staging and the verified rollback are retained, and the
+recovery command is printed first. Further interrupts during cleanup are ignored so
+it can finish; each cleanup Docker call times out after 60 seconds.
 SIGKILL or power loss can leave a `.restore-staging-*` directory on the home volume.
 Inspect and remove that specific directory before restarting after an interrupted restore.
 
@@ -88,4 +90,8 @@ If the coordinator is killed with SIGKILL or loses contact with Docker, the
 reservation can remain. Keep the stack stopped, inspect that container and its
 volume mount, and remove that specific container only after confirming the prior
 restore is no longer active. Review any staging and rollback files before retrying.
+If cancellation interrupts reservation creation, cleanup checks an invocation-specific
+label and removes only its own container, using its immutable ID. If Docker cannot
+confirm the result, the helper names the unresolved reservation and asks you to
+inspect it before removing it or retrying.
 An interrupted replacement prints a recovery command using the verified rollback.

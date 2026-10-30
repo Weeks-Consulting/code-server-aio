@@ -25,6 +25,9 @@ command -v gpg >/dev/null || { echo 'Install gpg to run encrypted backup/restore
 touch "$archive_dir/.env"
 python3 "$script_dir/../tools/backup-key.py" "$archive_dir/.env"
 BACKUP_GPG_PASSPHRASE=$(sed -n 's/^BACKUP_GPG_PASSPHRASE=//p' "$archive_dir/.env")
+# User-chosen keys may contain '$'; restore must decode Compose's '$$' escaping.
+BACKUP_GPG_PASSPHRASE="$BACKUP_GPG_PASSPHRASE\$\$custom"
+printf "BACKUP_GPG_PASSPHRASE='%s'\n" "$BACKUP_GPG_PASSPHRASE" > "$archive_dir/.env"
 export BACKUP_GPG_PASSPHRASE
 BACKUP_ID=$prefix
 export BACKUP_ID
@@ -136,3 +139,4 @@ docker run --rm --network none --mount "type=volume,src=$prefix-relative,dst=/da
     --entrypoint /bin/sh "$image" -ec 'grep -qx saved-settings /data/cloud-user/.config/sentinel'
 echo 'Backup/restore round trip passed.'
 python3 "$script_dir/integration_restore.py" "$image"
+python3 "$script_dir/integration_backup.py" "$image"

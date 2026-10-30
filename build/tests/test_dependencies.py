@@ -321,6 +321,37 @@ class DependencyTests(unittest.TestCase):
                 deps.apply_edits(self.root, {first: 'changed', second: 'changed'})
         self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
 
+    def test_interrupted_replacement_rolls_back_and_keeps_unrestorable_originals(self):
+        first, second = 'build/versions.json', 'build/Dockerfile'
+        before = {name: (self.root / name).read_bytes() for name in (first, second)}
+        replace = deps.os.replace
+        def interrupt_second(source, target):
+            if target == self.root / second:
+                raise KeyboardInterrupt
+            replace(source, target)
+        with patch.object(deps.os, 'replace', side_effect=interrupt_second):
+            with self.assertRaises(KeyboardInterrupt):
+                deps.apply_edits(self.root, {first: 'changed', second: 'changed'})
+        self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
+        self.assertEqual(list(self.root.glob('build/.*.*')), [])
+
+        # A failed restoration must leave its original on disk and report where.
+        calls = []
+        def fail_rollback(source, target):
+            calls.append(target)
+            if target == self.root / second or len(calls) > 2:
+                raise OSError('simulated failure')
+            replace(source, target)
+        stderr = io.StringIO()
+        with patch.object(deps.os, 'replace', side_effect=fail_rollback), \
+                contextlib.redirect_stderr(stderr):
+            with self.assertRaises(OSError):
+                deps.apply_edits(self.root, {first: 'changed', second: 'changed'})
+        self.assertEqual((self.root / first).read_text(), 'changed')
+        kept = stderr.getvalue().split('previous contents kept in ')[1].strip()
+        self.assertEqual(Path(kept).read_bytes(), before[first])
+        Path(kept).unlink()
+
 
 if __name__ == '__main__':
     unittest.main()

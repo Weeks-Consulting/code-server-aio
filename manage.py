@@ -5,6 +5,7 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -83,32 +84,28 @@ def stable_tag(release):
     return tag
 
 
-def latest_tag(repository, timeout=15, require_published=False):
+def latest_tag(repository, timeout=15):
     request = urllib.request.Request(
         "https://api.github.com/repos/" + repository + "/releases/latest",
         headers={"User-Agent": "code-server-aio-manage", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         release = json.load(response)
+    return stable_tag(release)
+
+
+def published_release(repository):
+    """Return the latest stable tag and the repository's canonical owner/repo spelling."""
+    release = json.loads(download(f'https://api.github.com/repos/{repository}/releases/latest'))
     tag = stable_tag(release)
-    if require_published and not any(asset.get("name") == "SHA256SUMS" for asset in release.get("assets", [])):
-        fail("Release still publishing: SHA256SUMS is not available; try again later.")
-    return tag
-
-
-def write_env_atomic(path, updated, owner):
-    # Finish the lookup and validation before replacing the configuration.
-    descriptor, temporary = tempfile.mkstemp(prefix=".env-upgrade-", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w") as output:
-            current = os.fstat(output.fileno())
-            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
-                os.fchown(output.fileno(), owner.st_uid, owner.st_gid)
-            os.fchmod(output.fileno(), 0o600)
-            output.write(updated)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    # Release assets upload only after the images are tested and published.
+    if not any(asset.get('name') == 'SHA256SUMS' for asset in release.get('assets', [])):
+        fail(f'Release {tag} is still publishing: SHA256SUMS is not available yet; try again later.')
+    # GHCR names are lowercase; download from GitHub's own spelling of the repository.
+    match = re.match(r'https://github\.com/([^/]+/[^/]+)/releases/', release.get('html_url', ''))
+    canonical = match[1] if match else repository
+    if canonical.lower() != repository.lower():
+        fail(f'GitHub returned release {tag} for {canonical}, not {repository}')
+    return tag, canonical
 
 
 @contextmanager
@@ -125,30 +122,28 @@ def env_lock(path):
 
 
 def upgrade(directory):
+    """Install the latest release's files and image together so they stay on one release."""
     path = directory / ".env"
     try:
-        if path.is_symlink():
-            raise ValueError("Expected a regular .env file, not a symlink")
-        with env_lock(path):
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("Expected a regular .env file")
-            owner = path.stat()
-            original = path.read_text()
-            repository = image_repository(original)
-            selected = "ghcr.io/" + repository + ":" + latest_tag(repository, require_published=True)[1:]
-            updated = replace_image_setting(original, selected)
-            write_env_atomic(path, updated, owner)
-        print("Set CODE_SERVER_IMAGE=" + selected)
-        print("Run manage --pull with your usual launch options to apply the upgrade.")
+        # A checkout's deployment files are tracked source; never overwrite them.
+        if (directory / "build/tools/install.sh").is_file():
+            raise ValueError("upgrade refreshes installed deployments. In a source checkout, check out "
+                             "the release tag with git and set CODE_SERVER_IMAGE in .env.")
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Expected a regular .env file")
+        version, repository = published_release(image_repository(path.read_text()))
+        # install_files rereads .env under the lock before changing it.
+        install(argparse.Namespace(directory=str(directory), repository=repository,
+                                   version=version, dry_run=False), upgrade=True)
     except Exception as error:
-        sys.exit("Unable to upgrade image: " + str(error))
+        sys.exit("Unable to upgrade: " + str(error))
 
 
 def parser():
     result = argparse.ArgumentParser(
         prog='manage', description=__doc__,
         epilog='start (default): start services; stop: remove containers and keep volumes; '
-               'upgrade: update the image setting without restarting; backup: run a backup; '
+               'upgrade: install the latest release and its image setting without restarting; backup: run a backup; '
                'backups: list local archives; restore: replace an explicit home volume; '
                'install: install or refresh deployment files. Commands and options may appear in any order.')
     result.add_argument('action', nargs='?', default='start',
@@ -180,7 +175,9 @@ def manage(args, directory):
                 '--env-file', str(directory / '.env'), '-f', '-', 'config', '--format', 'json'],
                 input='services:\n  restore-key:\n    image: unused\n    environment:\n      BACKUP_GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Restore requires the original BACKUP_GPG_PASSPHRASE in .env}\n',
                 text=True, env=env)
-            os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment']['BACKUP_GPG_PASSPHRASE']
+            # Compose serializes each literal '$' as '$$'; decode to the value backups used.
+            os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment'][
+                'BACKUP_GPG_PASSPHRASE'].replace('$$', '$')
         os.execvp('sh', ['sh', str(restore), archive, args.volume])
     os.chdir(directory)
     if not (directory / '.env').is_file():
@@ -204,7 +201,7 @@ def manage(args, directory):
         if not path.is_file():
             fail(f'Required Compose file is missing: {path}')
         command += ['-f', str(path)]
-    if args.backup != 'none' and args.action in ('start', 'backup'):
+    if args.backup != 'none' and args.action == 'start':
         subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(directory / '.env')], check=True)
         os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
     if args.action == 'start':
@@ -223,7 +220,8 @@ def manage(args, directory):
     elif args.action == 'stop':
         command += ['down', '--remove-orphans']
     elif args.action == 'backup':
-        command += ['run', '--rm', '--no-deps', '--entrypoint', 'backup', 'backup']
+        # Scheduled and manual runs must share the sidecar's filesystem lock.
+        command += ['exec', '-T', 'backup', 'backup']
     elif args.action == 'backups':
         command += ['run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'backup', '-ec',
                     'find /archive -maxdepth 1 -type f \\( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \\) -exec ls -lh {} \\;']
@@ -267,59 +265,6 @@ def validate_destination(directory, names):
             fail(f'Expected a regular file: {path}')
         if name != '.env' and path.with_name(name + '.bak').is_dir():
             fail(f'Backup destination must not be a directory: {path}.bak')
-
-
-GH_PIN = {'version': '2.103.3', 'sha256': {'gh_2.103.3_linux_amd64.tar.gz': '4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d', 'gh_2.103.3_linux_arm64.tar.gz': 'ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63', 'gh_2.103.3_macOS_amd64.zip': 'a2f86418f4350ae6e9ec60d5000bdf7665728436946a97fc27fe50e6ae752682', 'gh_2.103.3_macOS_arm64.zip': 'd700207eae9ae98fe2b89535c2c087c07823d4628c56364695a5a07ef311c062'}}
-
-
-def ensure_gh(directory=None):
-    """Use a capable CLI, or fetch a checksum-pinned binary without a package repo."""
-    import atexit
-    import io
-    import tarfile
-    import zipfile
-    existing = shutil.which('gh')
-    if existing and subprocess.run([existing, 'attestation', 'verify', '--help'],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        return existing
-    system = {'Linux': 'linux', 'Darwin': 'macOS'}.get(platform.system())
-    arch = {'x86_64': 'amd64', 'AMD64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}.get(platform.machine())
-    if not system or not arch:
-        raise ValueError('GitHub CLI download supports Linux/macOS on amd64/arm64; install a CLI supporting gh attestation verify.')
-    version = GH_PIN['version']
-    suffix = 'zip' if system == 'macOS' else 'tar.gz'
-    stem = f'gh_{version}_{system}_{arch}'
-    filename = stem + '.' + suffix
-    request = urllib.request.Request(f'https://github.com/cli/cli/releases/download/v{version}/{filename}',
-                                     headers={'User-Agent': 'code-server-aio-manage'})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        data = response.read()
-    if hashlib.sha256(data).hexdigest() != GH_PIN['sha256'][filename]:
-        raise ValueError('GitHub CLI archive checksum mismatch')
-    member = stem + '/bin/gh'
-    if suffix == 'zip':
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            binary = archive.read(member)
-    else:
-        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
-            with archive.extractfile(member) as source:
-                binary = source.read()
-    if directory is None:
-        temporary = tempfile.TemporaryDirectory(prefix='github-cli-')
-        atexit.register(temporary.cleanup)
-        directory = Path(temporary.name)
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_path = tempfile.mkstemp(prefix='.gh-', dir=directory)
-    try:
-        with os.fdopen(descriptor, 'wb') as output:
-            output.write(binary)
-            os.fchmod(output.fileno(), 0o755)
-        os.replace(temporary_path, directory / 'gh')
-    finally:
-        Path(temporary_path).unlink(missing_ok=True)
-    os.environ['PATH'] = str(directory) + os.pathsep + os.environ.get('PATH', '')
-    return str(directory / 'gh')
 
 
 def dependencies(dry_run):
@@ -371,10 +316,7 @@ def dependencies(dry_run):
             run(prefix + ['apt-get', 'install', '-y', *packages])
     else:
         fail('The installer supports Debian Linux and macOS.')
-    if dry_run:
-        print('Would check gh attestation verify and download a checksum-pinned GitHub CLI if needed.')
-    else:
-        ensure_gh()
+    if not dry_run:
         if not shutil.which('gpg'):
             fail('Install gpg before continuing.')
         subprocess.run(['docker', 'compose', 'version'], check=True)
@@ -386,7 +328,7 @@ def download(url):
             request = urllib.request.Request(url, headers={'User-Agent': 'code-server-aio-manage'})
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.read()
-        except OSError as error:
+        except (OSError, http.client.HTTPException) as error:
             if isinstance(error, urllib.error.HTTPError) and 400 <= error.code < 500 and error.code != 429:
                 raise
             if attempt == 3:
@@ -394,26 +336,13 @@ def download(url):
             time.sleep(2 ** attempt)
 
 
-def require_github_auth():
-    """Fail before host changes or downloads when verification cannot authenticate."""
-    if os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'):
-        return
-    gh = shutil.which('gh')
-    if gh and subprocess.run([gh, 'auth', 'status', '--hostname', 'github.com'],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        return
-    fail('GitHub authentication is required to verify release attestations. '
-         'Run gh auth login --hostname github.com or export GH_TOKEN (a classic token with no scopes '
-         'is sufficient for public releases). With sudo, use sudo --preserve-env=GH_TOKEN; '
-         'the privileged process must receive the token.')
-
-
-def verify_release(checksums, repository):
-    with tempfile.TemporaryDirectory(prefix='release-verification-') as directory:
-        path = Path(directory) / 'SHA256SUMS'
-        path.write_bytes(checksums)
-        subprocess.run([ensure_gh(), 'attestation', 'verify', str(path), '--repo', repository,
-                        '--signer-workflow', repository + '/.github/workflows/container.yaml'], check=True)
+def parse_checksums(checksums):
+    expected = {}
+    for line in checksums.decode().splitlines():
+        if line.strip():
+            digest, name = line.split(maxsplit=1)
+            expected[name] = digest
+    return expected
 
 
 def merge_settings(original, template, version):
@@ -453,13 +382,14 @@ def replace_image_setting(text, image):
     return text + ('' if not text or text.endswith('\n') else '\n') + setting + '\n'
 
 
-def install_files(directory, files, template, version, image):
+def install_files(directory, files, template, version, image, replace_pin=False):
     """Serialize refreshes, stage complete files, and roll back failed replacements."""
     env = directory / '.env'
     with env_lock(env):
         validate_destination(directory, [*files, '.env'])
         text = merge_settings(env.read_text(), template, version) if env.exists() else template
-        text = select_image(text, image)
+        # Upgrades deliberately replace a digest pin; refreshes keep it.
+        text = (replace_image_setting if replace_pin else select_image)(text, image)
         staging = Path(tempfile.mkdtemp(prefix='.install-', dir=directory))
         replaced = []
         originals = {}
@@ -517,7 +447,7 @@ def install_files(directory, files, template, version, image):
         print(f'Updated {directory / name}')
 
 
-def install(args):
+def install(args, upgrade=False):
     directory = Path(os.path.abspath(args.directory or '/opt/code-server'))
     repository = args.repository or 'Weeks-Consulting/code-server-aio'
     version = args.version
@@ -526,8 +456,6 @@ def install(args):
     if version and not re.fullmatch(TAG, version):
         fail(f'Expected a release tag such as v4.141.0 or v4.141.0-1; got: {version}')
     validate_destination(directory, [*DEPLOYMENT_FILES, '.env'])
-    if not args.dry_run:
-        require_github_auth()
     dependencies(args.dry_run)
     image = 'ghcr.io/' + repository.lower() + ':' + (version[1:] if version else 'latest')
     if args.dry_run:
@@ -546,8 +474,7 @@ def install(args):
         print('Dry run complete. No packages installed, releases downloaded, files changed, or services started.')
         return
     if not version:
-        release = json.loads(download(f'https://api.github.com/repos/{repository}/releases/latest'))
-        version = stable_tag(release)
+        version, repository = published_release(repository)
     base = f'https://raw.githubusercontent.com/{repository}/refs/tags/{version}'
     sources = {**DEPLOYMENT_FILES, '.env.example': '.env.example'}
     try:
@@ -555,23 +482,24 @@ def install(args):
         checksums = download(f'https://github.com/{repository}/releases/download/{version}/SHA256SUMS')
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            fail(f'Release {version} lacks required deployment files or SHA256SUMS; '
-                 "use that release's own installer.")
+            fail(f'Release {version} lacks required deployment files or SHA256SUMS. If it was '
+                 "just published, retry after publishing finishes; otherwise use that release's own installer.")
         raise
-    expected = {}
-    for line in checksums.decode().splitlines():
-        digest, name = line.split(maxsplit=1)
-        expected[name] = digest
+    expected = parse_checksums(checksums)
     for name, data in files.items():
         if expected.get(sources[name]) != hashlib.sha256(data).hexdigest():
             fail('Release checksum missing or incorrect: ' + name)
-    verify_release(checksums, repository)
     template = select_image(files.pop('.env.example').decode(), image)
     # Finish downloads and validation before changing any deployment files.
     directory.mkdir(parents=True, exist_ok=True)
     validate_destination(directory, list(files) + ['.env'])
     env = directory / '.env'
-    install_files(directory, files, template, version, image)
+    install_files(directory, files, template, version, image, replace_pin=upgrade)
+    if upgrade:
+        print(f'\nUpgraded deployment files in {directory} to release {version}.')
+        print('Set CODE_SERVER_IMAGE=' + image)
+        print(f'Review new settings in {env}, then run manage --pull with your usual launch options to apply the upgrade.')
+        return
     print(f'\nInstalled deployment files in {directory} (release {version}).')
     print(f'Edit {env} to configure Cloudflare Access and your tunnel before starting.')
     print(f'Then run sh "{directory}/manage" to launch. No services have been started.')
@@ -618,5 +546,5 @@ if __name__ == '__main__':
         main()
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode)
-    except (OSError, ValueError, KeyError) as error:
+    except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
         sys.exit(str(error))

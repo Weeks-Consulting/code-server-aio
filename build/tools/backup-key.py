@@ -33,6 +33,24 @@ def validate_dotenv(text):
             raise ValueError(f"Multiline or unterminated quoted .env value at line {number}; use a single-line value.")
 
 
+def effective_value(raw):
+    """Return the value Compose assigns from the text after '='."""
+    raw = raw.lstrip(" \t")
+    if raw[:1] in ("'", '"'):
+        # A quoted value ends at its closing quote; trailing text is a comment.
+        quote, escaped = raw[0], False
+        for index, character in enumerate(raw[1:], 1):
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote == '"':
+                escaped = True
+            elif character == quote:
+                return raw[1:index]
+        return raw
+    # Only whitespace followed by '#' starts a comment; a leading '#' is data.
+    return re.split(r"[ \t]#", raw, maxsplit=1)[0].strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("env_file", type=Path, help="deployment .env file")
@@ -61,8 +79,9 @@ def main():
         for line in contents.splitlines():
             match = pattern.match(line)
             if match:
-                value = re.sub(r"\s+#.*$", "", line[match.end():]).strip()
-        if value not in ("", '""', "''") and not value.startswith("#"):
+                value = effective_value(line[match.end():])
+        # Never replace a key Compose would use, including one beginning with '#'.
+        if value:
             sys.exit(0)
         key = secrets.token_hex(32)
         lines = contents.splitlines(keepends=True)

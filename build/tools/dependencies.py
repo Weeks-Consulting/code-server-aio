@@ -113,7 +113,7 @@ def apply_edits(root, edits):
     A process/host crash during replacement still requires reviewing git diff;
     multiple paths cannot be committed atomically with filesystem rename.
     """
-    staged, backups, replaced = {}, {}, []
+    staged, backups, replaced, kept = {}, {}, [], set()
 
     def stage(path, content):
         fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
@@ -135,13 +135,19 @@ def apply_edits(root, edits):
             for name, temporary in staged.items():
                 os.replace(temporary, root / name)
                 replaced.append(name)
-        except OSError:
+        except BaseException:
+            # Interruptions roll back too; keep any original that cannot be restored.
             for name in reversed(replaced):
-                os.replace(backups[name], root / name)
+                try:
+                    os.replace(backups[name], root / name)
+                except OSError:
+                    kept.add(backups[name])
+                    print(f'Could not restore {name}; previous contents kept in {backups[name]}',
+                          file=sys.stderr)
             raise
     finally:
         for temporary in (*staged.values(), *backups.values()):
-            if os.path.exists(temporary):
+            if temporary not in kept and os.path.exists(temporary):
                 os.unlink(temporary)
 
 
@@ -163,7 +169,6 @@ def load_pins(root, scope=None):
         assets = {
             'code-server': {f'code-server_{version}_{arch}.deb' for arch in ('amd64', 'arm64')},
             'envoy': {f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')},
-            'gh': {f'gh_{version}_{system}_{arch}.{suffix}' for system, suffix in (('linux', 'tar.gz'), ('macOS', 'zip')) for arch in ('amd64', 'arm64')},
             'act': {f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
                     for arch in ('arm64', 'x86_64')},
         }
@@ -258,14 +263,6 @@ def references(root, pins):
             content = ACTION.sub(action, content)
         if content != original:
             edits[file] = content
-    if 'gh' in pins['packages']:
-        for file in ('manage.py', 'build/tools/install.sh'):
-            original = (root / file).read_text()
-            content, count = re.subn(r'^GH_PIN = .*$', lambda _: 'GH_PIN = ' + repr(pins['packages']['gh']), original, flags=re.M)
-            if count != 1:
-                raise ValueError(f'{file}: expected one embedded GitHub CLI pin')
-            if content != original:
-                edits[file] = content
     return edits
 
 
@@ -274,7 +271,7 @@ def plan(root, prepare=True, scope=None):
     pins = load_pins(root, scope)
     changed = False
     for label, repo in (('code-server', 'coder/code-server'),
-                        ('envoy', 'envoyproxy/envoy'), ('act', 'nektos/act'), ('gh', 'cli/cli')):
+                        ('envoy', 'envoyproxy/envoy'), ('act', 'nektos/act')):
         if label not in pins['packages']:
             continue
         release = github(repo, 'releases/latest')
@@ -286,8 +283,6 @@ def plan(root, prepare=True, scope=None):
                      if label == 'code-server' else
                      [f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')]
                      if label == 'envoy' else
-                     [f'gh_{version}_{system}_{arch}.{suffix}' for system, suffix in (('linux', 'tar.gz'), ('macOS', 'zip')) for arch in ('amd64', 'arm64')]
-                     if label == 'gh' else
                      [f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
                       for arch in ('arm64', 'x86_64')])
             if prepare:

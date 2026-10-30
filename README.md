@@ -9,10 +9,8 @@ The entire project has also been reviewed and tested by a real person.
 
 ## Quick start
 
-Requires Docker with Compose, Python 3, and GitHub authentication for release
-attestation verification (`gh auth login --hostname github.com` or an exported
-`GH_TOKEN`). When installing with sudo, use `sudo --preserve-env=GH_TOKEN`
-with an exported token. The installer can install missing host
+Requires Docker with Compose and Python 3; no GitHub account or GitHub CLI is
+needed. The installer can install missing host
 dependencies on Debian or macOS; see the [installation guide](docs/installation.md)
 for host setup, installing without a checkout, and release selection.
 
@@ -56,7 +54,7 @@ reads the configuration beside itself. If installed with `sudo`, run it with
 | `./manage --backup local --pull` | Start with local backups. |
 | `./manage --backup s3 --pull` | Start with S3 or R2 backups. |
 | `./manage stop` | Remove project containers and networks; keep volumes. |
-| `./manage upgrade` | Set the image to the latest release; then start with `--pull` and your usual options. |
+| `./manage upgrade` | Install the latest release's files and image; then start with `--pull` and your usual options. |
 | `./manage install --directory PATH` | Install or refresh deployment files. |
 | `./manage backup --backup local` | Run a backup now; use `s3` for S3 backups. |
 | `./manage backups --backup local` | List local archives. |

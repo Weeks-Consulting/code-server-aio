@@ -1,5 +1,7 @@
 """Check key generation, retention, and safe handling of deployment dotenv files."""
 
+import importlib.util
+import json
 import os
 from pathlib import Path
 import pwd
@@ -29,7 +31,8 @@ class BackupKeyTests(unittest.TestCase):
 
     def test_missing_and_empty_keys(self):
         for value in ("", "BACKUP_GPG_PASSPHRASE=\n", 'BACKUP_GPG_PASSPHRASE="" # empty\n',
-                      "export BACKUP_GPG_PASSPHRASE = ''\n", "BACKUP_GPG_PASSPHRASE= # empty\n"):
+                      "export BACKUP_GPG_PASSPHRASE = ''\n", "BACKUP_GPG_PASSPHRASE=  \n",
+                      "BACKUP_GPG_PASSPHRASE=''# generate a key\n", 'BACKUP_GPG_PASSPHRASE=""# generate\n'):
             with self.subTest(value=value):
                 self.env.write_text("OTHER=unchanged\n" + value)
                 result = self.initialize()
@@ -41,6 +44,40 @@ class BackupKeyTests(unittest.TestCase):
                 self.assertNotIn(key, result.stdout + result.stderr)
                 self.assertEqual(self.initialize().returncode, 0)
                 self.assertEqual(self.env.read_text(), contents)
+
+    def test_preserves_keys_compose_would_use(self):
+        # Compose treats a leading '#' (even after spaces) as part of the value.
+        for value in ("BACKUP_GPG_PASSPHRASE=#my-own-passphrase\n", "BACKUP_GPG_PASSPHRASE= # not a comment\n",
+                      "BACKUP_GPG_PASSPHRASE='#quoted'# comment\n", 'BACKUP_GPG_PASSPHRASE="a\\"#b"\n',
+                      "BACKUP_GPG_PASSPHRASE=key #comment\n", "BACKUP_GPG_PASSPHRASE='  '\n"):
+            with self.subTest(value=value):
+                self.env.write_text(value)
+                result = self.initialize()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.env.read_text(), value)
+                self.assertNotIn("Generated", result.stdout)
+
+    def test_matches_compose_effective_values(self):
+        if not shutil.which("docker") or subprocess.run(["docker", "compose", "version"],
+                                                        capture_output=True).returncode:
+            self.skipTest("Docker Compose is unavailable")
+        spec = importlib.util.spec_from_file_location("backup_key", ROOT / "build/tools/backup-key.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        values = ["", "  ", "#abc", " # not a comment", "key #comment", "''# gen", '""# gen',
+                  "'' # c", "'#quoted'# c", '"a\\"#b"', "'  '", "x#y"]
+        self.env.write_text("".join(f"K{index}={value}\n" for index, value in enumerate(values)))
+        compose = self.directory / "compose.yaml"
+        compose.write_text("services:\n  t:\n    image: unused\n    environment:\n" + "".join(
+            f"      K{index}: ${{K{index}}}\n" for index in range(len(values))))
+        model = subprocess.run(["docker", "compose", "--project-directory", str(self.directory),
+                                "--env-file", str(self.env), "-f", str(compose), "config", "--format", "json"],
+                               capture_output=True, text=True, check=True)
+        resolved = json.loads(model.stdout)["services"]["t"]["environment"]
+        # Key generation depends only on whether Compose sees an empty value.
+        for index, value in enumerate(values):
+            with self.subTest(value=value):
+                self.assertEqual(bool(module.effective_value(value)), bool(resolved.get(f"K{index}")))
 
     def test_preserves_custom_key_and_never_executes_dotenv(self):
         marker = self.directory / "must-not-exist"
@@ -119,7 +156,7 @@ class BackupKeyTests(unittest.TestCase):
             "        content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files).encode()\n"
             "        if os.environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], b'0' * 64)\n"
             "        return io.BytesIO(content)\n"
-            "    if url.endswith('/releases/latest'): return io.BytesIO(b'{\"tag_name\":\"v4.141.0-1\"}')\n"
+            "    if url.endswith('/releases/latest'): return io.BytesIO(b'{\"tag_name\":\"v4.141.0-1\",\"assets\":[{\"name\":\"SHA256SUMS\"}]}')\n"
             "    return io.BytesIO((root / url.split('/refs/tags/v4.141.0-1/', 1)[1]).read_bytes())\n"
             "urllib.request.urlopen = response\n"
             "if (tools / 'uname').exists(): platform.system = lambda: subprocess.check_output([str(tools / 'uname')], text=True).strip()\n"

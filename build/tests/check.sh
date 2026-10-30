@@ -7,9 +7,9 @@ cd -- "$(dirname -- "$0")/../.."
 python3 build/tools/dependencies.py check
 
 for script in manage build/tools/*.sh build/tests/*.sh; do sh -n "$script"; done
-for script in build/runtime/*.sh; do bash -n "$script"; done
+for script in build/runtime/*.sh build/ci/*.sh; do bash -n "$script"; done
 command -v shellcheck >/dev/null || { echo 'Install shellcheck to run checks.' >&2; exit 1; }
-shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runtime/*.sh
+shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runtime/*.sh build/ci/*.sh
 python3 -m unittest discover -s build/tests -p "test_*.py"
 
 # Configuration checks use a disposable passphrase, never a deployment key.

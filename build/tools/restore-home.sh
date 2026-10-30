@@ -5,6 +5,7 @@ command -v python3 >/dev/null || { echo 'Install python3 to restore backups.' >&
 exec python3 - "$@" <<'PYTHON'
 import os
 import hashlib
+import json
 from pathlib import Path
 import shutil
 import signal
@@ -63,11 +64,14 @@ stage = '.restore-staging-' + uuid.uuid4().hex
 image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4')
 guard = 'code-server-restore-' + hashlib.sha256(volume.encode()).hexdigest()[:24]
 create = ['docker', 'create', '--name', guard, '--network', 'none', '--user', '0:0',
+        '--label', 'code-server.restore-owner=' + stage,
         '--mount', 'type=volume,src=' + volume + ',dst=/restore',
         '--env', 'STAGE=' + stage, '--entrypoint', '/bin/sh', image, '-c', 'exec sleep infinity']
 base = ['docker', 'exec', '-i', guard, '/bin/sh', '-euc']
 processes = []
 acquired = False
+create_attempted = False
+start_attempted = False
 replacement_started = False
 restored = False
 
@@ -106,12 +110,14 @@ def finish(processes):
 try:
     # Docker reserves names atomically across clients of this daemon. Keep one
     # container alive for the entire restore, rather than checking between helpers.
+    create_attempted = True
     reservation = subprocess.run(create, capture_output=True, text=True)
     if reservation.returncode:
         raise RuntimeError(f'Could not reserve restore container {guard}: {reservation.stderr.strip()}')
-    acquired = True
-    run('docker', 'start', guard, stdout=subprocess.DEVNULL)
     own_id = reservation.stdout.strip()
+    acquired = True
+    start_attempted = True
+    run('docker', 'start', guard, stdout=subprocess.DEVNULL)
     attached = subprocess.check_output(['docker', 'ps', '-q', '--no-trunc', '--filter', 'volume=' + volume]).decode().split()
     if any(container != own_id for container in attached):
         raise RuntimeError('Another container is using the target volume; keep the stack stopped during restore.')
@@ -188,11 +194,45 @@ try:
 except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
     sys.exit('Restore failed: ' + str(error))
 finally:
-    if acquired:
+    # A repeated interrupt must not abandon cleanup midway; each Docker call is bounded.
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, signal.SIG_IGN)
+    # Give recovery guidance before any cleanup call that could stall.
+    if replacement_started and not restored and (rollback / name).exists():
+        print(f'Keep the stack stopped. Recover with: manage restore --archive '
+              f'{shlex.quote(str(rollback / name))} --volume {shlex.quote(volume)}', file=sys.stderr)
+
+    def cleanup(*arguments):
+        try:
+            return subprocess.run(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=60).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    incomplete = False
+    if create_attempted and not start_attempted:
+        # Cancellation can kill the CLI after the daemon has created the guard.
+        # Recover only our invocation's reservation, never a competing restore's.
+        candidate = own_id if acquired else None
+        if not acquired:
+            try:
+                inspection = subprocess.run(['docker', 'inspect', '--format', '{{json .}}', guard],
+                                            capture_output=True, text=True, check=True, timeout=60)
+                info = json.loads(inspection.stdout)
+                if (info['Config'].get('Labels') or {}).get('code-server.restore-owner') == stage:
+                    candidate = info['Id']
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                print(f'Could not resolve restore reservation {guard}; inspect it before '
+                      'removing it or retrying the restore.', file=sys.stderr)
+        # No helper has started, so there is no staging to clean. Use the ID to
+        # avoid deleting a replacement reservation if the name changes hands.
+        if candidate and not cleanup('docker', 'rm', '-f', candidate):
+            print(f'Could not remove restore container {guard}; inspect it before '
+                  'retrying the restore.', file=sys.stderr)
+    elif acquired:
         # Kill the container first: terminating a Docker CLI does not guarantee
         # that its remote extraction/replacement process has stopped.
-        stopped = subprocess.run(['docker', 'kill', guard], stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL).returncode == 0
+        stopped = cleanup('docker', 'kill', guard)
         for process in processes:
             if process.poll() is None:
                 process.terminate()
@@ -202,20 +242,23 @@ finally:
                 process.kill()
                 process.wait()
         if stopped and (not replacement_started or restored):
-            subprocess.run(['docker', 'start', guard], check=True, stdout=subprocess.DEVNULL)
-            subprocess.run(base + ['rm -rf -- "/restore/$STAGE"'], check=True)
+            if not (cleanup('docker', 'start', guard) and cleanup(*base, 'rm -rf -- "/restore/$STAGE"')):
+                incomplete = True
+                print(f'Could not remove staging /{stage} in {volume}; remove it before restarting.', file=sys.stderr)
         elif replacement_started and not restored:
             print(f'Replacement interrupted; staged files remain at /{stage} in {volume}.', file=sys.stderr)
-        if stopped:
-            subprocess.run(['docker', 'rm', '-f', guard], check=True, stdout=subprocess.DEVNULL)
-        else:
+        if not stopped:
+            incomplete = True
             print(f'Could not stop restore container {guard}; inspect it before removing staging or restarting.', file=sys.stderr)
-    if replacement_started and not restored and (rollback / name).exists():
-        print(f'Keep the stack stopped. Recover with: manage restore --archive '
-              f'{shlex.quote(str(rollback / name))} --volume {shlex.quote(volume)}', file=sys.stderr)
+        elif not cleanup('docker', 'rm', '-f', guard):
+            incomplete = True
+            print(f'Could not remove restore container {guard}; remove it before another restore.', file=sys.stderr)
     partial.unlink(missing_ok=True)
     try:
         rollback.rmdir()
     except OSError:
         pass
+    # Failed paths already exit nonzero; a completed restore still reports cleanup failure.
+    if restored and incomplete:
+        sys.exit(1)
 PYTHON

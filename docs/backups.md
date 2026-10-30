@@ -5,12 +5,18 @@
 Both Offen backup overlays require GPG encryption and write `.tar.gz.gpg` archives.
 The installer generates a random 256-bit `BACKUP_GPG_PASSPHRASE` in `.env` if it is missing
 or empty, including when refreshing an existing installation. When using a checkout,
-`manage --backup local` or `manage --backup s3` generates it before starting services;
-manual backup commands also initialize it if necessary. Existing nonempty keys are
+`manage --backup local` or `manage --backup s3` generates it before starting services.
+Manual backups use the running service's key and do not generate a replacement. Existing nonempty keys are
 preserved. Generated keys are never printed, and `.env` is saved with mode `600`.
 The initializer uses Python 3 and a persistent `.env.lock` sidecar to serialize
 concurrent launches without replacing an existing key.
 You can set your own passphrase in `.env` before installation or startup.
+
+`manage backup --backup local|s3` runs inside the existing backup service, using
+its configuration and exclusive lock. Scheduled and manual backups wait for
+each other. Start the matching backup mode first; a stopped backup service causes
+the command to fail. Recreate the service with `manage start --backup local|s3`
+after changing its settings or encryption key.
 
 **Save `BACKUP_GPG_PASSPHRASE` separately in a password manager or another secure location.**
 The home-volume backup does not include the host deployment's `.env`. Losing the key

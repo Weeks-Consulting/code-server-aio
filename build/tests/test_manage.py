@@ -152,87 +152,56 @@ class LauncherTests(unittest.TestCase):
                 self.assertNotIn("differs from latest release", result.stderr)
                 self.assertEqual(json.loads(self.log.read_text())[-2:], ["--pull", "always"])
 
-    def test_upgrade_updates_only_image_and_does_not_start_services(self):
+    def test_upgrade_needs_no_github_account(self):
+        # Refresh details and failure paths are covered by test_install's upgrade tests.
+        import hashlib
+        repository = SCRIPT.parent
+        sources = ["compose.yaml", "compose.backup-common.yaml", "compose.backup.yaml",
+                   "compose.backup-local.yaml", "manage", "manage.py", ".env.example",
+                   "build/tools/restore-home.sh", "build/tools/backup-key.py"]
+        (self.root / "SHA256SUMS").write_text("".join(
+            hashlib.sha256((repository / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in sources))
+        # Model a regular user even when CI runs as root: root-only destination
+        # checks reject the world-writable temp directory and are tested in test_install.
         (self.root / "sitecustomize.py").write_text(
-            "import io, json, os, urllib.request\n"
-            "def release(request, timeout):\n"
-            "    assert request.full_url == 'https://api.github.com/repos/example/fork/releases/latest'\n"
-            "    assert timeout == 15\n"
-            "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
-            "    return io.BytesIO(json.dumps({'tag_name': os.environ.get('TEST_TAG', 'v9.0.0-1'), 'assets': [] if os.environ.get('TEST_PUBLISHING') else [{'name':'SHA256SUMS'}]}).encode())\n"
-            "urllib.request.urlopen = release\n")
+            "import io, json, os, pathlib, urllib.request\n"
+            "os.geteuid = lambda: 1000\n"
+            f"root, repository = pathlib.Path({str(self.root)!r}), pathlib.Path({str(repository)!r})\n"
+            "def respond(request, timeout):\n"
+            "    assert 'Authorization' not in request.headers\n"
+            "    url = request.full_url\n"
+            "    if url == 'https://api.github.com/repos/example/fork/releases/latest':\n"
+            "        return io.BytesIO(json.dumps({'tag_name': 'v9.0.0-1', 'assets': [{'name': 'SHA256SUMS'}],\n"
+            "            'html_url': 'https://github.com/Example/Fork/releases/tag/v9.0.0-1'}).encode())\n"
+            "    if url == 'https://github.com/Example/Fork/releases/download/v9.0.0-1/SHA256SUMS':\n"
+            "        return io.BytesIO((root / 'SHA256SUMS').read_bytes())\n"
+            "    prefix = 'https://raw.githubusercontent.com/Example/Fork/refs/tags/v9.0.0-1/'\n"
+            "    assert url.startswith(prefix), url\n"
+            "    return io.BytesIO((repository / url[len(prefix):]).read_bytes())\n"
+            "urllib.request.urlopen = respond\n")
+        # No GitHub CLI or login; package managers must never run.
+        for name, body in {"gh": f"touch {str(self.root / 'gh-called')!r}; exit 99", "gpg": "exit 0",
+                           "dpkg-query": "printf 'install ok installed\\n'",
+                           "apt-get": "exit 99", "brew": "exit 99", "sudo": "exit 99"}.items():
+            (self.root / name).write_text("#!/bin/sh\n" + body + "\n")
+            (self.root / name).chmod(0o755)
         self.env["PYTHONPATH"] = str(self.root)
+        self.env.pop("GH_TOKEN", None)
+        self.env.pop("GITHUB_TOKEN", None)
         dotenv = self.deployment / ".env"
-        original = ("# Keep my settings\n"
-                    "export CODE_SERVER_IMAGE='ghcr.io/example/fork:1.0.0'\n"
-                    "SECRET=$(never-execute-this)\n")
-        dotenv.write_text(original)
+        dotenv.write_text("# Keep my settings\n"
+                          "export CODE_SERVER_IMAGE='ghcr.io/example/fork:1.0.0'\n"
+                          "SECRET=$(never-execute-this)\n")
         result = self.run_launcher("upgrade")
         self.assertEqual(result.returncode, 0, result.stderr)
-        expected = original.replace("export CODE_SERVER_IMAGE='ghcr.io/example/fork:1.0.0'",
-                                    "CODE_SERVER_IMAGE=ghcr.io/example/fork:9.0.0-1")
-        self.assertEqual(dotenv.read_text(), expected)
+        text = dotenv.read_text()
+        self.assertIn("# Keep my settings\n", text)
+        self.assertIn("SECRET=$(never-execute-this)\n", text)
+        self.assertIn("CODE_SERVER_IMAGE=ghcr.io/example/fork:9.0.0-1\n", text)
         self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
-        self.assertFalse(self.log.exists())
+        self.assertEqual((self.deployment / "compose.yaml").read_bytes(), (repository / "compose.yaml").read_bytes())
         self.assertIn("manage --pull", result.stdout)
-        for overrides in ({"TEST_OFFLINE": "1"}, {"TEST_TAG": "invalid"}, {"TEST_PUBLISHING": "1"}):
-            with self.subTest(overrides=overrides):
-                self.env.update(overrides)
-                result = self.run_launcher("upgrade")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(dotenv.read_text(), expected)
-                for key in overrides:
-                    self.env.pop(key)
-
-    def test_upgrade_defaults_comments_and_shared_lock(self):
-        import fcntl
-        (self.root / "sitecustomize.py").write_text(
-            "import io, urllib.request\n"
-            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\",\"assets\":[{\"name\":\"SHA256SUMS\"}]}')\n")
-        self.env["PYTHONPATH"] = str(self.root)
-        dotenv = self.deployment / ".env"
-        for value in ('', "''", 'ghcr.io/example/fork:1.0.0\t# pinned'):
-            with self.subTest(value=value):
-                dotenv.write_text('CODE_SERVER_IMAGE=' + value + '\n')
-                owner = dotenv.stat()
-                result = self.run_launcher('upgrade')
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(':9.0.0', dotenv.read_text())
-                self.assertEqual((dotenv.stat().st_uid, dotenv.stat().st_gid), (owner.st_uid, owner.st_gid))
-                guard = (self.deployment / '.env.lock').stat()
-                self.assertEqual((guard.st_uid, guard.st_gid), (owner.st_uid, owner.st_gid))
-        dotenv.write_text('CODE_SERVER_IMAGE=\n')
-        with (self.deployment / '.env.lock').open('w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            process = subprocess.Popen(['sh', str(self.script), 'upgrade'], env=self.env,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    process.wait(timeout=0.3)
-                dotenv.write_text('CODE_SERVER_IMAGE=\nBACKUP_GPG_PASSPHRASE=newly-generated\n')
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
-                stdout, stderr = process.communicate(timeout=10)
-            self.assertEqual(process.returncode, 0, stderr)
-            self.assertIn('BACKUP_GPG_PASSPHRASE=newly-generated', dotenv.read_text())
-
-    @unittest.skipUnless(os.geteuid() == 0, 'requires root to model sudo ownership')
-    def test_upgrade_preserves_another_users_file_and_lock(self):
-        (self.root / 'sitecustomize.py').write_text(
-            "import io, urllib.request\n"
-            "urllib.request.urlopen = lambda *a, **k: io.BytesIO(b'{\"tag_name\":\"v9.0.0\",\"assets\":[{\"name\":\"SHA256SUMS\"}]}')\n")
-        self.env['PYTHONPATH'] = str(self.root)
-        dotenv = self.deployment / '.env'
-        dotenv.write_text('CODE_SERVER_IMAGE=\n')
-        os.chown(dotenv, 65534, 65534)
-        result = self.run_launcher('upgrade')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for path in (dotenv, self.deployment / '.env.lock'):
-            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (65534, 65534))
-        result = subprocess.run([sys.executable, str(self.deployment / 'backup-key.py'), str(dotenv)],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((dotenv.stat().st_uid, dotenv.stat().st_gid), (65534, 65534))
+        self.assertFalse((self.root / "gh-called").exists())
 
     def test_start_without_pull_skips_network(self):
         (self.root / "sitecustomize.py").write_text(
@@ -287,7 +256,7 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher("--backup", "local", "backup", "--project-name", "example")
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads(self.log.read_text())
-        self.assertEqual(args[-6:], ["run", "--rm", "--no-deps", "--entrypoint", "backup", "backup"])
+        self.assertEqual(args[-4:], ["exec", "-T", "backup", "backup"])
         self.assertIn("example", args)
         result = self.run_launcher("start", "stop")
         self.assertNotEqual(result.returncode, 0)
@@ -309,7 +278,21 @@ class LauncherTests(unittest.TestCase):
                 result = self.run_launcher("backup", "--backup", mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = json.loads(self.log.read_text())
-                self.assertEqual(args[-6:], ["run", "--rm", "--no-deps", "--entrypoint", "backup", "backup"])
+                self.assertEqual(args[-4:], ["exec", "-T", "backup", "backup"])
+
+    def test_manual_backup_propagates_service_failure_without_fallback(self):
+        self.env["DOCKER_EXIT"] = "17"
+        result = self.run_launcher("backup", "--backup", "local")
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(json.loads(self.log.read_text())[-4:], ["exec", "-T", "backup", "backup"])
+
+    def test_manual_backup_does_not_generate_a_key_unused_by_the_running_service(self):
+        dotenv = self.deployment / ".env"
+        dotenv.write_text("BACKUP_GPG_PASSPHRASE=\n")
+        result = self.run_launcher("backup", "--backup", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(dotenv.read_text(), "BACKUP_GPG_PASSPHRASE=\n")
+        self.assertFalse((self.deployment / ".env.lock").exists())
 
     def test_backup_key_generated_and_preserved(self):
         dotenv = self.deployment / ".env"
@@ -355,6 +338,21 @@ class LauncherTests(unittest.TestCase):
                 # must identify the archive relative to the caller's directory.
                 self.assertEqual(Path(forwarded).resolve(), archive.resolve())
                 self.assertEqual(volume, "new-home")
+
+    def test_restore_decodes_compose_dollar_escaping(self):
+        archive = self.root / "saved.tar.gz.gpg"
+        archive.touch()
+        (self.deployment / "restore-home.sh").write_text(
+            '#!/bin/sh\nprintf "%s" "$BACKUP_GPG_PASSPHRASE" > "$ARGUMENT_LOG"\n')
+        # `docker compose config` writes the literal key pa$$word as pa$$$$word.
+        model = json.dumps({"services": {"restore-key": {"environment": {
+            "BACKUP_GPG_PASSPHRASE": "pa$$$$word"}}}})
+        env = {key: value for key, value in self.env.items() if key != "BACKUP_GPG_PASSPHRASE"}
+        result = subprocess.run(
+            ["sh", str(self.script), "restore", "--archive", str(archive), "--volume", "home"],
+            env={**env, "TEST_MODEL": model}, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text(), "pa$$word")
 
     def test_invalid_commands(self):
         for args in (("backup",), ("backups", "--backup", "s3"), ("restore",),

@@ -3,8 +3,6 @@ FROM debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c
 ENV DEBIAN_FRONTEND=noninteractive \
     SHELL=/bin/bash
 
-COPY build/versions.json /tmp/versions.json
-COPY build/tools/fetch-pinned.py /tmp/fetch-pinned.py
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
@@ -22,16 +20,20 @@ RUN apt-get update && \
         supervisor && \
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
     locale-gen && \
-    # Install the verified code-server package.
-    python3 /tmp/fetch-pinned.py /tmp/versions.json code-server "$(dpkg --print-architecture)" /tmp/code-server.deb && \
-    apt-get install -y --no-install-recommends /tmp/code-server.deb && \
-    rm /tmp/code-server.deb && \
     rm -rf /var/lib/apt/lists/*
 
-# Install the pinned static Envoy executable for this image's architecture.
-RUN python3 /tmp/fetch-pinned.py /tmp/versions.json envoy "$(dpkg --print-architecture)" /tmp/envoy && \
+# Install the verified code-server package and static Envoy executable. The pin
+# manifest is mounted, not copied, so bumps to its other images only rebuild this
+# layer and later ones, never the base packages above.
+RUN --mount=type=bind,source=build/versions.json,target=/tmp/versions.json \
+    --mount=type=bind,source=build/tools/fetch-pinned.py,target=/tmp/fetch-pinned.py \
+    arch=$(dpkg --print-architecture) && \
+    python3 /tmp/fetch-pinned.py /tmp/versions.json code-server "$arch" /tmp/code-server.deb && \
+    python3 /tmp/fetch-pinned.py /tmp/versions.json envoy "$arch" /tmp/envoy && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/code-server.deb && \
     install -m 755 /tmp/envoy /usr/local/bin/envoy && \
-    rm /tmp/envoy /tmp/versions.json /tmp/fetch-pinned.py
+    rm -rf /tmp/code-server.deb /tmp/envoy /var/lib/apt/lists/*
 
 RUN groupadd --gid 10000 cloud-user && \
     useradd --uid 10000 --gid 10000 --create-home --shell /bin/bash --groups sudo,docker cloud-user && \

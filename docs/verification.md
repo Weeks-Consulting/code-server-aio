@@ -10,29 +10,33 @@ and stores it in GHCR. Before deploying a new image, verify it using:
 gh attestation verify oci://ghcr.io/weeks-consulting/code-server-aio:latest --repo Weeks-Consulting/code-server-aio --signer-workflow Weeks-Consulting/code-server-aio/.github/workflows/container.yaml
 ```
 
+Weekly rebuilds run on the release tag, so release and rebuilt images can both be
+checked against their tag by adding `--source-ref refs/tags/vX.Y.Z`. Rebuilds use that
+tag's workflow file, not the current one on `main`.
+
 Use the verified digest in `CODE_SERVER_IMAGE` to deploy exactly those bytes. Tags
 remain mutable to support weekly security rebuilds; digest pins require deliberate
 updates. Installer reruns preserve existing digest pins and warn that they were kept.
 `manage upgrade` deliberately replaces a digest pin with the latest release tag;
 verify and set a new digest instead if you want to keep deploying verified bytes.
-Image verification requires `gh` logged in to GitHub (`gh auth login --hostname github.com`
-or an exported `GH_TOKEN`), even for public images; see [installation](installation.md#install).
-It is an explicit deployment check. Bootstrap and deployment checksum attestation verification
-is mandatory and fails closed. Restrict package publishing to trusted maintainers.
+This optional check needs the GitHub CLI logged in to GitHub (`gh auth login`), even
+for public images; deployments themselves never need it. The installers check
+downloaded files against `SHA256SUMS` and fail closed. Restrict package publishing to
+trusted maintainers.
 `manage start --pull` also warns when a version-tagged GHCR image differs from its repository's
 latest stable release, with a best-effort check that stays quiet on network errors. Starts without
 `--pull` skip the network check.
 
-Release deployment checksums have GitHub artifact provenance. To verify their origin
-with GitHub CLI before using them, download `SHA256SUMS` from the selected release and
-run:
+Release deployment checksums also have GitHub artifact provenance. The installers
+do not check it. To verify the checksums' origin yourself with a logged-in GitHub CLI,
+download `SHA256SUMS` from the selected release and run:
 
 ```sh
-gh attestation verify SHA256SUMS --repo Weeks-Consulting/code-server-aio --signer-workflow Weeks-Consulting/code-server-aio/.github/workflows/container.yaml
+gh attestation verify SHA256SUMS --repo Weeks-Consulting/code-server-aio --signer-workflow Weeks-Consulting/code-server-aio/.github/workflows/container.yaml --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
 ```
 
 Checksums downloaded from the same release verify file integrity; independent
-provenance verification also verifies the publishing repository and workflow.
+provenance verification also verifies the publishing repository, workflow, and release tag.
 The current installer requires deployment checksums and the current file layout;
 use an older release's own installer when deploying that release.
 

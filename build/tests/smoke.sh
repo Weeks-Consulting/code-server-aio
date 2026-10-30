@@ -125,6 +125,11 @@ docker exec "$name" /bin/bash -ec '
     # Restarting code-server replaces its stale socket without repeating setup.
     /usr/bin/supervisorctl restart code-server
     /usr/local/bin/container-healthcheck
+    # A running daemon whose API is unreachable must not report healthy.
+    mv /var/run/docker.sock /var/run/docker.sock.hidden
+    if /usr/local/bin/container-healthcheck; then exit 1; fi
+    mv /var/run/docker.sock.hidden /var/run/docker.sock
+    /usr/local/bin/container-healthcheck
     /usr/bin/supervisorctl stop dockerd
     if /usr/local/bin/container-healthcheck; then exit 1; fi
 '

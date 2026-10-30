@@ -67,9 +67,16 @@ if [ "$asset_os" = Darwin ] && $needs_runner; then
     temp_mount="$test_volume:$test_tmp"
 fi
 
+# act's schema predates GitHub's concurrency `queue: max` (May 2026) and rejects the
+# whole file. Only the publish job uses it, so act validates a copy without that key.
+# Remove once act accepts it: https://github.com/nektos/act/issues/6095
+workflow="$act_dir/container.yaml"
+grep -v -E '^[[:space:]]+queue:[[:space:]]+max[[:space:]]*$' \
+    "$project_dir/.github/workflows/container.yaml" > "$workflow"
+
 cd "$project_dir"
 "$act_dir/act" pull_request \
-    --workflows .github/workflows/container.yaml \
+    --workflows "$workflow" \
     --job test \
     --matrix "arch:$matrix_arch" \
     --container-architecture "linux/$matrix_arch" \
@@ -80,7 +87,6 @@ cd "$project_dir"
     --env "TMPDIR=$test_tmp" \
     --env "TEST_TMPDIR=$test_tmp" \
     --env "TEST_HOME_STORAGE=$home_storage" \
-    --env DOCKER_BUILD_RECORD_UPLOAD=false \
     -P "ubuntu-24.04=catthehacker/ubuntu:act-24.04@sha256:c58e2b364da03b0c804c7d660f2ecbedf2f221a382b9baa0b344b0144780ff43" \
     -P "ubuntu-24.04-arm=catthehacker/ubuntu:act-24.04@sha256:c58e2b364da03b0c804c7d660f2ecbedf2f221a382b9baa0b344b0144780ff43" \
     "$@"

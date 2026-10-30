@@ -29,10 +29,14 @@ class ActionsTests(unittest.TestCase):
                 tests.mkdir(parents=True)
                 script = tests / "actions.sh"
                 script.write_bytes((ROOT / "build/tests/actions.sh").read_bytes())
+                workflows = project / ".github/workflows"
+                workflows.mkdir(parents=True)
+                (workflows / "container.yaml").write_bytes((ROOT / ".github/workflows/container.yaml").read_bytes())
                 pins = json.loads((ROOT / "build/build-versions.json").read_text())
                 log = root / "arguments.json"
                 executable = (f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
-                              f"pathlib.Path({str(log)!r}).write_text(json.dumps(dict(args=sys.argv[1:], host=os.environ.get('DOCKER_HOST'))))\n").encode()
+                              "workflow = pathlib.Path(sys.argv[sys.argv.index('--workflows') + 1]).read_text()\n"
+                              f"pathlib.Path({str(log)!r}).write_text(json.dumps(dict(args=sys.argv[1:], host=os.environ.get('DOCKER_HOST'), workflow=workflow)))\n").encode()
                 archive = root / "act.tar.gz"
                 with tarfile.open(archive, "w:gz") as bundle:
                     info = tarfile.TarInfo("act")
@@ -75,6 +79,11 @@ class ActionsTests(unittest.TestCase):
                 else:
                     self.assertNotIn("--container-daemon-socket", args)
                 self.assertEqual(args[-1], "--list")
+                # act's schema lacks concurrency `queue`; only that line may be dropped.
+                original = (ROOT / ".github/workflows/container.yaml").read_text().splitlines(keepends=True)
+                self.assertEqual(recorded["workflow"],
+                                 "".join(line for line in original if line.strip() != "queue: max"))
+                self.assertNotEqual(recorded["workflow"], "".join(original))
                 self.assertIn("--rm", args)
                 self.assertEqual(args[args.index("--env-file") + 1], "/dev/null")
                 self.assertFalse(list(project.glob(".test-tmp.*")))
