@@ -124,7 +124,7 @@ Rebuild or pull the updated workspace image, and use `docker compose up -d --rem
 
 Envoy's native JWT filter checks signatures, issuer, audience, required expiration,
 and not-before timestamps with one second of clock tolerance; RBAC restricts the
-verified algorithm to RS256. Small inline Lua filters validate startup settings,
+verified algorithm to RS256. Small Lua filters validate startup settings,
 reject duplicate or missing JWT headers, and match the optional literal email and
 service-token allowlists against verified claims. Invalid settings prevent Envoy
 from starting. Cookies, bearer tokens, and query parameters are not accepted as
@@ -143,8 +143,11 @@ A newly introduced signing key may be rejected until the current cache expires.
 - **Connection unavailable:** Envoy is stopped or its environment configuration is missing/invalid. Check `docker compose logs code-server`.
 
 The 403 and 503 pages include troubleshooting steps; the 503 page retries every five
-seconds. Customize `local_reply_config` in `build/runtime/envoy.json.template`
-to change the error pages.
+seconds. Edit `build/runtime/envoy/pages/` to change the error pages, and
+`build/runtime/envoy/lua/` to change the request filters. These root-owned assets
+are copied into `/etc/envoy/` in the image. The template references the files
+directly; one local-reply mapper handles both internal 401 and 403 responses as
+the public 403 page.
 
 WebSocket tokens are checked when the connection opens. Idle streams close after
 one hour, and all streams have an absolute two-hour lifetime, independent of key

@@ -119,12 +119,15 @@ def integration(image):
         spec.loader.exec_module(launcher)
         config = launcher.render((root / 'build/runtime/envoy.json.template').read_text(), env)
         # Replace only the JWKS transport with the disposable local fixture.
-        cluster = config['static_resources']['clusters'][1]
+        cluster = next(item for item in config['static_resources']['clusters']
+                       if item['name'] == 'cloudflare_jwks')
         del cluster['transport_socket']
         address = cluster['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['socket_address']
         address.update(address='fixture', port_value=8088)
         manager = config['static_resources']['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
-        manager['http_filters'][2]['typed_config']['providers']['cloudflare']['remote_jwks']['http_uri']['uri'] = 'http://fixture:8088/certs'
+        jwt = next(item['typed_config'] for item in manager['http_filters']
+                   if item['name'] == 'envoy.filters.http.jwt_authn')
+        jwt['providers']['cloudflare']['remote_jwks']['http_uri']['uri'] = 'http://fixture:8088/certs'
         template = directory / 'envoy.json.template'
         template.write_text(json.dumps(config))
         override['services']['code-server']['volumes'] = [{'type': 'bind', 'source': str(template),

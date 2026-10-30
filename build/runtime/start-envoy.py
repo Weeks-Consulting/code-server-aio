@@ -1,6 +1,5 @@
 """Render JSON string values safely and replace the launcher with Envoy."""
 import json
-import copy
 import os
 import re
 import sys
@@ -24,16 +23,7 @@ def render(template, environment):
             return {key: substitute(item) for key, item in value.items()}
         return value
 
-    config = substitute(json.loads(template))
-    manager = config['static_resources']['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
-    mappers = manager['local_reply_config']['mappers']
-    # JWT failures use 401 internally; render the same public 403 page once.
-    status = lambda mapper: mapper['filter']['status_code_filter']['comparison']['value']['default_value']
-    if not any(status(mapper) == 401 for mapper in mappers):
-        denied = copy.deepcopy(next(mapper for mapper in mappers if status(mapper) == 403))
-        denied['filter']['status_code_filter']['comparison']['value']['default_value'] = 401
-        mappers.insert(0, denied)
-    return config
+    return substitute(json.loads(template))
 
 
 def validate(environment):

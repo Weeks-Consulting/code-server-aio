@@ -72,18 +72,29 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
         rendered = renderer.render(template, {'CF_ACCESS_TEAM_DOMAIN': domain, 'CF_ACCESS_AUD': 'a' * 64})
         rendered = json.loads(json.dumps(rendered))
         manager = lambda config: config['static_resources']['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
-        self.assertEqual(manager(rendered)['http_filters'][0], manager(raw)['http_filters'][0])
-        provider = manager(rendered)['http_filters'][2]['typed_config']['providers']['cloudflare']
+        lua = lambda config: [item for item in manager(config)['http_filters']
+                              if item['name'] == 'envoy.filters.http.lua']
+        self.assertEqual(lua(rendered), lua(raw))
+        provider = next(item for item in manager(rendered)['http_filters']
+                        if item['name'] == 'envoy.filters.http.jwt_authn')['typed_config']['providers']['cloudflare']
         self.assertEqual(provider['issuer'], 'https://' + domain)
         self.assertEqual(provider['audiences'], ['a' * 64])
-        self.assertEqual(renderer.render(template, {})['static_resources']['clusters'][1]
-                         ['transport_socket']['typed_config']['sni'], '')
+        jwks = next(item for item in renderer.render(template, {})['static_resources']['clusters']
+                    if item['name'] == 'cloudflare_jwks')
+        self.assertEqual(jwks['transport_socket']['typed_config']['sni'], '')
         self.assertEqual(rendered['admin']['address'],
                          {'pipe': {'path': '/run/envoy/admin.sock', 'mode': 0o600}})
         mappers = manager(rendered)['local_reply_config']['mappers']
-        self.assertEqual(mappers[0]['body'], mappers[1]['body'])
-        self.assertEqual([item['filter']['status_code_filter']['comparison']['value']['default_value']
-                          for item in mappers], [401, 403, 503])
+        self.assertEqual([item['status_code_filter']['comparison']['value']['default_value']
+                          for item in mappers[0]['filter']['or_filter']['filters']], [401, 403])
+        self.assertEqual(mappers[0]['status_code'], 403)
+        self.assertEqual(mappers[1]['status_code'], 503)
+        sources = [item['typed_config']['default_source_code']
+                   for item in manager(rendered)['http_filters']
+                   if item['name'] == 'envoy.filters.http.lua']
+        for source in sources + [item['body'] for item in mappers]:
+            asset = ROOT / 'build/runtime/envoy' / Path(source['filename']).relative_to('/etc/envoy')
+            self.assertTrue(asset.is_file(), asset)
         self.assertEqual(renderer.render(json.dumps(rendered),
                                         {'CF_ACCESS_TEAM_DOMAIN': domain, 'CF_ACCESS_AUD': 'a' * 64}), rendered)
 

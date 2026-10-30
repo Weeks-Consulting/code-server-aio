@@ -43,6 +43,7 @@ RUN groupadd --gid 10000 cloud-user && \
 
 RUN useradd --system --gid 10000 --no-create-home --shell /usr/sbin/nologin envoy && \
     install -d -o envoy -g 10000 -m 750 /run/envoy
+COPY build/runtime/envoy/ /etc/envoy/
 COPY build/runtime/envoy.json.template /etc/envoy/envoy.json.template
 COPY build/runtime/start-envoy.py /usr/local/lib/start-envoy.py
 

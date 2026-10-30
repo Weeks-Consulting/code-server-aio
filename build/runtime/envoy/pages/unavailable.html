@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Service is not ready</title>
+  <meta http-equiv="refresh" content="5">
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }
+    body { margin: 0; padding: 3rem 1.25rem; }
+    main { max-width: 42rem; margin: auto; }
+    h1 { line-height: 1.2; font-size: 2rem; }
+    h2 { font-size: 1.15rem; margin-top: 2rem; }
+    .status { font-size: .85rem; letter-spacing: .08em; }
+    code { font-size: .9em; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="status">503 &middot; SERVICE UNAVAILABLE</p>
+    <h1>Service is not ready</h1>
+    <p>The workspace is starting or temporarily unavailable. This page will retry automatically.</p>
+    <h2>If you are trying to sign in</h2>
+    <p>Please leave this page open. If the workspace remains unavailable, contact the administrator.</p>
+    <h2>If you administer this service</h2>
+    <p>code-server may be starting, restarting, or unavailable. Review <code>docker compose logs code-server</code> for backend errors.</p>
+  </main>
+</body>
+</html>

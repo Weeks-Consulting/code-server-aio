@@ -147,12 +147,15 @@ class AccessProxyTests(unittest.TestCase):
         config['admin']['address'] = {'socket_address': {'address': '127.0.0.1', 'port_value': 9901}}
         resources = config['static_resources']
         manager = resources['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
-        provider = manager['http_filters'][2]['typed_config']['providers']['cloudflare']
+        jwt = next(item['typed_config'] for item in manager['http_filters']
+                   if item['name'] == 'envoy.filters.http.jwt_authn')
+        provider = jwt['providers']['cloudflare']
         remote = provider['remote_jwks']
         remote['http_uri']['timeout'] = '0.2s'
         remote['cache_duration'] = '3s'
         remote['retry_policy'] = {'num_retries': 0}
-        backend, jwks = resources['clusters']
+        clusters = {item['name']: item for item in resources['clusters']}
+        backend, jwks = clusters['code_server'], clusters['cloudflare_jwks']
         backend['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['pipe']['path'] = str(self.socket_path)
         jwks['type'] = 'STATIC'
         address = jwks['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['socket_address']
@@ -276,9 +279,12 @@ class AccessProxyTests(unittest.TestCase):
 
     def test_unexpected_probe_response_is_logged(self):
         def change(config, manager, provider):
-            manager['http_filters'][0]['typed_config']['default_source_code']['inline_string'] = (
-                manager['http_filters'][0]['typed_config']['default_source_code']['inline_string']
-                .replace('[":status"] = "403"', '[":status"] = "503"'))
+            source = next(item['typed_config']['default_source_code']
+                          for item in manager['http_filters']
+                          if item['typed_config'].get('default_source_code', {}).get('filename')
+                          == '/etc/envoy/lua/assertion.lua')
+            source['inline_string'] = Path(source.pop('filename')).read_text().replace(
+                '[":status"] = "403"', '[":status"] = "503"')
         self.start(change=change, expect_ready=False)
         self.wait_status(None, 503)
         self.assertEqual(self.status(headers={'User-Agent': 'code-server-container-healthcheck',
@@ -379,7 +385,9 @@ class AccessProxyTests(unittest.TestCase):
 
     def test_jwks_tls_hostname_is_verified(self):
         def wrong_hostname(config, manager, provider):
-            context = config['static_resources']['clusters'][1]['transport_socket']['typed_config']
+            cluster = next(item for item in config['static_resources']['clusters']
+                           if item['name'] == 'cloudflare_jwks')
+            context = cluster['transport_socket']['typed_config']
             context['common_tls_context']['validation_context']['match_typed_subject_alt_names'][0]['matcher']['exact'] = 'wrong.example.com'
         self.start(change=wrong_hostname)
         self.assertEqual(self.status(self.token()), 403)
@@ -392,7 +400,9 @@ class AccessProxyTests(unittest.TestCase):
         self.assertEqual(headers['cache-control'], 'no-store')
         self.assertEqual(headers['content-type'], 'text/html; charset=utf-8')
         def unavailable(config, manager, provider):
-            config['static_resources']['clusters'][0]['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['pipe']['path'] = '/tmp/nonexistent-backend.sock'
+            cluster = next(item for item in config['static_resources']['clusters']
+                           if item['name'] == 'code_server')
+            cluster['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']['address']['pipe']['path'] = '/tmp/nonexistent-backend.sock'
         self.start(change=unavailable)
         status, headers, body = self.response(self.token())
         self.assertEqual(status, 503)
