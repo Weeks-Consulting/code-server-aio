@@ -6,7 +6,7 @@ image := "code-server-cloudflare:test"
 default:
     @just --list
 
-# Install host build/test dependencies with Homebrew or Debian apt.
+# Install host build/test dependencies with Homebrew, or list missing tools.
 install:
     ./build/tools/install-deps.sh
 
@@ -46,7 +46,7 @@ test-backup: build
     ./build/tests/backup-restore.sh {{quote(image)}}
     ./build/tests/backup-s3.sh {{quote(image)}}
 
-# Run the native-architecture GitHub Actions test job with temporary act.
+# Run the native-architecture GitHub Actions test job with installed act.
 actions:
     ./build/tests/actions.sh
 

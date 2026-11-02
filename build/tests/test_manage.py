@@ -159,29 +159,35 @@ class LauncherTests(unittest.TestCase):
         sources = ["compose.yaml", "compose.backup-common.yaml", "compose.backup.yaml",
                    "compose.backup-local.yaml", "manage", "manage.py", ".env.example",
                    "build/tools/restore-home.sh", "build/tools/backup-key.py"]
-        (self.root / "SHA256SUMS").write_text("".join(
-            hashlib.sha256((repository / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in sources))
+        import gzip
+        import io
+        import tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            for name in sources:
+                archive.add(repository / name, arcname=Path(name).name)
+        (self.root / "code-server-aio.tar.gz").write_bytes(gzip.compress(buffer.getvalue(), mtime=0))
+        (self.root / "SHA256SUMS").write_text(
+            hashlib.sha256((self.root / "code-server-aio.tar.gz").read_bytes()).hexdigest() + "  code-server-aio.tar.gz\n")
         # Model a regular user even when CI runs as root: root-only destination
         # checks reject the world-writable temp directory and are tested in test_install.
         (self.root / "sitecustomize.py").write_text(
             "import io, json, os, pathlib, urllib.request\n"
             "os.geteuid = lambda: 1000\n"
-            f"root, repository = pathlib.Path({str(self.root)!r}), pathlib.Path({str(repository)!r})\n"
+            f"root = pathlib.Path({str(self.root)!r})\n"
             "def respond(request, timeout):\n"
             "    assert 'Authorization' not in request.headers\n"
             "    url = request.full_url\n"
             "    if url == 'https://api.github.com/repos/example/fork/releases/latest':\n"
-            "        return io.BytesIO(json.dumps({'tag_name': 'v9.0.0-1', 'assets': [{'name': 'SHA256SUMS'}],\n"
+            "        return io.BytesIO(json.dumps({'tag_name': 'v9.0.0-1',\n"
+            "            'assets': [{'name': 'SHA256SUMS'}, {'name': 'code-server-aio.tar.gz'}],\n"
             "            'html_url': 'https://github.com/Example/Fork/releases/tag/v9.0.0-1'}).encode())\n"
-            "    if url == 'https://github.com/Example/Fork/releases/download/v9.0.0-1/SHA256SUMS':\n"
-            "        return io.BytesIO((root / 'SHA256SUMS').read_bytes())\n"
-            "    prefix = 'https://raw.githubusercontent.com/Example/Fork/refs/tags/v9.0.0-1/'\n"
+            "    prefix = 'https://github.com/Example/Fork/releases/download/v9.0.0-1/'\n"
             "    assert url.startswith(prefix), url\n"
-            "    return io.BytesIO((repository / url[len(prefix):]).read_bytes())\n"
+            "    return io.BytesIO((root / url[len(prefix):]).read_bytes())\n"
             "urllib.request.urlopen = respond\n")
         # No GitHub CLI or login; package managers must never run.
-        for name, body in {"gh": f"touch {str(self.root / 'gh-called')!r}; exit 99", "gpg": "exit 0",
-                           "dpkg-query": "printf 'install ok installed\\n'",
+        for name, body in {"gh": f"touch {str(self.root / 'gh-called')!r}; exit 99",
                            "apt-get": "exit 99", "brew": "exit 99", "sudo": "exit 99"}.items():
             (self.root / name).write_text("#!/bin/sh\n" + body + "\n")
             (self.root / name).chmod(0o755)

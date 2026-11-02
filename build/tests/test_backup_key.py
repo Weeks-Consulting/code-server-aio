@@ -145,29 +145,31 @@ class BackupKeyTests(unittest.TestCase):
         tools.mkdir()
         # Patch the Python HTTP boundary while exercising the real launcher.
         (tools / "sitecustomize.py").write_text(
-            "import hashlib, io, json, os, pathlib, platform, subprocess, urllib.request, urllib.error\n"
+            "import gzip, hashlib, io, os, pathlib, subprocess, tarfile, urllib.request, urllib.error\n"
             f"root = pathlib.Path({str(ROOT)!r})\n"
             f"tools = pathlib.Path({str(self.directory / 'bin')!r})\n"
+            "def bundle():\n"
+            "    buffer = io.BytesIO()\n"
+            "    with tarfile.open(fileobj=buffer, mode='w') as archive:\n"
+            "        for f in ('compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.py', 'build/tools/restore-home.sh'):\n"
+            "            archive.add(root / f, arcname=pathlib.Path(f).name)\n"
+            "    return gzip.compress(buffer.getvalue(), mtime=0)\n"
             "def response(request, timeout):\n"
             "    url = request.full_url\n"
             "    if url.endswith('/SHA256SUMS'):\n"
             "        if os.environ.get('NO_CHECKSUMS'): raise urllib.error.HTTPError(url, 404, 'missing', {}, None)\n"
-            "        files = ('compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml', '.env.example', 'manage', 'manage.py', 'build/tools/backup-key.py', 'build/tools/restore-home.sh')\n"
-            "        content = ''.join(hashlib.sha256((root / f).read_bytes()).hexdigest() + '  ' + f + '\\n' for f in files).encode()\n"
-            "        if os.environ.get('BAD_CHECKSUM'): content = content.replace(content[:64], b'0' * 64)\n"
-            "        return io.BytesIO(content)\n"
-            "    if url.endswith('/releases/latest'): return io.BytesIO(b'{\"tag_name\":\"v4.141.0-1\",\"assets\":[{\"name\":\"SHA256SUMS\"}]}')\n"
-            "    return io.BytesIO((root / url.split('/refs/tags/v4.141.0-1/', 1)[1]).read_bytes())\n"
+            "        digest = '0' * 64 if os.environ.get('BAD_CHECKSUM') else hashlib.sha256(bundle()).hexdigest()\n"
+            "        return io.BytesIO((digest + '  code-server-aio.tar.gz\\n').encode())\n"
+            "    if url.endswith('/releases/latest'): return io.BytesIO(b'{\"tag_name\":\"v4.141.0-1\",\"assets\":[{\"name\":\"SHA256SUMS\"},{\"name\":\"code-server-aio.tar.gz\"}]}')\n"
+            "    assert url.endswith('/releases/download/v4.141.0-1/code-server-aio.tar.gz'), url\n"
+            "    return io.BytesIO(bundle())\n"
             "urllib.request.urlopen = response\n"
-            "if (tools / 'uname').exists(): platform.system = lambda: subprocess.check_output([str(tools / 'uname')], text=True).strip()\n"
             "if (tools / 'id').exists(): os.geteuid = lambda: int(subprocess.check_output([str(tools / 'id')], text=True).strip())\n"
         )
         # Installation tests must never invoke a real package manager or daemon.
         for name, body in {
             "docker": "exit 0",
-            "gpg": "exit 0",
             "gh": "exit 0",
-            "dpkg-query": "printf 'install ok installed\\n'",
             "brew": "exit 99",
             "apt-get": "exit 99",
             "sudo": "exit 99",
@@ -181,7 +183,7 @@ class BackupKeyTests(unittest.TestCase):
         env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "PYTHONPATH": str(tools)}
         return command, env, deployment
 
-    def test_older_release_without_checksums_is_rejected(self):
+    def test_release_without_checksums_is_rejected(self):
         command, env, deployment = self.installer_fixture()
         result = subprocess.run(command, env={**env, "NO_CHECKSUMS": "1"}, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -301,46 +303,20 @@ class BackupKeyTests(unittest.TestCase):
         self.assertEqual(compose.read_text(), "original")
         self.assertEqual(sorted(p.name for p in deployment.iterdir()), [".env", "compose.yaml"])
 
-    def test_installer_installs_missing_compose(self):
+    def test_installer_reports_missing_compose_without_installing_packages(self):
         command, env, deployment = self.installer_fixture()
         tools = self.directory / "bin"
-        marker = self.directory / "compose-installed"
         log = self.directory / "packages"
-        for name, body in {
-            "docker": f'test -f "{marker}"',
-            "id": "echo 1000",
-            "sudo": 'exec "$@"',
-        }.items():
-            (tools / name).write_text("#!/bin/sh\n" + body + "\n")
-            (tools / name).chmod(0o755)
-        # Exercise Homebrew everywhere and Debian apt on Linux.
-        systems = ["Darwin"] + (["Linux"] if Path("/etc/debian_version").exists() else [])
-        for system in systems:
-            for ce in ([False, True] if system == "Linux" else [False]):
-                with self.subTest(system=system, docker_ce=ce):
-                    marker.unlink(missing_ok=True)
-                    log.unlink(missing_ok=True)
-                    (tools / "uname").write_text(f"#!/bin/sh\necho {system}\n")
-                    (tools / "uname").chmod(0o755)
-                    (tools / "dpkg-query").write_text(
-                        "#!/bin/sh\ncase \"$*\" in *docker-ce-cli*) " +
-                        ("printf 'install ok installed\\n'" if ce else "exit 1") +
-                        ";; *) printf 'install ok installed\\n';; esac\n")
-                    for manager in ("brew", "apt-get"):
-                        (tools / manager).write_text(
-                            f"#!{sys.executable}\nimport pathlib, sys\n"
-                            f"with pathlib.Path({str(log)!r}).open('a') as output: output.write(' '.join(sys.argv[1:]) + '\\n')\n"
-                            f"if sys.argv[1] == 'install': pathlib.Path({str(marker)!r}).touch()\n")
-                    preview = subprocess.run(command + ["--dry-run"], env=env, capture_output=True, text=True)
-                    self.assertEqual(preview.returncode, 0, preview.stderr)
-                    package = "docker-compose-plugin" if ce else "docker-compose"
-                    self.assertIn(package, preview.stdout)
-                    self.assertFalse(marker.exists())
-                    self.assertFalse(log.exists())
-                    result = subprocess.run(command, env=env, capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(package, log.read_text())
-                    self.assertTrue((deployment / ".env").exists())
+        (tools / "docker").write_text('#!/bin/sh\n[ "$1" != compose ]\n')
+        for manager in ("brew", "apt-get", "sudo"):
+            (tools / manager).write_text(f'#!/bin/sh\necho {manager} >> "{log}"\nexit 99\n')
+        for extra in ([], ["--dry-run"]):
+            with self.subTest(extra=extra):
+                result = subprocess.run(command + extra, env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Docker Compose is required", result.stderr)
+                self.assertFalse(log.exists())
+                self.assertFalse(deployment.exists())
 
     def test_installer_requires_python_before_dependency_setup(self):
         command, env, deployment = self.installer_fixture()

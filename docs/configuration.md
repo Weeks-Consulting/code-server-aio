@@ -19,12 +19,11 @@ allowlists below in addition to restricting the Access policy.
 3. Start the services:
 
    ```sh
-   sudo /opt/code-server/manage --pull
+   ~/code-server/manage --pull
    ```
 
-   This command assumes the default installation with `sudo`. If you installed
-   without `sudo`, run `/path/to/installation/manage --pull` as the same
-   user that installed it. From a checkout, use `./manage --pull`.
+   Run it as the user that installed the deployment, with `sudo` if you
+   installed with `sudo`. From a checkout, use `./manage --pull`.
 
 Find the AUD under **Zero Trust → Access controls → Applications → Configure →
 Additional settings**. Open your public hostname and sign in through Access.
@@ -79,7 +78,7 @@ archive filename prefix.
 | `BACKUP_NOTIFICATION_LEVEL` | Optional; `error`. | Use `error` for failures or `info` for all completed runs. |
 | `BACKUP_TIMEZONE` | Optional; `America/Chicago`. | Timezone used by the backup schedule. Use an IANA timezone such as `America/Chicago` or `Etc/UTC`. The schedule follows that timezone, including its daylight-saving changes. |
 | `BACKUP_CRON_EXPRESSION` | Optional; `0 3 * * *`. | Five-field cron schedule: minute, hour, day of month, month, day of week. The default runs daily at 03:00 in `BACKUP_TIMEZONE`. Quote the value in `.env`, for example `BACKUP_CRON_EXPRESSION="0 3 * * *"`. |
-| `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Host folder receiving `.tar.gz.gpg` archives. Relative paths resolve beside the Compose files, so the installer's default is `/opt/code-server/backups`. Use an absolute path such as `/mnt/backups/code-server` to select another location. Compose creates the folder if it does not exist and mounts it at `/archive` in the backup container. S3 settings are not passed to the local backup container. |
+| `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Host folder receiving `.tar.gz.gpg` archives. Relative paths resolve beside the Compose files, so the installer's default is `~/code-server/backups`. Use an absolute path such as `/mnt/backups/code-server` to select another location. Compose creates the folder if it does not exist and mounts it at `/archive` in the backup container. S3 settings are not passed to the local backup container. |
 | `BACKUP_AWS_S3_BUCKET_NAME` | Required for S3 backups; no default. | Name of an existing S3 or S3-compatible bucket. Supply the bucket name alone, without `s3://`, an endpoint, or an object prefix. |
 | `BACKUP_ID` | Optional; Compose project name. | Identifies this deployment in archive names and in the default S3 prefix. Set a unique value, such as `devbox-home`, when multiple hosts share a bucket. Archive names are `<BACKUP_ID>-home-<timestamp>.tar.gz.gpg`; an empty value uses the Compose project name. It does not change the container stop label, which remains scoped to the Compose project. |
 | `BACKUP_AWS_S3_PATH` | Optional; `<BACKUP_ID or Compose project name>/home`. | Object-key prefix inside the bucket, such as `development/devbox/home`. An explicit value overrides the prefix derived from `BACKUP_ID`; an empty value selects the default. This controls where archives are stored, not the bucket addressing style. |
@@ -90,7 +89,7 @@ archive filename prefix.
 
 Compose also accepts `COMPOSE_PROJECT_NAME`, although it is not listed in
 `.env.example`. By default, the project name comes from the deployment directory
-(`code-server` for `/opt/code-server`); `docker compose -p NAME` overrides it.
+(`code-server` for `~/code-server`); `docker compose -p NAME` overrides it.
 This name scopes Docker volumes, backup stop labels, and the default backup ID.
 Changing it selects a different set of named volumes, so keep it consistent for
 an existing deployment.

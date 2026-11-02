@@ -29,12 +29,39 @@ just actions         # Run the GitHub Actions test job locally
 just actions-list    # List workflow jobs without running them
 ```
 
-`just install` prepares a development machine using Homebrew on macOS or apt on
-Debian. It does not install or launch a deployment; use [Install](installation.md#install) for
+`just install` prepares a development machine using Homebrew on Linux or macOS.
+Without Homebrew, it lists missing dependencies and does not install packages. Docker must already
+be installed. Homebrew supplies `act` along with the other host tools.
+It does not install or launch a deployment; use [Install](installation.md#install) for
 published releases and [Deploy](deployment.md#deploy) to start services.
 
-Builds read the code-server version from the `packages.code-server.version` entry in `build/versions.json`. Building the
-local test image needs no `.env` or Cloudflare credentials.
+Builds use code-server and Envoy version and checksum build args whose defaults in
+`build/Dockerfile` are synchronized from `build/versions.json` by `just sync-pins`.
+The manifest is not mounted into the build, so unrelated service image pin updates
+preserve the package installation cache. Building the local test image needs no
+`.env` or Cloudflare credentials.
+
+For an experimental Docker build, override `CODE_SERVER_VERSION` or `ENVOY_VERSION`
+with `--build-arg` and supply the matching `CODE_SERVER_SHA256_AMD64`,
+`CODE_SERVER_SHA256_ARM64`, `ENVOY_SHA256_AMD64`, or `ENVOY_SHA256_ARM64` argument
+for each architecture being built. Downloads always require a matching checksum.
+For repository updates, change the manifest and run `just sync-pins` instead.
+
+Code-server and Envoy download in independent stages, so changing one package
+preserves the other's download cache. The runtime mounts those verified artifacts
+for installation; temporary downloads do not enter the final image layers. Local
+builds reuse BuildKit's cache. CI imports and exports an architecture-specific
+GitHub Actions cache with `mode=max`, which includes intermediate download stages.
+Publishing bypasses only the `runtime` stage cache, keeping Debian package upgrades
+fresh while reusing pinned downloads. To reproduce that behavior locally, run:
+
+```sh
+docker buildx build --load --pull --no-cache-filter runtime \
+  -f build/Dockerfile -t code-server-cloudflare:test .
+```
+
+APT cache mounts are not needed for this CI strategy: the GitHub Actions cache
+does not automatically preserve cache mounts between runners.
 
 To run the project locally, configure `.env` in the checkout (see
 [configuration](configuration.md#setup)), then run `just run`. It builds the
@@ -78,10 +105,9 @@ backup sidecar. It holds one backup at an archive hook and verifies that a secon
 manual invocation waits on the same lock, covering both manual/manual and
 scheduled/manual overlap. A stopped sidecar must reject a manual backup.
 
-`just actions` downloads the pinned, checksum-verified `act` into a temporary directory, runs the native amd64
-or arm64 test job as a pull request (without publishing), and removes the binary
-afterward. Docker images and caches remain. Supports Debian Linux and macOS on
-amd64/x86_64 and arm64. Initial tests need Internet access.
+`just actions` uses the installed `act` to run the native amd64
+or arm64 test job as a pull request (without publishing). Docker images and caches
+remain. Supports Linux and macOS on amd64/x86_64 and arm64. Initial tests need Internet access.
 The local runner mounts the repository and temporary test storage at paths
 also accessible to sibling Docker containers.
 On macOS, it uses the active Docker CLI endpoint for the host connection and
@@ -120,7 +146,7 @@ the version bundled with either host is sufficient.
 
 `build/versions.json` holds shipped image and deployment dependencies: code-server, Envoy, the Debian slim base, cloudflared, and the backup service image. `just version`, `just outdated`, and `just upgrade` inspect, check, and update this group.
 
-`build/build-versions.json` holds build/test tooling: act, GitHub Actions, the act runner image, and RustFS for backup tests. Use `just build-version`, `just build-outdated`, and `just build-upgrade` for this group. Debian CI and the restore helper share the shipped Debian slim base pin.
+`build/build-versions.json` holds build/test tooling: GitHub Actions, the act runner image, and RustFS for backup tests. Use `just build-version`, `just build-outdated`, and `just build-upgrade` for this group. Debian CI and the restore helper share the shipped Debian slim base pin.
 
 `just upgrade` requires Python 3 and Internet access. It prints current and latest upstream pins and asks `[y/N]` before changing files. Each upgrade command updates only its group, including package checksums for every supported architecture and image digests on their existing tag tracks. The build tooling command also updates GitHub Actions commit pins and version comments.
 Files are
@@ -135,12 +161,12 @@ The `build-` commands have the same output, confirmation, and offline behavior a
 
 Code-server packages are verified against `packages.code-server.sha256` in `build/versions.json`. When updating the `packages.code-server.version` entry in `build/versions.json`, update both architecture checksums from the upstream release metadata.
 
-`just build`, `just run`, and the CI checks require image digests and Action SHAs
+`just build`, `just run`, and the CI checks require package build-arg defaults, image digests, and Action SHAs
 to match the manifests, even if a pin has been removed. The check includes the
 smoke test and discovers workflows, Dockerfiles, Compose files, and shell scripts
 under `build/`. Downloaded packages require checksums for every supported asset.
 The workspace release tag and locally built image remain mutable by design.
 Use `just sync-pins` to restore literal references from the manifests.
 
-Actions and service images are pinned to immutable revisions; update those pins deliberately and run the integration suite. The temporary act download is pinned and checked against `packages.act.sha256` in `build/build-versions.json`.
+Actions and service images are pinned to immutable revisions; update those pins deliberately and run the integration suite. Host tools, including `act`, are managed by Homebrew.
 

@@ -8,14 +8,15 @@ GitHub releases. Published releases and weekly scheduled builds upload images;
 regular commits and manual runs run tests only by default. To publish an urgent
 rebuild, use **Actions → Build and publish container → Run workflow** and enable
 **Rebuild and publish the latest stable release**. This uses the latest stable
-release source, bypasses the build cache, and applies the same tests and latest-release
+release source, bypasses the runtime stage's build cache, and applies the same tests and latest-release
 checks as the weekly rebuild. Every Monday at 08:17 UTC
 (03:17 in Chicago during daylight saving time, 02:17 during standard time), the
 scheduled build looks up the latest stable GitHub release tag and starts a manual
 rebuild run on that tag. A rebuild requested from a branch is redirected the same way.
 The rebuild therefore uses the tag's workflow and files, and its image provenance
 records the tag. It uses the pinned
-Debian base image and refreshes its packages, and bypasses cached package layers. It republishes
+Debian base image and refreshes its packages. Checksum-verified code-server and Envoy
+download stages remain cacheable. It republishes
 that release's version tag and `latest` only after both architectures pass all tests.
 The build fails without publishing if no stable release exists or its tag is invalid.
 If the latest release changes during testing, the older release receives only its
@@ -24,7 +25,8 @@ service recovery, and a local backup/restore round trip.
 
 To publish, update the `packages.code-server.version` entry in `build/versions.json` (for example, `4.141.0`) and publish
 a GitHub release with the matching tag, such as `v4.141.0`. CI, `just build`, and
-Compose builds all read this file. CI rejects invalid versions
+Compose builds use Dockerfile build-arg defaults synchronized from this file with
+`just sync-pins`. CI rejects invalid versions
 and mismatched release tags before building. Manually triggered runs on tags
 also require a matching version. Pushing a tag alone does not publish.
 

@@ -37,22 +37,15 @@ gh attestation verify SHA256SUMS --repo Weeks-Consulting/code-server-aio --signe
 
 Checksums downloaded from the same release verify file integrity; independent
 provenance verification also verifies the publishing repository, workflow, and release tag.
-The current installer requires deployment checksums and the current file layout;
-use an older release's own installer when deploying that release.
 
-### Pin and environment migration
+### Dependency pins
 
 `build/versions.json` and `build/build-versions.json` are the sources of truth for shipped
 dependencies and build/test tooling respectively. Docker and Actions require literal image
 and action references in their configuration: after editing the manifest, run
 `just sync-pins` to update those references. `just check` rejects drift, and
 `just upgrade` and `just build-upgrade` update their respective manifest and references together. Local builds use the
-manifest directly; the former `CODE_SERVER_VERSION` build override has been removed.
+manifest directly.
 
-For existing deployments, rename `.env` keys before using the updated Compose files:
-`CLOUDFLARE_TUNNEL_TOKEN` → `CF_TUNNEL_TOKEN`, `GPG_PASSPHRASE` →
-`BACKUP_GPG_PASSPHRASE`, every `AWS_*` key → `BACKUP_AWS_*`, and
-`LOCAL_BACKUP_UID/GID` → `BACKUP_LOCAL_UID/GID`. Preserve the existing encryption
-key value so older backups remain recoverable. Remove `HOMEBREW_INSTALL_TIMEOUT`.
 Compose translates the public backup names into the backup image's required
 `GPG_PASSPHRASE`, `AWS_*`, and `TZ` variables and the tunnel token into `TUNNEL_TOKEN`.

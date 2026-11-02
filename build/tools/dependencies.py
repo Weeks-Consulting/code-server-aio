@@ -169,8 +169,6 @@ def load_pins(root, scope=None):
         assets = {
             'code-server': {f'code-server_{version}_{arch}.deb' for arch in ('amd64', 'arm64')},
             'envoy': {f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')},
-            'act': {f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
-                    for arch in ('arm64', 'x86_64')},
         }
         if name not in assets or set(package['sha256']) != assets[name]:
             raise ValueError(f'{name}: checksums are required for every supported package asset')
@@ -227,6 +225,7 @@ def references(root, pins):
             return f'{key}@sha256:{pins["images"][key]}'
 
         lines = []
+        stages = set()
         for line in original.splitlines(keepends=True):
             # The shipped workspace image is this project's mutable output;
             # compose.build.yaml uses the image built from the local checkout.
@@ -239,6 +238,14 @@ def references(root, pins):
                 continue
             # Bare image names in Docker/Compose still require a tag and digest.
             declaration = re.match(r'\s*(?:FROM|image:|container:|container-image:)\s+([^\s]+)', line)
+            stage = re.match(r'\s*FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$', line)
+            if stage:
+                inherited = stage[1] in stages
+                if stage[2]:
+                    stages.add(stage[2])
+                if inherited:
+                    lines.append(line)
+                    continue
             # The host matrix's Debian literal is checked separately below;
             # its macOS entry intentionally has no container.
             if (declaration and line.strip() != 'container: ${{ matrix.container-image }}'
@@ -250,6 +257,20 @@ def references(root, pins):
                     raise ValueError(f'{file}: image {repo} requires a manifest tag and digest')
             lines.append(IMAGE.sub(image, line))
         content = ''.join(lines)
+        if file == 'build/Dockerfile':
+            for name, prefix in (('code-server', 'CODE_SERVER'), ('envoy', 'ENVOY')):
+                package = pins['packages'][name]
+                version = package['version']
+                arguments = {prefix + '_VERSION': version}
+                for arch, envoy_arch in (('amd64', 'x86_64'), ('arm64', 'aarch_64')):
+                    asset = (f'code-server_{version}_{arch}.deb' if name == 'code-server'
+                             else f'envoy-{version}-linux-{envoy_arch}')
+                    arguments[prefix + '_SHA256_' + arch.upper()] = package['sha256'][asset]
+                for argument, value in arguments.items():
+                    content, count = re.subn(r'(?m)^ARG ' + argument + r'(?:=[^\n]*)?$',
+                                             f'ARG {argument}={value}', content)
+                    if count != 1:
+                        raise ValueError(f'{file}: expected one ARG {argument} declaration')
         if file.startswith('.github/workflows/'):
             def action(match):
                 reference = match['reference']
@@ -271,7 +292,7 @@ def plan(root, prepare=True, scope=None):
     pins = load_pins(root, scope)
     changed = False
     for label, repo in (('code-server', 'coder/code-server'),
-                        ('envoy', 'envoyproxy/envoy'), ('act', 'nektos/act')):
+                        ('envoy', 'envoyproxy/envoy')):
         if label not in pins['packages']:
             continue
         release = github(repo, 'releases/latest')
@@ -281,10 +302,7 @@ def plan(root, prepare=True, scope=None):
             pins['packages'][label]['version'] = version
             names = ([f'code-server_{version}_{arch}.deb' for arch in ('amd64', 'arm64')]
                      if label == 'code-server' else
-                     [f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')]
-                     if label == 'envoy' else
-                     [f'act_{system}_{arch}.tar.gz' for system in ('Linux', 'Darwin')
-                      for arch in ('arm64', 'x86_64')])
+                     [f'envoy-{version}-linux-{arch}' for arch in ('aarch_64', 'x86_64')])
             if prepare:
                 pins['packages'][label]['sha256'] = {
                     line.split()[1]: line.split()[0]
@@ -304,6 +322,9 @@ def plan(root, prepare=True, scope=None):
     latest = inventory(root, pins)
     combined = load_pins(root)
     for section in pins:
+        # Version-only lookups have not fetched the new package checksums yet.
+        if section == 'packages' and not prepare:
+            continue
         combined[section].update(pins[section])
     edits = references(root, combined)
     if changed:

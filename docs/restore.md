@@ -46,9 +46,8 @@ Inspect and remove that specific directory before restarting after an interrupte
    sh manage restore --archive /absolute/path/to/backup.tar.gz.gpg --volume code-server_code-server-home
    ```
 
-   For the default installation with `sudo`, use
-   `sudo sh /opt/code-server/manage restore ...`. Otherwise, run as the user
-   that installed the deployment. The standalone helper accepts the same archive
+   Run as the user that installed the deployment, with `sudo` if you installed
+   with `sudo`. The standalone helper accepts the same archive
    and volume as positional arguments: `sh build/tools/restore-home.sh ARCHIVE VOLUME`
    (installed deployments have `restore-home.sh` beside `manage`). For encrypted
    archives, the standalone helper requires an exported `BACKUP_GPG_PASSPHRASE`; it does

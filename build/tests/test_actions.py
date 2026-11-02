@@ -1,13 +1,10 @@
 """Check the local workflow wrapper without downloads or Docker containers."""
 
-import hashlib
-import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 
@@ -16,11 +13,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class ActionsTests(unittest.TestCase):
     def test_native_runner_and_dependency_mappings(self):
-        for system, machine, arch, asset in (
-            ("Darwin", "arm64", "arm64", "arm64"),
-            ("Darwin", "x86_64", "amd64", "x86_64"),
-            ("Linux", "aarch64", "arm64", "arm64"),
-            ("Linux", "x86_64", "amd64", "x86_64"),
+        for system, machine, arch in (
+            ("Darwin", "arm64", "arm64"),
+            ("Darwin", "x86_64", "amd64"),
+            ("Linux", "aarch64", "arm64"),
+            ("Linux", "x86_64", "amd64"),
         ):
             with self.subTest(system=system, machine=machine), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -32,21 +29,13 @@ class ActionsTests(unittest.TestCase):
                 workflows = project / ".github/workflows"
                 workflows.mkdir(parents=True)
                 (workflows / "container.yaml").write_bytes((ROOT / ".github/workflows/container.yaml").read_bytes())
-                pins = json.loads((ROOT / "build/build-versions.json").read_text())
                 log = root / "arguments.json"
                 executable = (f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
                               "workflow = pathlib.Path(sys.argv[sys.argv.index('--workflows') + 1]).read_text()\n"
                               f"pathlib.Path({str(log)!r}).write_text(json.dumps(dict(args=sys.argv[1:], host=os.environ.get('DOCKER_HOST'), workflow=workflow)))\n").encode()
-                archive = root / "act.tar.gz"
-                with tarfile.open(archive, "w:gz") as bundle:
-                    info = tarfile.TarInfo("act")
-                    info.mode, info.size = 0o755, len(executable)
-                    bundle.addfile(info, io.BytesIO(executable))
-                digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-                pins["packages"]["act"]["sha256"] = {f"act_{system}_{asset}.tar.gz": digest}
-                (project / "build/build-versions.json").write_text(json.dumps(pins))
                 tools = root / "bin"
                 tools.mkdir()
+                (tools / "act").write_bytes(executable)
                 (tools / "uname").write_text(f'#!/bin/sh\ncase "$1" in -s) echo {system};; -m) echo {machine};; esac\n')
                 docker_log = root / "docker-calls.jsonl"
                 (tools / "docker").write_text(
@@ -55,9 +44,6 @@ class ActionsTests(unittest.TestCase):
                     "if sys.argv[1:3] == ['context', 'inspect']: print('unix:///example/docker.sock')\n"
                     "elif sys.argv[1:3] == ['volume', 'inspect']: print('/var/lib/docker/volumes/test-volume/_data')\n"
                     "elif sys.argv[1:3] not in (['volume', 'create'], ['volume', 'rm']): sys.exit(1)\n")
-                (tools / "curl").write_text(
-                    f"#!{sys.executable}\nimport shutil, sys\n"
-                    f"shutil.copyfile({str(archive)!r}, sys.argv[sys.argv.index('--output') + 1])\n")
                 for tool in tools.iterdir():
                     tool.chmod(0o755)
                 env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}

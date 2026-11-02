@@ -15,23 +15,12 @@ trap 'rm -rf "$staging"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 \
-    https://api.github.com/repos/Weeks-Consulting/code-server-aio/releases/latest \
-    --output "$staging/release.json"
-version=$(python3 -c '
-import json, re, sys
-release = json.load(open(sys.argv[1]))
-tag = release["tag_name"]
-if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[1-9]\d*)?", tag):
-    sys.exit("Invalid stable release tag: " + tag)
-# Installer assets upload only after the release images are tested and published.
-if not {"manage.py", "SHA256SUMS"} <= {asset.get("name") for asset in release.get("assets", [])}:
-    sys.exit("Release " + tag + " is still publishing; try again later.")
-print(tag)' "$staging/release.json")
+# Fetch only the installer; manage.py selects the release and verifies its bundle.
+release=https://github.com/Weeks-Consulting/code-server-aio/releases/latest/download
 for name in manage.py SHA256SUMS; do
     curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location --retry 3 \
-        "https://github.com/Weeks-Consulting/code-server-aio/releases/download/$version/$name" \
-        --output "$staging/$name"
+        "$release/$name" --output "$staging/$name" ||
+        { echo 'Latest release files are unavailable; if a release was just published, retry after it finishes.' >&2; exit 1; }
 done
 # Check manage.py against the release's checksums before executing it.
 python3 - "$staging" <<'PY'
@@ -44,10 +33,4 @@ checksums = dict((name, digest) for digest, name in
 if checksums.get('manage.py') != hashlib.sha256((root / 'manage.py').read_bytes()).hexdigest():
     sys.exit('Bootstrap manage.py checksum missing or incorrect')
 PY
-# Install the release verified above unless the caller selects a release or repository.
-select_release=true
-for argument do
-    case "$argument" in --version|--version=*|--repository|--repository=*) select_release=false ;; esac
-done
-if $select_release; then set -- --version "$version" "$@"; fi
 python3 "$staging/manage.py" install "$@"

@@ -9,18 +9,15 @@ The entire project has also been reviewed and tested by a real person.
 
 ## Quick start
 
-Requires Docker with Compose and Python 3; no GitHub account or GitHub CLI is
-needed. The installer can install missing host
-dependencies on Debian or macOS; see the [installation guide](docs/installation.md)
-for host setup, installing without a checkout, and release selection.
-
-From a checkout:
+Requires Docker with Compose, Python 3, and curl; no GitHub account or GitHub CLI
+is needed. See the [installation guide](docs/installation.md) for options and
+release selection.
 
 ```sh
-./manage install --directory "$HOME/code-server"
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sh
 ```
 
-Edit `$HOME/code-server/.env` and set `CF_TUNNEL_TOKEN`,
+Edit `~/code-server/.env` and set `CF_TUNNEL_TOKEN`,
 `CF_ACCESS_TEAM_DOMAIN` (your `team.cloudflareaccess.com` hostname), and
 `CF_ACCESS_AUD` (the application's 64-character audience tag).
 Configure the tunnel origin as `http://code-server:8080` and protect its public
@@ -28,7 +25,7 @@ hostname with a Cloudflare Access application and a policy for trusted users.
 Then start the deployment:
 
 ```sh
-"$HOME/code-server/manage" --pull
+~/code-server/manage --pull
 ```
 
 Anyone granted access effectively has root access to the Docker host. Use a
@@ -55,7 +52,7 @@ reads the configuration beside itself. If installed with `sudo`, run it with
 | `./manage --backup s3 --pull` | Start with S3 or R2 backups. |
 | `./manage stop` | Remove project containers and networks; keep volumes. |
 | `./manage upgrade` | Install the latest release's files and image; then start with `--pull` and your usual options. |
-| `./manage install --directory PATH` | Install or refresh deployment files. |
+| `./manage install` | Install or refresh deployment files. |
 | `./manage backup --backup local` | Run a backup now; use `s3` for S3 backups. |
 | `./manage backups --backup local` | List local archives. |
 | `./manage restore --archive FILE --volume NAME` | Restore an archive into an explicit existing home volume. |
@@ -83,4 +80,4 @@ See the [development guide](docs/development.md) for requirements and dependency
 | [Restore](docs/restore.md) | Recovery and rollback. |
 | [Development](docs/development.md) | Builds, tests, local Actions runs, and dependency pins. |
 | [Publishing](docs/publishing.md) | CI, release tags, and weekly rebuilds. |
-| [Verification](docs/verification.md) | Image and checksum provenance, digest pins, and environment migration. |
+| [Verification](docs/verification.md) | Image and checksum provenance, and digest pins. |

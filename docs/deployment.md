@@ -7,9 +7,9 @@ then start the deployment with `manage --pull` as described below.
 
 ### Launch options
 
-Run `./manage` from a checkout, or `sudo /opt/code-server/manage` for
-the default installation with `sudo`. For an installation without `sudo`, run
-`/path/to/installation/manage` as the same user that installed it.
+Run `./manage` from a checkout, or `~/code-server/manage` for the default
+installation. Run it as the same user that installed the deployment, with
+`sudo` if you installed with `sudo` (`sudo /opt/code-server/manage`).
 Keep `manage` in the same directory as `compose.yaml`.
 The launcher always uses `.env` and Compose files beside itself, regardless of
 your current working directory. It starts services in the background by default
@@ -19,7 +19,7 @@ and installer refreshes preserve previous files as `*.bak`. Build files and sour
 code stay in the checkout.
 
 ```sh
-sudo /opt/code-server/manage --backup local --pull
+~/code-server/manage --backup local --pull
 ./manage --foreground
 /another/deployment/manage --project-name my-workspace
 ```
@@ -37,12 +37,11 @@ options when applying updates so the same services and project are selected.
 
 ### Upgrade to the latest release
 
-Run `sudo /opt/code-server/manage upgrade` to install the latest stable GitHub
-release, then run `sudo /opt/code-server/manage --pull` with your usual launch
-options to apply it. Omit `sudo` for installations owned by your user. No GitHub
+Run `manage upgrade` to install the latest stable GitHub release, then run
+`manage --pull` with your usual launch options to apply it. No GitHub
 account is needed. The upgrade uses the GitHub owner/repository from the configured
 GHCR image and installs that release the same way as `manage install --version`:
-it checks every file against the release's `SHA256SUMS`, refreshes the Compose files
+it checks the release bundle against the release's `SHA256SUMS`, refreshes the Compose files
 and helpers (saving `.bak` copies), appends new `.env` settings, and sets
 `CODE_SERVER_IMAGE` to the release tag. Unlike an installer refresh, it replaces an
 existing image digest pin. Updating the files with the image keeps a new image from

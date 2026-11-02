@@ -1,12 +1,16 @@
 """Exercise installation without network access, packages, or containers."""
+import gzip
 import hashlib
 import http.client
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -17,6 +21,19 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('management', ROOT / 'manage.py')
 management = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(management)
+RELEASE_FILES = ['compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
+                 'manage', 'manage.py', '.env.example', 'build/tools/restore-home.sh', 'build/tools/backup-key.py']
+
+
+def bundle(files):
+    """Build a release bundle with stable bytes so its checksum can be computed separately."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w') as archive:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return gzip.compress(buffer.getvalue(), mtime=0)
 
 
 class InstallationTests(unittest.TestCase):
@@ -52,14 +69,10 @@ class InstallationTests(unittest.TestCase):
         self.directory = Path(self.temp.name) / 'deployment with spaces'
         self.args = management.parser().parse_args([
             'install', '--directory', str(self.directory), '--version', 'v1.2.3'])
-        self.files = {name: (ROOT / name).read_bytes() for name in
-                      ['compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml', 'compose.backup-local.yaml',
-                       'manage', 'manage.py', '.env.example',
-                       'build/tools/restore-home.sh', 'build/tools/backup-key.py']}
-        self.checksums = lambda: ''.join(
-            hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
-            for name, data in self.files.items()).encode()
-        self.release = {'tag_name': 'v1.2.3', 'assets': [{'name': 'SHA256SUMS'}]}
+        self.files = {Path(name).name: (ROOT / name).read_bytes() for name in RELEASE_FILES}
+        self.checksums = lambda: (hashlib.sha256(bundle(self.files)).hexdigest() + '  ' + management.BUNDLE + '\n').encode()
+        self.assets = [{'name': 'SHA256SUMS'}, {'name': management.BUNDLE}]
+        self.release = {'tag_name': 'v1.2.3', 'assets': self.assets}
         self.downloads = []
         def fetch(url):
             self.downloads.append(url)
@@ -67,7 +80,9 @@ class InstallationTests(unittest.TestCase):
                 return self.checksums()
             if url.endswith('/releases/latest'):
                 return json.dumps(self.release).encode()
-            return self.files[url.split('/refs/tags/', 1)[1].split('/', 1)[1]]
+            if url.endswith('/' + management.BUNDLE):
+                return bundle(self.files)
+            raise AssertionError('unexpected download: ' + url)
         self.fetch = fetch
         for mock in (patch.object(management, 'dependencies'),
                      patch.object(management.os, 'geteuid', return_value=1000),
@@ -135,7 +150,7 @@ class InstallationTests(unittest.TestCase):
         self.directory.mkdir()
         env = self.directory / '.env'
         env.write_text('SECRET=original\n')
-        for missing in ('compose.backup-common.yaml', 'manage.py', 'restore-home.sh', 'SHA256SUMS'):
+        for missing in (management.BUNDLE, 'SHA256SUMS'):
             with self.subTest(missing=missing):
                 def fetch(url):
                     if url.endswith('/' + missing):
@@ -146,6 +161,14 @@ class InstallationTests(unittest.TestCase):
                         management.install(self.args)
                 self.assertEqual(env.read_text(), 'SECRET=original\n')
                 self.assertEqual(list(self.directory.iterdir()), [env])
+        files = self.files
+        for missing in ('compose.backup-common.yaml', 'manage.py', 'restore-home.sh', '.env.example'):
+            with self.subTest(member=missing):
+                self.files = {name: data for name, data in files.items() if name != missing}
+                with self.assertRaisesRegex(ValueError, 'bundle lacks required deployment files: ' + re.escape(missing)):
+                    management.install(self.args)
+                self.assertEqual(list(self.directory.iterdir()), [env])
+        self.files = files
 
     def test_unfinished_latest_release_is_reported_as_publishing(self):
         self.args.version = None
@@ -157,6 +180,18 @@ class InstallationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Release v1.2.3 is still publishing'):
                 management.install(self.args)
         self.assertFalse(self.directory.exists())
+
+    def test_default_directory_depends_on_user(self):
+        self.args.directory = None
+        self.args.dry_run = True
+        home = Path(self.temp.name) / 'home'
+        for uid, expected in ((1000, home / 'code-server'), (0, Path('/opt/code-server'))):
+            with self.subTest(uid=uid), patch.dict(os.environ, HOME=str(home)), \
+                    patch.object(management.os, 'geteuid', return_value=uid), \
+                    patch.object(management, 'validate_destination'), \
+                    patch('builtins.print') as output:
+                management.install(self.args)
+            self.assertIn(f'{expected}/compose.yaml', str(output.call_args_list))
 
     def test_dry_run_has_no_downloads_or_filesystem_changes(self):
         self.args.dry_run = True
@@ -201,7 +236,7 @@ class InstallationTests(unittest.TestCase):
             'CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:1.2.3', 'CODE_SERVER_IMAGE=' + image)
             + 'SECRET=$(never-execute)\n')
         (self.directory / 'compose.yaml').write_text('# stale release\n')
-        self.release = {'tag_name': 'v1.3.0', 'assets': [{'name': 'SHA256SUMS'}],
+        self.release = {'tag_name': 'v1.3.0', 'assets': self.assets,
                         'html_url': 'https://github.com/Example/Fork/releases/tag/v1.3.0'}
         self.downloads.clear()
         return env
@@ -223,8 +258,9 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual((self.directory / 'compose.yaml.bak').read_text(), '# stale release\n')
         # GHCR's lowercase name maps back to GitHub's spelling for release downloads.
         self.assertEqual(self.downloads[0], 'https://api.github.com/repos/example/fork/releases/latest')
-        self.assertIn('https://raw.githubusercontent.com/Example/Fork/refs/tags/v1.3.0/compose.yaml', self.downloads)
-        self.assertIn('https://github.com/Example/Fork/releases/download/v1.3.0/SHA256SUMS', self.downloads)
+        self.assertEqual(self.downloads[1:], [
+            'https://github.com/Example/Fork/releases/download/v1.3.0/' + management.BUNDLE,
+            'https://github.com/Example/Fork/releases/download/v1.3.0/SHA256SUMS'])
 
     def test_upgrade_failures_leave_deployment_unchanged(self):
         self.install_release('ghcr.io/example/fork:1.2.3')
@@ -233,11 +269,11 @@ class InstallationTests(unittest.TestCase):
             raise OSError('offline')
         cases = (
             ('offline', {'download': offline}),
-            ('invalid tag', {'release': {'tag_name': 'invalid', 'assets': [{'name': 'SHA256SUMS'}]}}),
-            ('publishing', {'release': {'tag_name': 'v1.3.0', 'assets': []}}),
+            ('invalid tag', {'release': {'tag_name': 'invalid', 'assets': self.assets}}),
+            ('publishing', {'release': {'tag_name': 'v1.3.0', 'assets': [{'name': 'SHA256SUMS'}]}}),
             ('other repository', {'release': {**self.release,
                                               'html_url': 'https://github.com/other/repo/releases/tag/v1.3.0'}}),
-            ('checksum mismatch', {'checksums': b'0' * 64 + b'  compose.yaml\n'}),
+            ('checksum mismatch', {'checksums': b'0' * 64 + b'  ' + management.BUNDLE.encode() + b'\n'}),
             ('custom registry', {'image': 'example/custom:fixed'}),
         )
         for label, case in cases:
@@ -334,42 +370,18 @@ class DownloadTests(unittest.TestCase):
 
 
 class DependencyTests(unittest.TestCase):
-    def test_debian_dry_run_reports_packages_without_installing(self):
-        import contextlib
-        import io
-        import subprocess
-        def run(command, **kwargs):
-            if command[:2] == ['dpkg-query', '-W']:
-                return subprocess.CompletedProcess(command, 0, 'install ok installed', '')
-            return subprocess.CompletedProcess(command, 1)
-        output = io.StringIO()
-        with patch.object(management.platform, 'system', return_value='Linux'), \
-                patch.object(management.Path, 'is_file', return_value=True), \
-                patch.object(management.shutil, 'which', side_effect=lambda name: None if name == 'gpg' else name), \
-                patch.object(management.os, 'geteuid', return_value=1000), \
-                patch.object(management.subprocess, 'run', side_effect=run) as commands, \
-                contextlib.redirect_stdout(output):
-            management.dependencies(True)
-        self.assertIn('Would run: sudo apt-get update', output.getvalue())
-        self.assertIn('sudo apt-get install -y gnupg docker-compose-plugin', output.getvalue())
-        self.assertFalse(any('apt-get' in call.args[0] for call in commands.call_args_list))
+    def test_missing_compose_fails_without_installing_packages(self):
+        with patch.object(management.shutil, 'which', side_effect=lambda name: name), \
+                patch.object(management.subprocess, 'run',
+                             return_value=subprocess.CompletedProcess([], 1)) as commands:
+            with self.assertRaisesRegex(ValueError, 'Docker Compose is required'):
+                management.dependencies()
+        self.assertEqual([call.args[0] for call in commands.call_args_list], [['docker', 'compose', 'version']])
 
-    def test_macos_registers_homebrew_compose_plugin(self):
-        import subprocess
-        with tempfile.TemporaryDirectory() as directory:
-            with patch.dict(management.os.environ, DOCKER_CONFIG=directory), \
-                    patch.object(management.platform, 'system', return_value='Darwin'), \
-                    patch.object(management.shutil, 'which', side_effect=lambda name: name), \
-                    patch.object(management.os, 'geteuid', return_value=1000), \
-                    patch.object(management.subprocess, 'run', side_effect=[
-                        subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0),
-                        subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)]) as commands, \
-                    patch.object(management.subprocess, 'check_output', return_value='/opt/homebrew\n'):
-                management.dependencies(False)
-            target = Path(directory) / 'cli-plugins/docker-compose'
-            self.assertTrue(target.is_symlink())
-            self.assertEqual(str(target.readlink()), '/opt/homebrew/lib/docker/cli-plugins/docker-compose')
-            self.assertIn(['brew', 'install', 'docker-compose'], [call.args[0] for call in commands.call_args_list])
+    def test_missing_docker_fails(self):
+        with patch.object(management.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'working Docker installation'):
+                management.dependencies()
 
 
 class BootstrapTests(unittest.TestCase):
@@ -388,10 +400,10 @@ class BootstrapTests(unittest.TestCase):
                 f'#!{sys.executable}\nimport os, pathlib, sys\n'
                 'args = sys.argv[1:]\n'
                 'url = args[args.index("--output") - 1]\n'
+                'base = "https://github.com/Weeks-Consulting/code-server-aio/releases/latest/download/"\n'
+                'if os.environ.get("PUBLISHING") or not url.startswith(base): sys.exit(22)\n'
                 f'payload = {payload!r}\nmanifest = {manifest!r}\n'
-                'data = (b\'{"tag_name":"v1.2.3","assets":[{"name":"manage.py"},{"name":"SHA256SUMS"}]}\' '
-                'if not os.environ.get("PUBLISHING") else b\'{"tag_name":"v1.2.3","assets":[]}\') if url.endswith("/releases/latest") else '
-                'manifest.encode() if url.endswith("/SHA256SUMS") else payload + (b"# tampered" if os.environ.get("TAMPER") else b"")\n'
+                'data = manifest.encode() if url.endswith("/SHA256SUMS") else payload + (b"# tampered" if os.environ.get("TAMPER") else b"")\n'
                 'pathlib.Path(args[args.index("--output") + 1]).write_bytes(data)\n')
             # The bootstrap must never need the GitHub CLI or a GitHub login.
             gh = tools / 'gh'
@@ -408,8 +420,8 @@ class BootstrapTests(unittest.TestCase):
                 result = subprocess.run(['sh', '-s', '--'], input=script.read_text(), cwd=caller, env={**env, **overrides}, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
                 self.assertEqual((root / 'executed').exists(), succeeds)
-            # The bootstrap installs the release it verified unless the caller selects one.
-            self.assertEqual((root / 'executed').read_text(), 'install --version v1.2.3')
+            # The verified installer receives the caller's options unchanged and selects the release.
+            self.assertEqual((root / 'executed').read_text(), 'install')
             (root / 'executed').unlink()
             result = subprocess.run(['sh', '-s', '--', '--version', 'v1.2.0'], input=script.read_text(),
                                     cwd=caller, env=env, capture_output=True, text=True)
@@ -419,7 +431,7 @@ class BootstrapTests(unittest.TestCase):
             result = subprocess.run(['sh', '-s', '--'], input=script.read_text(), cwd=caller,
                                     env={**env, 'PUBLISHING': '1'}, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Release v1.2.3 is still publishing', result.stderr)
+            self.assertIn('retry after it finishes', result.stderr)
             self.assertFalse((root / 'executed').exists())
             self.assertFalse((root / 'gh-called').exists())
 

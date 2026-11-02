@@ -77,6 +77,9 @@ Do not change these without discussing it first.
   container for manual backups; its private lock permits overlapping archives.
 - Mutable release tags and weekly security rebuilds are intentional. Installers
   preserve existing digest pins; `manage upgrade` deliberately replaces them.
+- Publishing bypasses the `runtime` build stage cache to refresh Debian packages.
+  Checksum-pinned code-server and Envoy download stages remain cacheable; do not
+  restore a global cache bypass that needlessly downloads unchanged artifacts.
 - Scheduled and branch-requested rebuilds dispatch a `workflow_dispatch` run on the
   latest stable tag instead of building directly. Provenance records the run's own
   ref, so this is what makes rebuilt images attest to their tag. Rebuilds therefore
@@ -95,6 +98,12 @@ Do not change these without discussing it first.
   weaken that check. Release attestations are not verified by the installers: the
   maintainer is the only account holder and accepts GitHub as the trust anchor. CI
   still attests images and `SHA256SUMS` for optional manual verification.
+- Installers never install host packages. They check for Docker Compose and fail
+  with instructions; host `gpg` is only needed (and checked) for restores.
+- Releases ship deployment files as one flat `code-server-aio.tar.gz` asset, read
+  in memory after its checksum matches. `SHA256SUMS` covers only the bundle, the
+  bootstrap's `manage.py`, and `install.sh`.
+- The default install directory is `~/code-server`, or `/opt/code-server` as root.
 - `manage upgrade` installs the new release's files together with its image and
   replaces digest pins; it refuses to run in a source checkout.
 - Restores reserve one named container per volume across the whole operation.

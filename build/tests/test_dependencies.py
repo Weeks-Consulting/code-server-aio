@@ -50,16 +50,17 @@ class DependencyTests(unittest.TestCase):
             before = deps.inventory(self.root)
             _, latest, edits = deps.plan(self.root)
         self.assertEqual(deps.inventory(self.root), before)
-        self.assertEqual(latest['act'], '99.0.0')
+        self.assertNotIn('act', latest)
         pins = json.loads(edits[deps.PIN_FILE])
-        build_pins = json.loads(edits[deps.PIN_FILES['build']])
-        self.assertEqual(len(build_pins['packages']['act']['sha256']), 4)
         self.assertEqual(len(pins['packages']['code-server']['sha256']), 2)
         for name in ('compose.backup-common.yaml',):
             self.assertIn('sha256:' + 'c' * 64, edits[name])
         self.assertNotIn('# v6\n', edits[deps.WORKFLOW])
         self.assertEqual(latest['envoy'], '99.0.0')
         self.assertEqual(len(pins['packages']['envoy']['sha256']), 2)
+        self.assertIn('ARG CODE_SERVER_VERSION=99.0.0', edits['build/Dockerfile'])
+        self.assertIn('ARG ENVOY_VERSION=99.0.0', edits['build/Dockerfile'])
+        self.assertIn('ARG ENVOY_SHA256_ARM64=' + 'b' * 64, edits['build/Dockerfile'])
         self.assertIn('catthehacker/ubuntu', latest)
         self.assertEqual(edits['build/tests/actions.sh'].count('@sha256:' + 'c' * 64), 2)
 
@@ -95,6 +96,22 @@ class DependencyTests(unittest.TestCase):
                             deps.main()
                     self.assertIn(name, deps.references(self.root, pins))
                     path.write_text(original)
+
+    def test_package_arg_defaults_are_synchronized_and_checked(self):
+        path = self.root / 'build/Dockerfile'
+        original = path.read_text()
+        for argument in ('CODE_SERVER_VERSION', 'CODE_SERVER_SHA256_AMD64',
+                         'CODE_SERVER_SHA256_ARM64', 'ENVOY_VERSION',
+                         'ENVOY_SHA256_AMD64', 'ENVOY_SHA256_ARM64'):
+            with self.subTest(argument=argument):
+                path.write_text(deps.re.sub(r'(?m)^ARG ' + argument + r'=.*$',
+                                           'ARG ' + argument + '=invalid', original))
+                edits = deps.references(self.root, deps.load_pins(self.root))
+                self.assertEqual(edits['build/Dockerfile'], original)
+        path.write_text(original)
+        pins = deps.load_pins(self.root)
+        pins['images']['cloudflare/cloudflared:latest'] = 'a' * 64
+        self.assertNotIn('build/Dockerfile', deps.references(self.root, pins))
 
     def test_check_rejects_action_branches_tags_and_missing_shas(self):
         path = self.root / deps.WORKFLOW
@@ -133,6 +150,20 @@ class DependencyTests(unittest.TestCase):
         path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, 'checksums are required'):
             deps.load_pins(self.root)
+
+    def test_local_build_stages_are_allowed_but_external_bases_still_require_pins(self):
+        path = self.root / 'build/new/Dockerfile'
+        path.parent.mkdir()
+        pins = deps.load_pins(self.root)
+        base = 'debian:13-slim@sha256:' + pins['images']['debian:13-slim']
+        path.write_text(f'FROM {base} AS tools\nFROM tools AS download\n')
+        self.assertNotIn('build/new/Dockerfile', deps.references(self.root, pins))
+        for text in ('FROM unknown AS tools\n', 'FROM tools AS tools\n',
+                     f'FROM {base} AS tools\nFROM unknown AS download\n'):
+            with self.subTest(text=text):
+                path.write_text(text)
+                with self.assertRaises(ValueError):
+                    deps.references(self.root, pins)
 
     def test_invalid_manifest_hash_is_rejected(self):
         pins = deps.load_pins(self.root)
@@ -246,8 +277,8 @@ class DependencyTests(unittest.TestCase):
                         self.assertIn('(update available)', text)
 
     def test_scoped_upgrades_only_lookup_and_write_selected_pins(self):
-        for scope, included, excluded in (('runtime', 'code-server', 'act'),
-                                          ('build', 'act', 'code-server')):
+        for scope, included, excluded in (('runtime', 'code-server', 'actions/checkout'),
+                                          ('build', 'actions/checkout', 'code-server')):
             with self.subTest(scope=scope), \
                     patch.object(deps, 'github', side_effect=self.upstream) as github, \
                     patch.object(deps, 'image_digest', return_value='c' * 64):
@@ -274,7 +305,7 @@ class DependencyTests(unittest.TestCase):
                 contextlib.redirect_stdout(output):
             deps.main()
         self.assertIn('actions/checkout:', output.getvalue())
-        self.assertIn('act:', output.getvalue())
+        self.assertNotRegex(output.getvalue(), r'(?m)^act:')
         self.assertNotIn('code-server:', output.getvalue())
 
     def test_checksum_fallback_and_invalid_metadata(self):

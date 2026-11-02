@@ -1,4 +1,4 @@
-"""Exercise release validation and weekly source selection from the CI scripts."""
+"""Exercise release validation and weekly source selection from the CI helper."""
 
 import json
 import os
@@ -34,7 +34,7 @@ class ReleaseTests(unittest.TestCase):
             return result, read(output), read(log)
 
     def select(self, event, tag="", **env):
-        return self.run_script(["bash", "build/ci/select-source.sh"], tag, EVENT_NAME=event,
+        return self.run_script(["bash", "build/ci/release.sh", "select-source"], tag, EVENT_NAME=event,
                                GH_REPO="owner/repo",
                                WORKFLOW_REF="owner/repo/.github/workflows/container.yaml@refs/heads/main",
                                **env)
@@ -42,10 +42,10 @@ class ReleaseTests(unittest.TestCase):
     def test_release_validation(self):
         for suffix in ("", "-1", "-2", "-12"):
             with self.subTest(suffix=suffix):
-                result, output, _ = self.run_script(["python3", "build/ci/release-version.py"], f"v{VERSION}{suffix}")
+                result, output, _ = self.run_script(["bash", "build/ci/release.sh", "release-version"], f"v{VERSION}{suffix}")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output, f"version={VERSION}\n")
-        result, _, _ = self.run_script(["python3", "build/ci/release-version.py"], "")
+        result, _, _ = self.run_script(["bash", "build/ci/release.sh", "release-version"], "")
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_invalid_releases(self):
@@ -53,7 +53,7 @@ class ReleaseTests(unittest.TestCase):
                     f"v{VERSION}-rc.01", f"v{VERSION}-fix", f"v{VERSION}-1-rc.1",
                     f"v{VERSION}+1", VERSION, "v0.0.0-2"):
             with self.subTest(tag=tag):
-                result, _, _ = self.run_script(["python3", "build/ci/release-version.py"], tag)
+                result, _, _ = self.run_script(["bash", "build/ci/release.sh", "release-version"], tag)
                 self.assertNotEqual(result.returncode, 0)
 
     def test_publication_modes(self):
@@ -99,7 +99,7 @@ class ReleaseTests(unittest.TestCase):
                 ('v2.0.0', 'false', True), ('v3.0.0', 'false', False),
                 ('v2.0.0', 'true', False)):
             with self.subTest(latest=latest, prerelease=prerelease):
-                result, _, calls = self.run_script(["bash", "build/ci/publish-tags.sh"], 'v2.0.0',
+                result, _, calls = self.run_script(["bash", "build/ci/release.sh", "publish-tags"], 'v2.0.0',
                                                    LATEST_TAG=latest, PRERELEASE=prerelease,
                                                    IMAGE='ghcr.io/example/app',
                                                    DIGEST='sha256:' + 'a' * 64, GH_REPO='example/app')

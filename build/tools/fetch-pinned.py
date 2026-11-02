@@ -2,16 +2,13 @@
 """Download a pinned image package and verify it before installation."""
 
 import hashlib
-import json
 from pathlib import Path
 import re
 import subprocess
 import sys
 
 
-def artifact(packages, name, architecture):
-    package = packages[name]
-    version = package['version']
+def artifact(name, version, architecture, checksum):
     if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
         raise ValueError('Invalid pinned version')
     if architecture not in ('amd64', 'arm64'):
@@ -25,14 +22,13 @@ def artifact(packages, name, architecture):
         repository = 'envoyproxy/envoy'
     else:
         raise ValueError('Unsupported package: ' + name)
-    checksum = package['sha256'][filename]
     if not re.fullmatch(r'[a-f0-9]{64}', checksum):
         raise ValueError('Invalid pinned checksum')
     return f'https://github.com/{repository}/releases/download/v{version}/{filename}', checksum
 
 
-def fetch(manifest, name, architecture, destination):
-    url, checksum = artifact(json.loads(Path(manifest).read_text())['packages'], name, architecture)
+def fetch(name, version, architecture, checksum, destination):
+    url, checksum = artifact(name, version, architecture, checksum)
     path = Path(destination)
     try:
         subprocess.run([

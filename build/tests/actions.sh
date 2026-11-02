@@ -1,11 +1,11 @@
 #!/bin/sh
-# Download act temporarily and run this repository's native-architecture CI tests.
+# Run this repository's native-architecture CI tests with installed act.
 set -eu
 
 project_dir=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 case "$(uname -m)" in
-    x86_64) asset_arch=x86_64; matrix_arch=amd64 ;;
-    aarch64|arm64) asset_arch=arm64; matrix_arch=arm64 ;;
+    x86_64) matrix_arch=amd64 ;;
+    aarch64|arm64) matrix_arch=arm64 ;;
     *) echo 'Unsupported architecture: use an amd64 or arm64 host.' >&2; exit 1 ;;
 esac
 asset_os=$(uname -s)
@@ -26,7 +26,10 @@ case "$asset_os" in
     *) echo 'This script requires Linux or macOS.' >&2; exit 1 ;;
 esac
 
-act_version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packages"]["act"]["version"])' "$project_dir/build/build-versions.json")
+command -v act >/dev/null || {
+    echo 'Install act with just install and ensure it is on PATH.' >&2
+    exit 1
+}
 
 act_dir=$(mktemp -d "$project_dir/.test-tmp.XXXXXXXX")
 test_volume=
@@ -43,17 +46,6 @@ trap 'exit 143' TERM
 mkdir "$act_dir/tmp"
 test_tmp="$act_dir/tmp"
 temp_mount="$test_tmp:$test_tmp"
-curl --fail --silent --show-error --location --retry 3 \
-    "https://github.com/nektos/act/releases/download/v${act_version}/act_${asset_os}_${asset_arch}.tar.gz" \
-    --output "$act_dir/act.tar.gz"
-expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packages"]["act"]["sha256"][sys.argv[2]])' "$project_dir/build/build-versions.json" "act_${asset_os}_${asset_arch}.tar.gz")
-python3 - "$act_dir/act.tar.gz" "$expected" <<'PY'
-import hashlib, pathlib, sys
-if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() != sys.argv[2]:
-    sys.exit('act archive checksum mismatch')
-PY
-tar --no-same-owner -xzf "$act_dir/act.tar.gz" -C "$act_dir" act
-
 # The runner and sibling containers need the same daemon-side temp paths. A
 # Linux volume preserves ownership that macOS shared directories cannot.
 needs_runner=true
@@ -75,7 +67,7 @@ grep -v -E '^[[:space:]]+queue:[[:space:]]+max[[:space:]]*$' \
     "$project_dir/.github/workflows/container.yaml" > "$workflow"
 
 cd "$project_dir"
-"$act_dir/act" pull_request \
+act pull_request \
     --workflows "$workflow" \
     --job test \
     --matrix "arch:$matrix_arch" \

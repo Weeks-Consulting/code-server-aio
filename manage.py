@@ -6,14 +6,15 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import http.client
+import io
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -22,6 +23,7 @@ import urllib.request
 
 TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
 DEFAULT_IMAGE = "ghcr.io/weeks-consulting/code-server-aio:latest"
+BUNDLE = "code-server-aio.tar.gz"
 IMAGE_SETTING = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
 
 
@@ -98,8 +100,8 @@ def published_release(repository):
     release = json.loads(download(f'https://api.github.com/repos/{repository}/releases/latest'))
     tag = stable_tag(release)
     # Release assets upload only after the images are tested and published.
-    if not any(asset.get('name') == 'SHA256SUMS' for asset in release.get('assets', [])):
-        fail(f'Release {tag} is still publishing: SHA256SUMS is not available yet; try again later.')
+    if not {BUNDLE, 'SHA256SUMS'} <= {asset.get('name') for asset in release.get('assets', [])}:
+        fail(f'Release {tag} is still publishing: its deployment bundle is not available yet; try again later.')
     # GHCR names are lowercase; download from GitHub's own spelling of the repository.
     match = re.match(r'https://github\.com/([^/]+/[^/]+)/releases/', release.get('html_url', ''))
     canonical = match[1] if match else repository
@@ -154,7 +156,7 @@ def parser():
     result.add_argument('--project-name')
     result.add_argument('--archive')
     result.add_argument('--volume')
-    result.add_argument('--directory', help='Installation directory (default: /opt/code-server)')
+    result.add_argument('--directory', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
     result.add_argument('--repository', help='GitHub owner/repo (default: Weeks-Consulting/code-server-aio)')
     result.add_argument('--version', help='Release tag vX.Y.Z[-N] (default image: latest)')
     result.add_argument('--dry-run', action='store_true', help='Preview installation without changes or network requests')
@@ -241,13 +243,9 @@ def warn_release(command):
         pass  # Remain usable offline and with custom images.
 
 
-DEPLOYMENT_FILES = {name: name for name in (
-    'compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml',
-    'compose.backup-local.yaml', 'manage', 'manage.py')}
-DEPLOYMENT_FILES.update({
-    'restore-home.sh': 'build/tools/restore-home.sh',
-    'backup-key.py': 'build/tools/backup-key.py',
-})
+# Release bundle members, installed flat beside each other.
+DEPLOYMENT_FILES = ('compose.yaml', 'compose.backup-common.yaml', 'compose.backup.yaml',
+                    'compose.backup-local.yaml', 'manage', 'manage.py', 'restore-home.sh', 'backup-key.py')
 
 
 def validate_destination(directory, names):
@@ -267,59 +265,14 @@ def validate_destination(directory, names):
             fail(f'Backup destination must not be a directory: {path}.bak')
 
 
-def dependencies(dry_run):
+def dependencies():
+    """Check runtime requirements; the installer never installs host packages."""
     if not shutil.which('docker'):
         fail('A working Docker installation is required before running this installer.')
-    def available(command):
-        return subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-    def run(command):
-        if dry_run:
-            print('Would run: ' + ' '.join(command))
-        else:
-            subprocess.run(command, check=True)
-    compose_missing = not available(['docker', 'compose', 'version'])
-    packages = [] if shutil.which('gpg') else ['gnupg']
-    system = platform.system()
-    if system == 'Darwin':
-        if compose_missing:
-            packages.append('docker-compose')
-        if packages:
-            if not shutil.which('brew'):
-                fail('Install Homebrew to install the missing runtime dependencies.')
-            if os.geteuid() == 0:
-                fail('Run the installer without sudo on macOS so Homebrew can install dependencies; choose a directory in your home folder.')
-            run(['brew', 'install', *packages])
-        if compose_missing:
-            plugins = Path(os.environ.get('DOCKER_CONFIG', str(Path.home() / '.docker'))) / 'cli-plugins'
-            if dry_run:
-                print(f'Would register the Homebrew Compose plugin in {plugins} if Docker cannot discover it.')
-            elif not available(['docker', 'compose', 'version']):
-                target = plugins / 'docker-compose'
-                if target.exists() or target.is_symlink():
-                    fail(f'Docker cannot load existing plugin {target}; repair it and rerun the installer.')
-                prefix = subprocess.check_output(['brew', '--prefix'], text=True).strip()
-                plugins.mkdir(parents=True, exist_ok=True)
-                target.symlink_to(Path(prefix) / 'lib/docker/cli-plugins/docker-compose')
-    elif system == 'Linux' and Path('/etc/debian_version').is_file():
-        def installed(package):
-            result = subprocess.run(['dpkg-query', '-W', '-f=${Status}', package], capture_output=True, text=True)
-            return result.returncode == 0 and result.stdout.strip() == 'install ok installed'
-        if not installed('ca-certificates'):
-            packages.append('ca-certificates')
-        if compose_missing:
-            packages.append('docker-compose-plugin' if installed('docker-ce-cli') else 'docker-compose')
-        if packages:
-            prefix = [] if os.geteuid() == 0 else ['sudo']
-            if prefix and not shutil.which('sudo'):
-                fail('Install missing runtime dependencies as root or install sudo.')
-            run(prefix + ['apt-get', 'update'])
-            run(prefix + ['apt-get', 'install', '-y', *packages])
-    else:
-        fail('The installer supports Debian Linux and macOS.')
-    if not dry_run:
-        if not shutil.which('gpg'):
-            fail('Install gpg before continuing.')
-        subprocess.run(['docker', 'compose', 'version'], check=True)
+    if subprocess.run(['docker', 'compose', 'version'], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode:
+        fail('Docker Compose is required. Install docker-compose-plugin (Docker CE) or docker-compose '
+             "(Debian's docker.io, or Homebrew on macOS), then rerun the installer.")
 
 
 def download(url):
@@ -334,6 +287,20 @@ def download(url):
             if attempt == 3:
                 raise
             time.sleep(2 ** attempt)
+
+
+def read_bundle(data):
+    """Read the expected regular files from a verified release bundle without extracting it."""
+    expected = {*DEPLOYMENT_FILES, '.env.example'}
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as bundle:
+        for member in bundle:
+            if member.name in expected and member.isreg():
+                files[member.name] = bundle.extractfile(member).read()
+    missing = expected - files.keys()
+    if missing:
+        fail('Release bundle lacks required deployment files: ' + ', '.join(sorted(missing)))
+    return files
 
 
 def parse_checksums(checksums):
@@ -448,7 +415,8 @@ def install_files(directory, files, template, version, image, replace_pin=False)
 
 
 def install(args, upgrade=False):
-    directory = Path(os.path.abspath(args.directory or '/opt/code-server'))
+    default = '/opt/code-server' if os.geteuid() == 0 else Path.home() / 'code-server'
+    directory = Path(os.path.abspath(args.directory or default))
     repository = args.repository or 'Weeks-Consulting/code-server-aio'
     version = args.version
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*', repository):
@@ -456,7 +424,7 @@ def install(args, upgrade=False):
     if version and not re.fullmatch(TAG, version):
         fail(f'Expected a release tag such as v4.141.0 or v4.141.0-1; got: {version}')
     validate_destination(directory, [*DEPLOYMENT_FILES, '.env'])
-    dependencies(args.dry_run)
+    dependencies()
     image = 'ghcr.io/' + repository.lower() + ':' + (version[1:] if version else 'latest')
     if args.dry_run:
         print(f'Would use release {version} from {repository}.' if version else
@@ -466,29 +434,27 @@ def install(args, upgrade=False):
         for name in DEPLOYMENT_FILES:
             if (directory / name).is_file():
                 print(f'Would save {directory / name} as {name}.bak before replacing it.')
-            print(f'Would download and install {directory / name} (all files are required).')
+            print(f'Would install {directory / name} from the release bundle (all files are required).')
         print(f'Would preserve existing {directory}/.env values and append missing release settings.' if (directory / '.env').exists() else
               f'Would create {directory}/.env from the release template with its image selected.')
         print(f'Would set CODE_SERVER_IMAGE={image} in .env unless an existing digest pin is present.')
         print('Would set .env mode to 600 and generate a backup key only if missing or empty.')
-        print('Dry run complete. No packages installed, releases downloaded, files changed, or services started.')
+        print('Dry run complete. No releases downloaded, files changed, or services started.')
         return
     if not version:
         version, repository = published_release(repository)
-    base = f'https://raw.githubusercontent.com/{repository}/refs/tags/{version}'
-    sources = {**DEPLOYMENT_FILES, '.env.example': '.env.example'}
+    base = f'https://github.com/{repository}/releases/download/{version}'
     try:
-        files = {name: download(f'{base}/{source}') for name, source in sources.items()}
-        checksums = download(f'https://github.com/{repository}/releases/download/{version}/SHA256SUMS')
+        bundle = download(f'{base}/{BUNDLE}')
+        checksums = download(f'{base}/SHA256SUMS')
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            fail(f'Release {version} lacks required deployment files or SHA256SUMS. If it was '
-                 "just published, retry after publishing finishes; otherwise use that release's own installer.")
+            fail(f'Release {version} lacks required deployment files or SHA256SUMS; '
+                 'if it was just published, retry after publishing finishes.')
         raise
-    expected = parse_checksums(checksums)
-    for name, data in files.items():
-        if expected.get(sources[name]) != hashlib.sha256(data).hexdigest():
-            fail('Release checksum missing or incorrect: ' + name)
+    if parse_checksums(checksums).get(BUNDLE) != hashlib.sha256(bundle).hexdigest():
+        fail('Release checksum missing or incorrect: ' + BUNDLE)
+    files = read_bundle(bundle)
     template = select_image(files.pop('.env.example').decode(), image)
     # Finish downloads and validation before changing any deployment files.
     directory.mkdir(parents=True, exist_ok=True)
@@ -546,5 +512,5 @@ if __name__ == '__main__':
         main()
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode)
-    except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
+    except (OSError, ValueError, KeyError, http.client.HTTPException, tarfile.TarError) as error:
         sys.exit(str(error))
