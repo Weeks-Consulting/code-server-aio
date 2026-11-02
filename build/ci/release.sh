@@ -84,6 +84,7 @@ stage_images() (
 
 # Tag the attested index; only the current stable release moves `latest`.
 publish_tags() (
+    : "${IMAGE:?IMAGE must be set by the publishing workflow}"
     args=(--tag "$IMAGE:${RELEASE_TAG#v}")
     if [[ "$PRERELEASE" != true ]]; then
         latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
