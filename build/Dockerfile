@@ -7,9 +7,9 @@ RUN apt-get update && \
 
 FROM download-tools AS code-server-download
 # Defaults are synchronized from build/versions.json by just sync-pins.
-ARG CODE_SERVER_VERSION=4.143.1
-ARG CODE_SERVER_SHA256_AMD64=e4b771c98fafbe2af3990ecd71d93ba22515588db550007076768a014ae34c02
-ARG CODE_SERVER_SHA256_ARM64=79ca8df2db219b24de75e2a830c5302808124d8c2bf132f4bc6105cea834bb1c
+ARG CODE_SERVER_VERSION=4.144.0
+ARG CODE_SERVER_SHA256_AMD64=45f5533b502edac68b7eb09c5cec44fd281f80264af9a87fde0bfb2c5e190615
+ARG CODE_SERVER_SHA256_ARM64=6baef72b340da08e76e5cf1e9504f657d00e80c8776bdaf86e97c30a80cd48e8
 RUN --mount=type=bind,source=build/tools/fetch-pinned.py,target=/tmp/fetch-pinned.py \
     arch=$(dpkg --print-architecture) && \
     case "$arch" in \
