@@ -30,6 +30,21 @@ default is `/opt/code-server`. Options:
 | `--repository OWNER/REPO` | Install from a fork. |
 | `--dry-run` | Show what would change without downloading or changing anything. |
 
+To install a specific release as root into `/opt/code-server`, use its tagged
+bootstrap and select the same version:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/tags/v4.144.0-0/build/tools/install.sh \
+  | sh -s -- --version v4.144.0-0 --directory /opt/code-server
+```
+
+The bootstrap resolves one release before downloading `manage.py` and
+`SHA256SUMS`, then passes that version to the verified installer. Its helper,
+checksums, deployment bundle, and image therefore use the same release, including
+when the latest release changes during installation. `--repository` also applies
+to bootstrap downloads. Without `--version`, the bootstrap resolves the latest
+stable release once and selects its versioned image.
+
 Pass options to the bootstrap after `sh -s --`, for example
 `... | sh -s -- --directory /srv/code-server`.
 
@@ -50,9 +65,9 @@ start with `~/code-server/manage --pull`. The installer never starts services.
    `backup-key.py`, saving previous copies as `.bak` files.
 3. Creates `.env` (mode 600) from the release template, or keeps the existing
    values and comments and appends settings the new release added.
-4. Sets `CODE_SERVER_IMAGE` to the selected release tag (`:latest` when no
-   `--version` is given), unless it contains a digest pin, which is kept with a
-   warning.
+4. Sets `CODE_SERVER_IMAGE` to the selected release tag (`:latest` when invoking
+   `manage install` directly without `--version`), unless it contains a digest
+   pin, which is kept with a warning.
 5. Generates `BACKUP_GPG_PASSPHRASE` if it is missing or empty. Save it
    separately; archives cannot be recovered without it.
 

@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 
 
-TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
+TAG = r'v\d+\.\d+\.\d+(?:-(?:0|[1-9]\d*))?'
 DEFAULT_IMAGE = "ghcr.io/weeks-consulting/code-server-aio:latest"
 BUNDLE = "code-server-aio.tar.gz"
 IMAGE_SETTING = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
@@ -234,7 +234,7 @@ def warn_release(command):
     try:
         model = subprocess.check_output(command + ['config', '--format', 'json'], stderr=subprocess.DEVNULL, text=True)
         image = json.loads(model)['services']['code-server']['image']
-        match = re.fullmatch(r'ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-[1-9]\d*)?)', image)
+        match = re.fullmatch(r'ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-(?:0|[1-9]\d*))?)', image)
         if match:
             latest = latest_tag(match[1], timeout=2)
             if latest != 'v' + match[2]:

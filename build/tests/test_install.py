@@ -90,6 +90,17 @@ class InstallationTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
+    def test_zero_revision_keeps_bundle_and_image_on_selected_release(self):
+        self.args.version = 'v4.144.0-0'
+        management.install(self.args)
+        self.assertEqual(self.downloads, [
+            'https://github.com/Weeks-Consulting/code-server-aio/releases/download/v4.144.0-0/' + management.BUNDLE,
+            'https://github.com/Weeks-Consulting/code-server-aio/releases/download/v4.144.0-0/SHA256SUMS',
+        ])
+        self.assertIn('CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:4.144.0-0',
+                      (self.directory / '.env').read_text())
+        self.assertEqual(management.stable_tag({'tag_name': 'v4.144.0-0'}), 'v4.144.0-0')
+
     def test_install_and_refresh_preserve_settings_and_backup_files(self):
         management.install(self.args)
         self.assertEqual((self.directory / 'manage.py').read_bytes(), self.files['manage.py'])
@@ -397,11 +408,17 @@ class BootstrapTests(unittest.TestCase):
             manifest = hashlib.sha256(payload).hexdigest() + '  manage.py\n'
             curl = tools / 'curl'
             curl.write_text(
-                f'#!{sys.executable}\nimport os, pathlib, sys\n'
+                f'#!{sys.executable}\nimport json, os, pathlib, sys\n'
                 'args = sys.argv[1:]\n'
                 'url = args[args.index("--output") - 1]\n'
-                'base = "https://github.com/Weeks-Consulting/code-server-aio/releases/latest/download/"\n'
-                'if os.environ.get("PUBLISHING") or not url.startswith(base): sys.exit(22)\n'
+                'repo = os.environ.get("EXPECTED_REPOSITORY", "Weeks-Consulting/code-server-aio")\n'
+                'tag = os.environ.get("EXPECTED_VERSION", "v4.144.0-0")\n'
+                'base = f"https://github.com/{repo}/releases/download/{tag}/"\n'
+                'if os.environ.get("PUBLISHING"): sys.exit(22)\n'
+                'if url == f"https://api.github.com/repos/{repo}/releases/latest":\n'
+                '    pathlib.Path(args[args.index("--output") + 1]).write_text(json.dumps({"tag_name": "v4.144.0-0"}))\n'
+                '    sys.exit(0)\n'
+                'if not url.startswith(base): sys.exit(22)\n'
                 f'payload = {payload!r}\nmanifest = {manifest!r}\n'
                 'data = manifest.encode() if url.endswith("/SHA256SUMS") else payload + (b"# tampered" if os.environ.get("TAMPER") else b"")\n'
                 'pathlib.Path(args[args.index("--output") + 1]).write_bytes(data)\n')
@@ -420,13 +437,18 @@ class BootstrapTests(unittest.TestCase):
                 result = subprocess.run(['sh', '-s', '--'], input=script.read_text(), cwd=caller, env={**env, **overrides}, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
                 self.assertEqual((root / 'executed').exists(), succeeds)
-            # The verified installer receives the caller's options unchanged and selects the release.
-            self.assertEqual((root / 'executed').read_text(), 'install')
-            (root / 'executed').unlink()
-            result = subprocess.run(['sh', '-s', '--', '--version', 'v1.2.0'], input=script.read_text(),
-                                    cwd=caller, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / 'executed').read_text(), 'install --version v1.2.0')
+            # Both version spellings and fork selection control every asset URL.
+            for options, overrides, expected in (
+                (['--version', 'v4.144.0-0'], {}, 'install --version v4.144.0-0 --version v4.144.0-0'),
+                (['--version=v1.2.0', '--repository=Example/Fork'],
+                 {'EXPECTED_VERSION': 'v1.2.0', 'EXPECTED_REPOSITORY': 'Example/Fork'},
+                 'install --version=v1.2.0 --repository=Example/Fork --version v1.2.0'),
+            ):
+                (root / 'executed').unlink()
+                result = subprocess.run(['sh', '-s', '--', *options], input=script.read_text(),
+                                        cwd=caller, env={**env, **overrides}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((root / 'executed').read_text(), expected)
             (root / 'executed').unlink()
             result = subprocess.run(['sh', '-s', '--'], input=script.read_text(), cwd=caller,
                                     env={**env, 'PUBLISHING': '1'}, capture_output=True, text=True)
