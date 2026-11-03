@@ -35,7 +35,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Keep in sync with compose.yaml; the workspace must not need --privileged.
-run_flags="--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/fuse --security-opt apparmor=unconfined --security-opt seccomp=unconfined --security-opt systempaths=unconfined"
+run_flags="--cap-add SYS_ADMIN --cap-add NET_ADMIN --security-opt apparmor=unconfined --security-opt seccomp=unconfined --security-opt systempaths=unconfined"
 wait_ready() {
     deadline=$(($(date +%s) + 720))
     until docker exec "$name" /bin/bash -ec '

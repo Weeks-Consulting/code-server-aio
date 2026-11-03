@@ -39,8 +39,9 @@ Do not change these without discussing it first.
 ### Container privileges
 
 - Nested Docker is a hard requirement. The container does not use `privileged: true`;
-  it uses `SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse`, and seccomp/AppArmor/system paths
+  it uses `SYS_ADMIN`, `NET_ADMIN`, and seccomp/AppArmor/system paths
   unconfined, which hides host devices.
+- Do not require `/dev/fuse`; some VM hosts do not provide it, preventing deployment.
 - The entrypoint remounts `/sys/fs/cgroup` read-write so nested containers can start.
 - `cloud-user` has passwordless sudo and Docker group access by design.
 

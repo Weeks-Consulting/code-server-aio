@@ -34,8 +34,8 @@ To install a specific release as root into `/opt/code-server`, use its tagged
 bootstrap and select the same version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/tags/v4.144.0-0/build/tools/install.sh \
-  | sh -s -- --version v4.144.0-0 --directory /opt/code-server
+curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/tags/v4.144.0-1/build/tools/install.sh \
+  | sh -s -- --version v4.144.0-1 --directory /opt/code-server
 ```
 
 The bootstrap resolves one release before downloading `manage.py` and

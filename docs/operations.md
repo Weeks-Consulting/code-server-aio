@@ -26,7 +26,7 @@ connection (normally cloudflared), not an inferred end-user IP.
 
 code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Docker
 group access. Supervisor manages the services; the container runs with
-`SYS_ADMIN`, `NET_ADMIN`, `/dev/fuse` and relaxed seccomp/AppArmor/system paths for
+`SYS_ADMIN`, `NET_ADMIN` and relaxed seccomp/AppArmor/system paths for
 Docker-in-Docker, instead of `--privileged`; host devices are not exposed. The entrypoint
 remounts `/sys/fs/cgroup` read-write for nested containers. Startup repairs only the home directory owner and preserves ownership of its contents.
 If any supervised service exhausts its startup retries, Supervisor shuts down so

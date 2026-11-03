@@ -8,8 +8,6 @@ services:
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
-    devices:
-      - /dev/fuse
     security_opt:
       - apparmor=unconfined
       - seccomp=unconfined
