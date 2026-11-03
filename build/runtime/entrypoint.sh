@@ -6,8 +6,10 @@ set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Without --privileged, Docker mounts cgroups read-only; nested Docker needs them writable.
-if ! mount -o remount,rw /sys/fs/cgroup 2>/dev/null; then
-    echo 'Warning: could not make /sys/fs/cgroup writable; nested containers may fail.' >&2
+# Change only this mount's flags; a filesystem-wide remount can be denied in a user namespace.
+if ! mount -o remount,bind,rw /sys/fs/cgroup; then
+    echo 'Error: could not make /sys/fs/cgroup writable; nested Docker requires it. Check the workspace container capabilities and security options.' >&2
+    exit 1
 fi
 
 # The backend socket stays inside the combined code-server and Envoy container.

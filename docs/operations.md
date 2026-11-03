@@ -28,7 +28,9 @@ code-server runs as `cloud-user` (UID/GID 10000), with passwordless sudo and Doc
 group access. Supervisor manages the services; the container runs with
 `SYS_ADMIN`, `NET_ADMIN` and relaxed seccomp/AppArmor/system paths for
 Docker-in-Docker, instead of `--privileged`; host devices are not exposed. The entrypoint
-remounts `/sys/fs/cgroup` read-write for nested containers. Startup repairs only the home directory owner and preserves ownership of its contents.
+uses a bind remount to make `/sys/fs/cgroup` writable for nested containers without
+changing the underlying filesystem's flags. If this fails, startup exits with an
+error. Startup repairs only the home directory owner and preserves ownership of its contents.
 If any supervised service exhausts its startup retries, Supervisor shuts down so
 Docker's restart policy can restart the container. Missing or invalid Access
 configuration prevents Envoy from starting until corrected.

@@ -43,6 +43,8 @@ Do not change these without discussing it first.
   unconfined, which hides host devices.
 - Do not require `/dev/fuse`; some VM hosts do not provide it, preventing deployment.
 - The entrypoint remounts `/sys/fs/cgroup` read-write so nested containers can start.
+  Use `remount,bind,rw` to change only this mount's flags; a filesystem-wide remount
+  can be denied in a user namespace. A failed remount must stop startup.
 - `cloud-user` has passwordless sudo and Docker group access by design.
 
 ### Port forwarding

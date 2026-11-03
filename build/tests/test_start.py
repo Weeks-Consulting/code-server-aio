@@ -41,27 +41,33 @@ class StartupTests(unittest.TestCase):
             supervisor.write_text('#!/bin/sh\nprintf "supervisord %s\\n" "$*"\n')
             supervisor.chmod(0o755)
             script = script.replace('/usr/bin/supervisord', str(supervisor))
-            functions = """mkdir() { printf 'mkdir %s\\n' "$*"; }
+            functions = """mount() { printf 'mount %s\\n' "$*"; }
+mkdir() { printf 'mkdir %s\\n' "$*"; }
 chown() { printf 'chown %s\\n' "$*"; }
 chmod() { printf 'chmod %s\\n' "$*"; }
 getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
 """
-            for failure in ('none', 'mkdir', 'chown', 'chmod', 'getent'):
+            for failure in ('none', 'mount', 'mkdir', 'chown', 'chmod', 'getent'):
                 with self.subTest(failure=failure):
                     setup = functions
                     if failure != 'none':
                         setup += failure + '() { return 9; }\n'
                     result = subprocess.run(['bash', '-c', setup + script, 'entrypoint', '--test'],
                                             capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0 if failure == 'none' else 9, result.stderr)
+                    expected = 0 if failure == 'none' else 1 if failure == 'mount' else 9
+                    self.assertEqual(result.returncode, expected, result.stderr)
                     if failure == 'none':
                         self.assertEqual(result.stdout.splitlines(), [
+                            'mount -o remount,bind,rw /sys/fs/cgroup',
                             'mkdir -p /run/code-server', 'chown 10000:10000 /run/code-server',
                             'chmod 0750 /run/code-server', 'mkdir -p /home/cloud-user',
                             'chown 123:456 /home/cloud-user',
                             'supervisord -c /etc/supervisor/supervisord.conf --test'])
                     else:
                         self.assertNotIn('supervisord', result.stdout)
+                    if failure == 'mount':
+                        self.assertIn('could not make /sys/fs/cgroup writable', result.stderr)
+                        self.assertNotIn('mkdir', result.stdout)
 
     def test_envoy_renderer_escapes_values_and_preserves_lua(self):
         import json
