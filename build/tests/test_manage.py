@@ -94,6 +94,32 @@ class LauncherTests(unittest.TestCase):
                     "BACKUP_LOCAL_GID": str(os.getgid()),
                 })
 
+    def test_logs(self):
+        for mode in ('none', 'local', 's3'):
+            for follow in ((), ('-f',), ('--follow',)):
+                with self.subTest(mode=mode, follow=follow):
+                    result = self.run_launcher('logs', *follow, '--backup', mode,
+                                               '--project-name', 'example')
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = json.loads(self.log.read_text())
+                    self.assertEqual(args[args.index('logs'):],
+                                     ['logs', '--follow'] if follow else ['logs'])
+                    self.assertEqual(args[args.index('--project-name') + 1], 'example')
+                    if mode != 'none':
+                        overlay = 'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml'
+                        self.assertIn(str(self.deployment / overlay), args)
+                    self.assertEqual((self.deployment / '.env').read_text(), '')
+        self.env['DOCKER_EXIT'] = '7'
+        self.assertEqual(self.run_launcher('-f', 'logs').returncode, 7)
+
+    def test_follow_requires_logs(self):
+        for action in ('install', 'start', 'stop', 'upgrade', 'backup', 'backups', 'restore'):
+            with self.subTest(action=action):
+                result = self.run_launcher(action, '-f')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('only supported by the logs command', result.stderr)
+                self.assertFalse(self.log.exists())
+
     def test_workspace_memory_uses_docker_host_and_rejects_invalid_totals(self):
         self.env['TEST_HOST_MEMORY'] = '1000000000'
         result = self.run_launcher()

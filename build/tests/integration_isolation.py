@@ -99,8 +99,7 @@ def integration(image):
         mount = {'type': 'bind', 'source': str(Path(__file__).resolve()), 'target': '/tmp/isolation.py', 'read_only': True}
         override = {'services': {
             'code-server': {'image': image, 'environment': {'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD,
-                                     'CF_ACCESS_ALLOWED_EMAILS': 'user@example.com',
-                                     'CF_ACCESS_ALLOWED_SERVICE_TOKENS': ''},
+                                     'CF_ACCESS_ALLOWED_EMAILS': 'user@example.com'},
                       'healthcheck': {'interval': '1s', 'start_period': '10s', 'retries': 30}},
             'fixture': {'image': image, 'entrypoint': ['/usr/bin/python3', '/tmp/isolation.py', '--fixture'],
                         'volumes': [mount], 'healthcheck': {

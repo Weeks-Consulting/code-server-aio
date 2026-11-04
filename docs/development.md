@@ -87,7 +87,7 @@ New host tests follow `test_*.py`; container and topology programs use
 `integration_*.py` and run through `just test-proxy`.
 
 `just test-proxy` checks the real Envoy binary against disposable HTTPS signing keys
-and a Unix-socket fixture: JWT claims, duplicate headers, allowlists, TLS validation,
+and a Unix-socket fixture: JWT claims, duplicate headers, email allowlist, TLS validation,
 key rotation and outages, error pages, and WebSocket lifetime limits. It also starts
 the production Compose topology with real code-server and a temporary JWKS service,
 then checks that a client on the default network cannot reach the backend socket or admin

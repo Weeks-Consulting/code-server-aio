@@ -143,23 +143,48 @@ def upgrade(directory):
 
 def parser():
     result = argparse.ArgumentParser(
-        prog='manage', description=__doc__,
-        epilog='start (default): start services; stop: remove containers and keep volumes; '
-               'upgrade: install the latest release and its image setting without restarting; backup: run a backup; '
-               'backups: list local archives; restore: replace an explicit home volume; '
-               'install: install or refresh deployment files. Commands and options may appear in any order.')
+        prog='manage', usage='%(prog)s [COMMAND] [OPTIONS]',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='Install and manage a code-server deployment.\n'
+                    'Commands and options may appear in any order. With no command, start is used.\n\n'
+                    'commands:\n'
+                    '  start     Start services in the background (default command).\n'
+                    '  stop      Remove containers and networks; keep volumes.\n'
+                    '  logs      Print service logs; add -f to follow.\n'
+                    '  upgrade   Install the latest release and image setting; no restart.\n'
+                    '  backup    Run a backup now (requires --backup local or s3).\n'
+                    '  backups   List local archives (requires --backup local).\n'
+                    '  restore   Replace a home volume (requires --archive and --volume).\n'
+                    '  install   Install or refresh deployment files; no services started.',
+        epilog='examples:\n'
+               '  manage --pull                       Start and pull configured images\n'
+               '  manage logs -f                      Follow service logs\n'
+               '  manage start --backup local --pull  Start with local backups\n'
+               '  manage backup --backup local        Run a local backup now\n'
+               '  manage restore --archive FILE --volume NAME\n\n'
+               'Deployment commands read .env beside manage, regardless of your current directory.\n'
+               'For stop, logs, backup, and backups, use the same --backup and\n'
+               '--project-name settings as startup. If installed with sudo, run with sudo.')
     result.add_argument('action', nargs='?', default='start',
-                        choices=['install', 'start', 'stop', 'upgrade', 'backup', 'backups', 'restore'])
-    result.add_argument('--backup', choices=['none', 's3', 'local'], default='none')
-    result.add_argument('--foreground', action='store_true')
-    result.add_argument('--pull', action='store_true')
-    result.add_argument('--project-name')
-    result.add_argument('--archive')
-    result.add_argument('--volume')
-    result.add_argument('--directory', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
-    result.add_argument('--repository', help='GitHub owner/repo (default: Weeks-Consulting/code-server-aio)')
-    result.add_argument('--version', help='Release tag vX.Y.Z[-N] (default image: latest)')
-    result.add_argument('--dry-run', action='store_true', help='Preview installation without changes or network requests')
+                        choices=['install', 'start', 'stop', 'logs', 'upgrade', 'backup', 'backups', 'restore'],
+                        help=argparse.SUPPRESS)
+    deployment = result.add_argument_group('deployment options (start, stop, logs, backup, backups)')
+    deployment.add_argument('--backup', choices=['none', 's3', 'local'], default='none',
+                            help='Backup services to include (default: none)')
+    deployment.add_argument('--project-name', metavar='NAME', help='Override the Compose project name')
+    start = result.add_argument_group('start options')
+    start.add_argument('--foreground', action='store_true', help='Stay attached to service output instead of starting in the background')
+    start.add_argument('--pull', action='store_true', help='Pull configured images before starting')
+    logs = result.add_argument_group('logs options')
+    logs.add_argument('-f', '--follow', action='store_true', help='Keep streaming new log output')
+    restore = result.add_argument_group('restore options (both required)')
+    restore.add_argument('--archive', metavar='FILE', help='Backup archive to restore (.tar.gz or .tar.gz.gpg)')
+    restore.add_argument('--volume', metavar='NAME', help='Existing home volume to replace')
+    install = result.add_argument_group('install options')
+    install.add_argument('--directory', metavar='PATH', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
+    install.add_argument('--repository', metavar='OWNER/REPO', help='GitHub repository (default: Weeks-Consulting/code-server-aio)')
+    install.add_argument('--version', metavar='TAG', help='Release tag vX.Y.Z[-N] (default: latest stable release, image tag: latest)')
+    install.add_argument('--dry-run', action='store_true', help='Preview installation without changes or network requests')
     return result
 
 
@@ -221,6 +246,10 @@ def manage(args, directory):
             command += ['--pull', 'always']
     elif args.action == 'stop':
         command += ['down', '--remove-orphans']
+    elif args.action == 'logs':
+        command += ['logs']
+        if args.follow:
+            command += ['--follow']
     elif args.action == 'backup':
         # Scheduled and manual runs must share the sidecar's filesystem lock.
         command += ['exec', '-T', 'backup', 'backup']
@@ -472,6 +501,8 @@ def install(args, upgrade=False):
 
 
 def validate_args(args):
+    if args.follow and args.action != 'logs':
+        fail('-f and --follow are only supported by the logs command')
     for option in ('directory', 'repository', 'version', 'project_name', 'archive', 'volume'):
         if getattr(args, option) == '':
             fail('Missing value for --' + option.replace('_', '-'))

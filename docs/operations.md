@@ -3,11 +3,16 @@
 ## Operation and customization
 
 ```sh
-docker compose logs -f
+./manage logs -f
 docker compose exec --user cloud-user code-server bash
 docker compose exec code-server supervisorctl status
 docker compose down
 ```
+
+`./manage logs` prints logs from all services and exits. Add `-f` (or `--follow`)
+to keep streaming new output; press Ctrl+C to stop following. Use the same
+`--backup local` or `--backup s3` and `--project-name` options as startup to include
+the backup sidecar and select your deployment.
 
 The container healthcheck expects HTTP 403 from an unauthenticated request to the
 real Envoy listener every 30 seconds. Only the exact `GET /` probe with the

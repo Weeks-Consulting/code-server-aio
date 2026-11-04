@@ -5,9 +5,8 @@
 Anyone granted Cloudflare Access to this development environment (passwordless
 sudo, Docker group, `SYS_ADMIN` with relaxed seccomp) should be treated as having
 root access to the Docker host. Restrict the Access policy to
-specific trusted users. A Service Auth token also grants root access to the VM;
-protect it as a root credential. For defense in depth, set the optional origin
-allowlists below in addition to restricting the Access policy.
+specific trusted users. For defense in depth, set the optional origin email
+allowlist below in addition to restricting the Access policy.
 
 1. Edit the installer's `.env` (or copy `.env.example` when using a checkout) and set:
    - `CODE_SERVER_IMAGE`: the published GHCR image (selected by the installer; defaults to the project image in a checkout).
@@ -55,8 +54,7 @@ Setting backup variables alone does not enable them.
 | `CF_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `http://code-server:8080`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
 | `CF_ACCESS_TEAM_DOMAIN` | Required for access; no default. | Cloudflare Access team hostname, such as `my-team.cloudflareaccess.com`. Supply only the hostname, without `https://`, a path, or a trailing slash. Envoy fetches signing keys from this team and checks the JWT issuer. Missing or invalid configuration prevents Envoy from starting. |
 | `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Audience matching is case-sensitive: copy the value exactly as Cloudflare provides it, without changing letter casing. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration prevents Envoy from starting. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
-| `CF_ACCESS_ALLOWED_EMAILS` | Optional; empty. | Comma-separated exact, case-sensitive email claims, for example `alice@example.com,bob@example.com`. |
-| `CF_ACCESS_ALLOWED_SERVICE_TOKENS` | Optional; empty. | Comma-separated exact `common_name` claims from Access service-token JWTs. If either allowlist is set, the signed token must match an email OR a service identity; missing claims and spoofed headers do not match. Invalid list syntax (an empty entry, whitespace inside an entry, or an email without exactly one `@`) stops startup. Both empty delegates identity authorization to the Access policy. |
+| `CF_ACCESS_ALLOWED_EMAILS` | Optional; empty. | Comma-separated exact, case-sensitive email claims, for example `alice@example.com,bob@example.com`. If set, the signed token must match an email; missing claims and spoofed headers do not match. Invalid list syntax (an empty entry, whitespace inside an entry, or an email without exactly one `@`) stops startup. Empty delegates identity authorization to the Access policy. |
 
 ### Optional backups
 
@@ -113,7 +111,7 @@ requests. Exhausted startup retries trigger a container restart.
 
 `build/runtime/start-envoy.py` renders `build/runtime/envoy.json.template` into
 `/run/envoy/envoy.json` at startup using JSON-aware string substitution, then
-executes Envoy. No additional templating dependency is required. All four Access
+executes Envoy. No additional templating dependency is required. All three Access
 variables are passed to the workspace container. `just upgrade` updates the binary
 version and both architecture checksums alongside the other dependency pins.
 
@@ -124,8 +122,8 @@ Rebuild or pull the updated workspace image, and use `docker compose up -d --rem
 Envoy's native JWT filter checks signatures, issuer, audience, required expiration,
 and not-before timestamps with one second of clock tolerance; RBAC restricts the
 verified algorithm to RS256. Small Lua filters validate startup settings,
-reject duplicate or missing JWT headers, and match the optional literal email and
-service-token allowlists against verified claims. Invalid settings prevent Envoy
+reject duplicate or missing JWT headers, and match the optional literal email
+allowlist against verified claims. Invalid settings prevent Envoy
 from starting. Cookies, bearer tokens, and query parameters are not accepted as
 substitutes for `Cf-Access-Jwt-Assertion`.
 
@@ -151,7 +149,7 @@ the public 403 page.
 WebSocket tokens are checked when the connection opens. Idle streams close after
 one hour, and all streams have an absolute two-hour lifetime, independent of key
 refresh success. Open sockets are not revalidated when their JWT expires. To revoke
-access immediately, remove the user or service token from the Access policy, revoke
+access immediately, remove the user from the Access policy, revoke
 its Access sessions, then run `docker compose restart code-server` with the deployment's
 usual Compose options to disconnect existing sockets. Apply origin allowlist changes
 with `manage start`, which recreates the workspace container with its updated environment.

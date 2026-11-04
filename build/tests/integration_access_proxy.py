@@ -140,7 +140,7 @@ class AccessProxyTests(unittest.TestCase):
             self.process.wait(timeout=10)
             self.process = None
 
-    def start(self, identities=(), change=None, env_override=None, expect_ready=True):
+    def start(self, emails=(), change=None, env_override=None, expect_ready=True):
         self.stop()
         config = copy.deepcopy(BOOTSTRAP)
         # Fixture clients use loopback TCP; production uses a private Unix socket.
@@ -171,8 +171,7 @@ class AccessProxyTests(unittest.TestCase):
             os.setgid(10000)
             os.setuid(10000)
         environment = {**os.environ, 'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD,
-                       'CF_ACCESS_ALLOWED_EMAILS': ','.join(value for claim, value in identities if claim == 'email'),
-                       'CF_ACCESS_ALLOWED_SERVICE_TOKENS': ','.join(value for claim, value in identities if claim == 'common_name'),
+                       'CF_ACCESS_ALLOWED_EMAILS': ','.join(emails),
                        **(env_override or {})}
         self.process = subprocess.Popen(['python3', '-c',
                                          'import importlib.util, os, sys; '
@@ -334,19 +333,19 @@ class AccessProxyTests(unittest.TestCase):
                 finally:
                     connection.close()
 
-    def test_identity_allowlists(self):
-        for identities in ([('email', 'user@example.com')], [('common_name', 'service.access')],
-                           [('email', 'user@example.com'), ('common_name', 'service.access')]):
-            self.start(identities)
-            for claims, expected in (({}, 403),
-                    ({'email': 'user@example.com'}, 200 if ('email', 'user@example.com') in identities else 403),
-                    ({'common_name': 'service.access'}, 200 if ('common_name', 'service.access') in identities else 403),
-                    ({'email': 'User@example.com'}, 403), ({'email': 'prefix-user@example.com'}, 403),
-                    ({'email': ['user@example.com']}, 403)):
-                with self.subTest(identities=identities, claims=claims):
-                    self.assertEqual(self.status(self.token(claims)), expected)
-            self.assertEqual(self.status(self.token(), headers={'Cf-Access-Authenticated-User-Email': 'user@example.com'}), 403)
-            self.assertEqual(self.status(self.token({'email': 'user@example.com'}, key=1)), 403)
+    def test_email_allowlist(self):
+        self.start(['user@example.com', 'other@example.com'])
+        for claims, expected in (({}, 403),
+                ({'email': 'user@example.com'}, 200),
+                ({'email': 'other@example.com'}, 200),
+                ({'common_name': 'service.access'}, 403),
+                ({'email': 'User@example.com'}, 403),
+                ({'email': 'prefix-user@example.com'}, 403),
+                ({'email': ['user@example.com']}, 403)):
+            with self.subTest(claims=claims):
+                self.assertEqual(self.status(self.token(claims)), expected)
+        self.assertEqual(self.status(self.token(), headers={'Cf-Access-Authenticated-User-Email': 'user@example.com'}), 403)
+        self.assertEqual(self.status(self.token({'email': 'user@example.com'}, key=1)), 403)
 
     def test_allowlist_whitespace_and_literal_matching(self):
         # Valid local parts such as apostrophes must not stop Envoy from starting.
@@ -446,8 +445,7 @@ class AccessProxyTests(unittest.TestCase):
                             ('CF_ACCESS_TEAM_DOMAIN', DOMAIN + '/path'), ('CF_ACCESS_AUD', 'bad'),
                             ('CF_ACCESS_ALLOWED_EMAILS', 'user@example.com,'),
                             ('CF_ACCESS_ALLOWED_EMAILS', 'first last@example.com'),
-                            ('CF_ACCESS_ALLOWED_EMAILS', 'user@@example.com'),
-                            ('CF_ACCESS_ALLOWED_SERVICE_TOKENS', 'bad identity')):
+                            ('CF_ACCESS_ALLOWED_EMAILS', 'user@@example.com')):
             with self.subTest(name=name, value=value):
                 self.start(env_override={name: value}, expect_ready=False)
                 self.assertNotEqual(self.process.wait(timeout=10), 0)

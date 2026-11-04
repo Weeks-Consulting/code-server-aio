@@ -48,6 +48,8 @@ reads the configuration beside itself. If installed with `sudo`, run it with
 | --- | --- |
 | `./manage --pull` | Start in the background and pull configured images. |
 | `./manage --foreground` | Start attached to logs. |
+| `./manage logs` | Print logs from all services. |
+| `./manage logs -f` | Print logs and follow new output. |
 | `./manage --backup local --pull` | Start with local backups. |
 | `./manage --backup s3 --pull` | Start with S3 or R2 backups. |
 | `./manage stop` | Remove project containers and networks; keep volumes. |
