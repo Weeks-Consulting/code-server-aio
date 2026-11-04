@@ -2,11 +2,6 @@ name: Promote release
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Tested release tag to promote to latest (e.g. v4.141.0-1)
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -25,6 +20,14 @@ jobs:
       contents: write
       packages: write
     steps:
+      - name: Require a release tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [[ "$REF_TYPE" != tag ]]; then
+            echo 'Select a release tag under Run workflow; branches cannot be promoted.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -39,7 +42,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           export IMAGE="ghcr.io/${REPOSITORY,,}"
           bash build/ci/release.sh promote-release

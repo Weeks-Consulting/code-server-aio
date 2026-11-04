@@ -78,8 +78,12 @@ Use `sudo` if installed as root. Older installed managers need this version of
 `manage.py` before they accept `upgrade --version`; use `manage install --version`
 with the deployment's `--directory` to refresh an older installation first.
 
-Once testing is complete, open **Actions → Promote release → Run workflow** on
-`main` and enter the full tag, such as `v4.141.0-1`. This checks that the release
+Once testing is complete, open **Actions → Promote release → Run workflow** and
+select the tested tag, such as `v4.141.0-1`, in the ref selector. The workflow uses
+that tag automatically and rejects branch selections. The selected tag must contain
+this version of the promotion workflow; older tags retain their original workflow
+and tag input. Push the workflow to `main` as well so manual runs are available.
+This checks that the release
 has all installer assets and resolves its versioned image digest. It points the
 container's `:latest` at that existing digest, then marks the GitHub release stable
 and latest. There is no rebuild. Use this workflow to update both latest pointers.
