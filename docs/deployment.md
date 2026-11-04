@@ -35,6 +35,44 @@ code stay in the checkout.
 Configure the selected backup mode in `.env` before starting. Use the same launch
 options when applying updates so the same services and project are selected.
 
+### Command option reference
+
+Commands and options may appear in any order. Omitting the command runs `start`.
+Every command accepts `-h` or `--help`. Brackets below mark optional arguments;
+arguments outside brackets are required.
+
+| Command | All applicable options |
+| --- | --- |
+| `start` (default) | `[--backup none\|s3\|local] [--project-name NAME] [--foreground] [--pull]` |
+| `stop` | `[--backup none\|s3\|local] [--project-name NAME]` |
+| `logs` | `[--backup none\|s3\|local] [--project-name NAME] [-f\|--follow]` |
+| `upgrade` | No command-specific options. |
+| `backup` | `--backup local\|s3 [--project-name NAME]` |
+| `backups` | `--backup local [--project-name NAME]` |
+| `restore` | `--archive FILE --volume NAME` |
+| `install` | `[--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]` |
+
+`--backup` defaults to `none` on each invocation; setting backup variables in `.env`
+does not enable the backup service. To enable local backups, configure their settings
+in `.env` and start with `./manage start --backup local --pull`. For S3 or R2, use
+`./manage start --backup s3 --pull`. Repeat that mode on subsequent `start`, `stop`,
+`logs`, and `backup` commands, and use the same `--project-name NAME` if you set one.
+For example:
+
+```sh
+./manage start --backup local --pull
+./manage logs --backup local --follow
+./manage backup --backup local
+./manage backups --backup local
+./manage stop --backup local
+```
+
+`--foreground` and `--pull` apply only to `start`; `-f`/`--follow` applies only to
+`logs`. `upgrade` refreshes files without restarting; apply the upgrade with
+`start --pull` and the same backup and project options. See the
+[installation guide](installation.md) for install option defaults and the
+[restore guide](restore.md) for archive and volume requirements.
+
 ### Upgrade to the latest release
 
 Run `manage upgrade` to install the latest stable GitHub release, then run

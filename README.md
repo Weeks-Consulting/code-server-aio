@@ -60,6 +60,11 @@ reads the configuration beside itself. If installed with `sudo`, run it with
 | `./manage restore --archive FILE --volume NAME` | Restore an archive into an explicit existing home volume. |
 | `./manage --help` | Show all options. |
 
+See the [command option reference](docs/deployment.md#command-option-reference) for
+every command’s applicable options. `--backup` defaults to `none` on each invocation;
+to enable local backups, use `./manage start --backup local --pull` and repeat
+`--backup local` on later starts, stops, logs, and manual backups.
+
 Configure the selected backup destination in `.env` before enabling it. Backups
 pause the application while archiving `/home`; nested Docker data is excluded.
 Save `BACKUP_GPG_PASSPHRASE` separately: archives cannot be recovered without it.

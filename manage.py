@@ -147,34 +147,46 @@ def parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description='Install and manage a code-server deployment.\n'
                     'Commands and options may appear in any order. With no command, start is used.\n\n'
-                    'commands:\n'
-                    '  start     Start services in the background (default command).\n'
-                    '  stop      Remove containers and networks; keep volumes.\n'
-                    '  logs      Print service logs; add -f to follow.\n'
-                    '  upgrade   Install the latest release and image setting; no restart.\n'
-                    '  backup    Run a backup now (requires --backup local or s3).\n'
-                    '  backups   List local archives (requires --backup local).\n'
-                    '  restore   Replace a home volume (requires --archive and --volume).\n'
-                    '  install   Install or refresh deployment files; no services started.',
+                    'commands (brackets mark optional arguments):\n'
+                    '  configure [--backup {none,s3,local}] [--project-name NAME] [--pull] [--start]\n'
+                    '      Create/update containers and save configuration; --start starts them afterward.\n'
+                    '  start\n'
+                    '      Start existing configured containers (default command).\n'
+                    '  stop\n'
+                    '      Stop containers; keep containers, networks, and volumes.\n'
+                    '  logs [-f|--follow]\n'
+                    '      Print logs from the saved deployment; add -f to follow.\n'
+                    '  upgrade\n'
+                    '      Install the latest release and image setting; no container changes.\n'
+                    '  backup\n'
+                    '      Run a backup inside the configured, running backup service.\n'
+                    '  backups\n'
+                    '      List archives from the configured local backup destination.\n'
+                    '  restore --archive FILE --volume NAME\n'
+                    '      Replace an existing home volume.\n'
+                    '  install [--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]\n'
+                    '      Install or refresh deployment files; no services started.\n'
+                    '  All commands accept -h or --help.',
         epilog='examples:\n'
-               '  manage --pull                       Start and pull configured images\n'
-               '  manage logs -f                      Follow service logs\n'
-               '  manage start --backup local --pull  Start with local backups\n'
-               '  manage backup --backup local        Run a local backup now\n'
+               '  manage configure --pull --start                Configure and start\n'
+               '  manage configure --backup local --pull --start  Enable local backups and start\n'
+               '  manage stop                                    Stop existing containers\n'
+               '  manage start                                   Resume existing containers\n'
+               '  manage logs -f                                 Follow service logs\n'
+               '  manage backup                                  Run a backup now\n'
                '  manage restore --archive FILE --volume NAME\n\n'
-               'Deployment commands read .env beside manage, regardless of your current directory.\n'
-               'For stop, logs, backup, and backups, use the same --backup and\n'
-               '--project-name settings as startup. If installed with sudo, run with sudo.')
+               'configure reads .env and Compose files beside manage and saves a private configuration.\n'
+               'Later commands use that saved configuration, including backup mode and project name.\n'
+               'Run configure again to apply changes. If installed with sudo, run with sudo.')
     result.add_argument('action', nargs='?', default='start',
-                        choices=['install', 'start', 'stop', 'logs', 'upgrade', 'backup', 'backups', 'restore'],
+                        choices=['install', 'configure', 'start', 'stop', 'logs', 'upgrade', 'backup', 'backups', 'restore'],
                         help=argparse.SUPPRESS)
-    deployment = result.add_argument_group('deployment options (start, stop, logs, backup, backups)')
-    deployment.add_argument('--backup', choices=['none', 's3', 'local'], default='none',
-                            help='Backup services to include (default: none)')
-    deployment.add_argument('--project-name', metavar='NAME', help='Override the Compose project name')
-    start = result.add_argument_group('start options')
-    start.add_argument('--foreground', action='store_true', help='Stay attached to service output instead of starting in the background')
-    start.add_argument('--pull', action='store_true', help='Pull configured images before starting')
+    configure = result.add_argument_group('configure options')
+    configure.add_argument('--backup', choices=['none', 's3', 'local'],
+                           help='Backup services to include (default: saved mode, or none on first configure)')
+    configure.add_argument('--project-name', metavar='NAME', help='Compose project name (default: saved name, or Compose default)')
+    configure.add_argument('--pull', action='store_true', help='Pull configured images before creating containers')
+    configure.add_argument('--start', action='store_true', help='Start containers after configuring them')
     logs = result.add_argument_group('logs options')
     logs.add_argument('-f', '--follow', action='store_true', help='Keep streaming new log output')
     restore = result.add_argument_group('restore options (both required)')
@@ -186,6 +198,74 @@ def parser():
     install.add_argument('--version', metavar='TAG', help='Release tag vX.Y.Z[-N] (default: latest stable release, image tag: latest)')
     install.add_argument('--dry-run', action='store_true', help='Preview installation without changes or network requests')
     return result
+
+
+CONFIGURATION = '.manage.compose.json'
+
+
+def saved_configuration(directory):
+    path = directory / CONFIGURATION
+    if path.is_symlink():
+        fail('Expected a regular saved configuration file: ' + str(path))
+    if not path.is_file():
+        fail('No saved configuration. Run manage configure --start first; add --backup local or s3 if needed.')
+    return json.loads(path.read_text())
+
+
+def compose_command(directory, path):
+    # The snapshot is already interpolated; do not read changing deployment .env values.
+    return ['docker', 'compose', '--project-directory', str(directory),
+            '--env-file', '/dev/null', '-f', str(path)]
+
+
+def configure(args, directory):
+    path = directory / CONFIGURATION
+    with env_lock(path):
+        previous = saved_configuration(directory) if path.exists() else {}
+        mode = args.backup if args.backup is not None else previous.get('x-manage-backup', 'none')
+        project = args.project_name or previous.get('name')
+        command = ['docker', 'compose', '--project-directory', str(directory),
+                   '--env-file', str(directory / '.env')]
+        if project:
+            command += ['--project-name', project]
+        files = ['compose.yaml']
+        if mode != 'none':
+            files += ['compose.backup-common.yaml',
+                      'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml']
+        for name in files:
+            source = directory / name
+            if not source.is_file():
+                fail(f'Required Compose file is missing: {source}')
+            command += ['-f', str(source)]
+        if mode == 'local':
+            os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
+        if mode != 'none':
+            subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(directory / '.env')], check=True)
+            os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
+        total = int(subprocess.check_output(['docker', 'info', '--format', '{{.MemTotal}}'], text=True).strip())
+        if total <= 0:
+            fail('Docker did not report a positive host memory total.')
+        os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
+        if args.pull:
+            warn_release(command)
+        model = json.loads(subprocess.check_output(command + ['config', '--format', 'json'], text=True))
+        model['x-manage-backup'] = mode
+        # Compose config escapes literal dollars for reuse as a Compose file.
+        # Keep secrets private, and publish the snapshot only after creation succeeds.
+        descriptor, temporary = tempfile.mkstemp(prefix='.manage.', suffix='.json', dir=directory)
+        try:
+            with os.fdopen(descriptor, 'w') as output:
+                json.dump(model, output)
+            create = compose_command(directory, temporary) + ['create', '--remove-orphans']
+            if args.pull:
+                create += ['--pull', 'always']
+            subprocess.run(create, check=True)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        if args.start:
+            subprocess.run(compose_command(directory, path) + ['start'], check=True)
 
 
 def manage(args, directory):
@@ -207,55 +287,34 @@ def manage(args, directory):
                 'BACKUP_GPG_PASSPHRASE'].replace('$$', '$')
         os.execvp('sh', ['sh', str(restore), archive, args.volume])
     os.chdir(directory)
-    if not (directory / '.env').is_file():
-        fail('Configure .env in the deployment directory before starting.')
-    if not os.access(directory / '.env', os.R_OK):
-        fail('Cannot read .env. If installed as root, run manage with sudo.')
-    if args.action == 'upgrade':
-        upgrade(directory)
+    if args.action in ('upgrade', 'configure'):
+        if not (directory / '.env').is_file():
+            fail('Configure .env in the deployment directory before configuring containers.')
+        if not os.access(directory / '.env', os.R_OK):
+            fail('Cannot read .env. If installed as root, run manage with sudo.')
+        if args.action == 'upgrade':
+            upgrade(directory)
+        else:
+            configure(args, directory)
         return
-    command = ['docker', 'compose', '--project-directory', str(directory), '--env-file', str(directory / '.env')]
-    if args.project_name:
-        command += ['--project-name', args.project_name]
-    files = ['compose.yaml']
-    if args.backup != 'none':
-        files += ['compose.backup-common.yaml',
-                  'compose.backup-local.yaml' if args.backup == 'local' else 'compose.backup.yaml']
-    if args.backup == 'local':
-        os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
-    for name in files:
-        path = directory / name
-        if not path.is_file():
-            fail(f'Required Compose file is missing: {path}')
-        command += ['-f', str(path)]
-    if args.backup != 'none' and args.action == 'start':
-        subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(directory / '.env')], check=True)
-        os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
-    if args.action == 'start':
-        total = int(subprocess.check_output(
-            ['docker', 'info', '--format', '{{.MemTotal}}'], text=True).strip())
-        if total <= 0:
-            fail('Docker did not report a positive host memory total.')
-        os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
-        if args.pull:
-            warn_release(command)
-        command += ['up', '--remove-orphans']
-        if not args.foreground:
-            command += ['-d']
-        if args.pull:
-            command += ['--pull', 'always']
-    elif args.action == 'stop':
-        command += ['down', '--remove-orphans']
+    model = saved_configuration(directory)
+    command = compose_command(directory, directory / CONFIGURATION)
+    if args.action in ('start', 'stop'):
+        command += [args.action]
     elif args.action == 'logs':
         command += ['logs']
         if args.follow:
             command += ['--follow']
     elif args.action == 'backup':
+        if model.get('x-manage-backup', 'none') == 'none':
+            fail('backup requires a configured backup service; run manage configure --backup local or s3 --start.')
         # Scheduled and manual runs must share the sidecar's filesystem lock.
         command += ['exec', '-T', 'backup', 'backup']
     elif args.action == 'backups':
+        if model.get('x-manage-backup') != 'local':
+            fail('backups requires configured local backups; use your storage provider to list S3 archives.')
         command += ['run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'backup', '-ec',
-                    'find /archive -maxdepth 1 -type f \\( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \\) -exec ls -lh {} \\;']
+                    'find /archive -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \) -exec ls -lh {} \;']
     os.execvp(command[0], command)
 
 
@@ -493,11 +552,11 @@ def install(args, upgrade=False):
     if upgrade:
         print(f'\nUpgraded deployment files in {directory} to release {version}.')
         print('Set CODE_SERVER_IMAGE=' + image)
-        print(f'Review new settings in {env}, then run manage --pull with your usual launch options to apply the upgrade.')
+        print(f'Review new settings in {env}, then run manage configure --pull --start to apply the upgrade.')
         return
     print(f'\nInstalled deployment files in {directory} (release {version}).')
     print(f'Edit {env} to configure Cloudflare Access and your tunnel before starting.')
-    print(f'Then run sh "{directory}/manage" to launch. No services have been started.')
+    print(f'Then run sh "{directory}/manage" configure --pull --start to launch. No services have been started.')
 
 
 def validate_args(args):
@@ -506,27 +565,15 @@ def validate_args(args):
     for option in ('directory', 'repository', 'version', 'project_name', 'archive', 'volume'):
         if getattr(args, option) == '':
             fail('Missing value for --' + option.replace('_', '-'))
-    if args.action == 'install':
-        if args.backup != 'none' or args.foreground or args.pull or args.project_name or args.archive or args.volume:
-            fail('install does not support startup, backup, or restore options')
-        return
-    if args.directory is not None or args.repository is not None or args.version is not None or args.dry_run:
+    if args.action != 'configure' and (args.backup is not None or args.project_name is not None or args.pull or args.start):
+        fail('--backup, --project-name, --pull, and --start are only supported by configure')
+    if args.action != 'install' and (args.directory is not None or args.repository is not None or args.version is not None or args.dry_run):
         fail('--directory, --repository, --version, and --dry-run are only supported by install')
-    if args.action != 'start' and (args.foreground or args.pull):
-        fail('--foreground and --pull are only supported by the start command')
     if args.action == 'restore':
         if not args.archive or not args.volume:
             fail('restore requires --archive FILE and --volume NAME')
-        if args.backup != 'none' or args.project_name:
-            fail('restore targets an explicit volume; omit --backup and --project-name')
     elif args.archive or args.volume:
         fail('--archive and --volume are only supported by restore')
-    if args.action == 'backup' and args.backup == 'none':
-        fail('backup requires --backup s3 or local')
-    if args.action == 'backups' and args.backup != 'local':
-        fail('backups requires --backup local; use your storage provider to list S3 archives')
-    if args.action == 'upgrade' and (args.backup != 'none' or args.project_name):
-        fail('upgrade only updates .env; omit --backup and --project-name')
 
 
 def main():
