@@ -6,9 +6,8 @@ on:
     paths-ignore: ['docs/**', '**.md']
   push:
     branches: [main]
+    tags: ['v*']
     paths-ignore: ['docs/**', '**.md']
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       publish_latest:
@@ -23,9 +22,9 @@ permissions:
 
 concurrency:
   # PR and branch-push checks never publish, so newer commits supersede them.
-  # Release, schedule, and manual runs must each reach completion.
-  group: container-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.event_name == 'push') && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  # Tag, schedule, and manual runs must each reach completion.
+  group: container-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')) && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 jobs:
   source:
@@ -54,7 +53,7 @@ jobs:
           PUBLISH_LATEST: ${{ inputs.publish_latest && 'true' || 'false' }}
           SOURCE_REF: ${{ github.ref }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
+          RELEASE_TAG: ${{ (github.ref_type == 'tag' && github.ref_name) || '' }}
         run: bash build/ci/release.sh select-source
 
   test:
@@ -238,13 +237,13 @@ jobs:
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.manifest.outputs.digest }}
-          PRERELEASE: ${{ github.event.release.prerelease || false }}
+          PRERELEASE: ${{ github.event_name == 'push' }}
         run: bash build/ci/release.sh publish-tags
 
   release-assets:
     name: Publish installer and deployment checksums
     needs: [source, publish]
-    if: github.event_name == 'release'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -271,4 +270,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.source.outputs.tag }}
-        run: gh release upload "$RELEASE_TAG" build/tools/install.sh manage.py code-server-aio.tar.gz SHA256SUMS --clobber
+        run: bash build/ci/release.sh publish-release

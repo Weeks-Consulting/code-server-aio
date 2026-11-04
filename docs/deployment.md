@@ -53,7 +53,7 @@ Every command accepts `-h` or `--help`. Brackets mark optional arguments.
 | `start` (default) | No command-specific options; start existing containers. |
 | `stop` | No command-specific options; stop existing containers. |
 | `logs` | `[-f\|--follow]` |
-| `upgrade` | No command-specific options; install latest release files and image setting. |
+| `upgrade` | `[--version TAG]`; install selected release files and image setting (default: latest stable). |
 | `backup` | No command-specific options; requires configured, running local or S3 backups. |
 | `backups` | No command-specific options; requires configured local backups. |
 | `restore` | `--archive FILE --volume NAME` (both required) |
@@ -92,9 +92,16 @@ project name to create the saved configuration. For example,
 ```
 
 `upgrade` installs the latest stable GitHub release without changing containers.
-It uses the repository from your configured GHCR image, verifies the release bundle
-against `SHA256SUMS`, refreshes release files (saving `.bak` copies), appends new
-`.env` settings, and replaces the image setting, including an existing digest pin.
+To select a specific release, including a prerelease you want to test, use:
+
+```sh
+./manage upgrade --version v4.144.0-1
+./manage configure --pull --start
+```
+
+Both modes use the repository from your configured GHCR image, verify the release bundle
+against `SHA256SUMS`, refresh release files (saving `.bak` copies), append new
+`.env` settings, and replace the image setting, including an existing digest pin.
 Review new settings, then run `configure --pull --start`; the saved backup mode and
 project name are retained. No GitHub account is needed.
 In a source checkout, `upgrade` refuses to overwrite tracked files; check out the

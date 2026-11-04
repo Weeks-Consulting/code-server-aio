@@ -78,7 +78,7 @@ class InstallationTests(unittest.TestCase):
             self.downloads.append(url)
             if url.endswith('/SHA256SUMS'):
                 return self.checksums()
-            if url.endswith('/releases/latest'):
+            if url.endswith('/releases/latest') or '/releases/tags/' in url:
                 return json.dumps(self.release).encode()
             if url.endswith('/' + management.BUNDLE):
                 return bundle(self.files)
@@ -272,6 +272,32 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.downloads[1:], [
             'https://github.com/Example/Fork/releases/download/v1.3.0/' + management.BUNDLE,
             'https://github.com/Example/Fork/releases/download/v1.3.0/SHA256SUMS'])
+
+    def test_upgrade_selects_prerelease_and_checks_bundle(self):
+        env = self.install_release('ghcr.io/example/fork:1.2.3')
+        self.release['prerelease'] = True
+        args = management.parser().parse_args(['upgrade', '--version', 'v1.3.0'])
+        management.validate_args(args)
+        with patch.object(management.os, 'chdir'):
+            management.manage(args, self.directory)
+        self.assertEqual(self.downloads[0], 'https://api.github.com/repos/example/fork/releases/tags/v1.3.0')
+        self.assertIn('CODE_SERVER_IMAGE=ghcr.io/example/fork:1.3.0\n', env.read_text())
+        self.assertEqual((self.directory / 'compose.yaml').read_bytes(), self.files['compose.yaml'])
+
+    def test_selected_upgrade_rejects_bad_release_without_changes(self):
+        self.install_release('ghcr.io/example/fork:1.2.3')
+        before = self.deployment_state()
+        for version, release in (
+            ('v1.3.0', {**self.release, 'draft': True}),
+            ('v1.4.0', self.release),
+            ('v1.3.0', {**self.release, 'assets': []}),
+            ('v1.3.0', {**self.release, 'html_url': 'https://github.com/other/repo/releases/tag/v1.3.0'}),
+            ('../latest', self.release),
+        ):
+            with self.subTest(version=version, release=release), patch.dict(self.release, release, clear=True):
+                with self.assertRaises(SystemExit):
+                    management.upgrade(self.directory, version)
+                self.assertEqual(before, self.deployment_state())
 
     def test_upgrade_failures_leave_deployment_unchanged(self):
         self.install_release('ghcr.io/example/fork:1.2.3')

@@ -87,8 +87,11 @@ Do not change these without discussing it first.
   latest stable tag instead of building directly. Provenance records the run's own
   ref, so this is what makes rebuilt images attest to their tag. Rebuilds therefore
   use the tag's workflow and files, not `main`'s; that is intended.
+- Version tag pushes publish prereleases and versioned images after testing. Only
+  the manual promotion workflow makes a release stable/latest, reusing its image
+  digest without rebuilding. Serialize promotion with image publication.
 - PR and `main` push runs never publish, so they skip documentation-only changes
-  and newer commits cancel them. Release, schedule, and manual runs always complete.
+  and newer commits cancel them. Tag, schedule, and manual runs always complete.
 
 ### Host tooling and cleanup
 

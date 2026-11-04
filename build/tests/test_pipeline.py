@@ -23,7 +23,11 @@ class PipelineTests(unittest.TestCase):
         self.assertIn('publish', dependencies('release-assets'))
         self.assertTrue({'test', 'check-host'} <= dependencies('publish'))
         self.assertNotRegex(jobs['release-assets'], r'always\(\)|continue-on-error: true')
-        self.assertIn("if: github.event_name == 'release'", jobs['release-assets'])
+        self.assertIn("if: github.event_name == 'push' && github.ref_type == 'tag'", jobs['release-assets'])
+        self.assertIn("tags: ['v*']", workflow)
+        self.assertNotIn("  release:\n", workflow)
+        self.assertIn("github.ref_type == 'branch'", workflow)
+        self.assertIn("run: bash build/ci/release.sh publish-release", jobs['release-assets'])
         # Only the source job may dispatch rebuilds; test jobs never get write access.
         self.assertIn('      actions: write\n', jobs['source'])
         self.assertRegex(jobs['test'], r'permissions:\n      contents: read\n    timeout')
@@ -36,6 +40,19 @@ class PipelineTests(unittest.TestCase):
         self.assertRegex(host, r'container-image: debian:13-slim@sha256:[a-f0-9]{64}')
         self.assertEqual(host.count('run: sh build/tests/check.sh'), 1)
         self.assertEqual(host.count('run: sh build/tests/install-host-deps.sh'), 1)
+
+    def test_promotion_serializes_with_publication_without_rebuilding(self):
+        promotion = (ROOT / '.github/workflows/promote.yaml').read_text()
+        container = (ROOT / '.github/workflows/container.yaml').read_text()
+        for workflow in (promotion, container):
+            self.assertIn('group: publish-${{ github.repository }}', workflow)
+            self.assertIn('queue: max', workflow)
+        self.assertIn('workflow_dispatch:', promotion)
+        self.assertIn('RELEASE_TAG: ${{ inputs.tag }}', promotion)
+        self.assertIn('contents: write', promotion)
+        self.assertIn('packages: write', promotion)
+        self.assertIn('bash build/ci/release.sh promote-release', promotion)
+        self.assertNotIn('build-push-action', promotion)
 
     def test_host_bootstrap_only_separates_platform_setup(self):
         for system in ('Linux', 'Darwin', 'unsupported'):

@@ -95,10 +95,18 @@ def latest_tag(repository, timeout=15):
     return stable_tag(release)
 
 
-def published_release(repository):
-    """Return the latest stable tag and the repository's canonical owner/repo spelling."""
-    release = json.loads(download(f'https://api.github.com/repos/{repository}/releases/latest'))
-    tag = stable_tag(release)
+def published_release(repository, version=None):
+    """Resolve a published release and the repository's canonical spelling."""
+    if version and not re.fullmatch(TAG, version):
+        fail(f'Expected a release tag such as v4.141.0 or v4.141.0-1; got: {version}')
+    endpoint = f'tags/{version}' if version else 'latest'
+    release = json.loads(download(f'https://api.github.com/repos/{repository}/releases/{endpoint}'))
+    if version:
+        tag = release['tag_name']
+        if release.get('draft') or tag != version:
+            fail('GitHub returned an invalid published release tag')
+    else:
+        tag = stable_tag(release)
     # Release assets upload only after the images are tested and published.
     if not {BUNDLE, 'SHA256SUMS'} <= {asset.get('name') for asset in release.get('assets', [])}:
         fail(f'Release {tag} is still publishing: its deployment bundle is not available yet; try again later.')
@@ -123,8 +131,8 @@ def env_lock(path):
         yield
 
 
-def upgrade(directory):
-    """Install the latest release's files and image together so they stay on one release."""
+def upgrade(directory, version=None):
+    """Install the selected release's files and image together."""
     path = directory / ".env"
     try:
         # A checkout's deployment files are tracked source; never overwrite them.
@@ -133,7 +141,8 @@ def upgrade(directory):
                              "the release tag with git and set CODE_SERVER_IMAGE in .env.")
         if path.is_symlink() or not path.is_file():
             raise ValueError("Expected a regular .env file")
-        version, repository = published_release(image_repository(path.read_text()))
+        repository = image_repository(path.read_text())
+        version, repository = (published_release(repository, version) if version else published_release(repository))
         # install_files rereads .env under the lock before changing it.
         install(argparse.Namespace(directory=str(directory), repository=repository,
                                    version=version, dry_run=False), upgrade=True)
@@ -156,8 +165,8 @@ def parser():
                     '      Stop containers; keep containers, networks, and volumes.\n'
                     '  logs [-f|--follow]\n'
                     '      Print logs from the saved deployment; add -f to follow.\n'
-                    '  upgrade\n'
-                    '      Install the latest release and image setting; no container changes.\n'
+                    '  upgrade [--version TAG]\n'
+                    '      Install a selected release (default: latest stable); no container changes.\n'
                     '  backup\n'
                     '      Run a backup inside the configured, running backup service.\n'
                     '  backups\n'
@@ -195,8 +204,9 @@ def parser():
     install = result.add_argument_group('install options')
     install.add_argument('--directory', metavar='PATH', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
     install.add_argument('--repository', metavar='OWNER/REPO', help='GitHub repository (default: Weeks-Consulting/code-server-aio)')
-    install.add_argument('--version', metavar='TAG', help='Release tag vX.Y.Z[-N] (default: latest stable release, image tag: latest)')
     install.add_argument('--dry-run', action='store_true', help='Preview installation without changes or network requests')
+    release = result.add_argument_group('release selection (install and upgrade)')
+    release.add_argument('--version', metavar='TAG', help='Release tag vX.Y.Z[-N], including prereleases (default: latest stable)')
     return result
 
 
@@ -300,7 +310,7 @@ def manage(args, directory):
         if not os.access(directory / '.env', os.R_OK):
             fail('Cannot read .env. If installed as root, run manage with sudo.')
         if args.action == 'upgrade':
-            upgrade(directory)
+            upgrade(directory, args.version)
         else:
             configure(args, directory)
         return
@@ -574,8 +584,10 @@ def validate_args(args):
             fail('Missing value for --' + option.replace('_', '-'))
     if args.action != 'configure' and (args.backup is not None or args.project_name is not None or args.pull or args.start):
         fail('--backup, --project-name, --pull, and --start are only supported by configure')
-    if args.action != 'install' and (args.directory is not None or args.repository is not None or args.version is not None or args.dry_run):
-        fail('--directory, --repository, --version, and --dry-run are only supported by install')
+    if args.action != 'install' and (args.directory is not None or args.repository is not None or args.dry_run):
+        fail('--directory, --repository, and --dry-run are only supported by install')
+    if args.version is not None and args.action not in ('install', 'upgrade'):
+        fail('--version is only supported by install and upgrade')
     if args.action == 'restore':
         if not args.archive or not args.volume:
             fail('restore requires --archive FILE and --volume NAME')

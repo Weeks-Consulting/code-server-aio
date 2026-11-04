@@ -23,7 +23,7 @@ select_source() (
             dispatched=true
             tag=
         fi
-    elif [[ "$EVENT_NAME" == release ]]; then
+    elif [[ "$EVENT_NAME" == push && "$SOURCE_REF" == refs/tags/* ]]; then
         publish=true
     fi
     printf 'tag=%s\npublish=%s\ndispatched=%s\n' "$tag" "$publish" "$dispatched" >> "$GITHUB_OUTPUT"
@@ -96,8 +96,44 @@ publish_tags() (
     printf 'Published attested image: %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
 )
 
+# Publish only after all checks, image publication, and checksum attestation pass.
+publish_release() (
+    assets=(build/tools/install.sh manage.py code-server-aio.tar.gz SHA256SUMS)
+    if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+        # A rerun may replace assets without changing the release's promotion state.
+        gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+    else
+        gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag \
+            --title "$RELEASE_TAG" --generate-notes --prerelease --latest=false
+    fi
+)
+
+# Promote an existing tested image by digest, without rebuilding it.
+promote_release() (
+    [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]] || {
+        echo 'Expected a vX.Y.Z or vX.Y.Z-N release tag (N >= 1).' >&2
+        exit 1
+    }
+    ready=$(gh release view "$RELEASE_TAG" --json isDraft,assets --jq \
+        '(.isDraft == false) and ((["install.sh", "manage.py", "code-server-aio.tar.gz", "SHA256SUMS"] - [.assets[].name]) | length == 0)')
+    [[ "$ready" == true ]] || {
+        echo 'Release must be published with all installer assets before promotion.' >&2
+        exit 1
+    }
+    promoted_digest=$(docker buildx imagetools inspect "$IMAGE:${RELEASE_TAG#v}" --format '{{.Manifest.Digest}}')
+    [[ "$promoted_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+        echo 'Could not resolve the versioned image digest.' >&2
+        exit 1
+    }
+    # Registry and GitHub updates cannot be atomic. Update the image first so a
+    # failed registry write cannot expose a new default installer release.
+    docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$promoted_digest"
+    gh release edit "$RELEASE_TAG" --prerelease=false --latest
+    printf 'Promoted %s: %s@%s\n' "$RELEASE_TAG" "$IMAGE" "$promoted_digest" >> "$GITHUB_STEP_SUMMARY"
+)
+
 case "${1:-}" in
-    select-source|release-version|publish-tags)
+    select-source|release-version|publish-tags|publish-release|promote-release)
         command=${1//-/_}
         shift
         "$command" "$@"
@@ -111,7 +147,7 @@ case "${1:-}" in
         stage_images "$@"
         ;;
     *)
-        echo "Usage: $0 {select-source|release-version|stage-images IMAGE ARTIFACT_DIR|publish-tags}" >&2
+        echo "Usage: $0 {select-source|release-version|stage-images IMAGE ARTIFACT_DIR|publish-tags|publish-release|promote-release}" >&2
         exit 1
         ;;
 esac
