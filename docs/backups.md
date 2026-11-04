@@ -5,24 +5,24 @@
 Both Offen backup overlays require GPG encryption and write `.tar.gz.gpg` archives.
 The installer generates a random 256-bit `BACKUP_GPG_PASSPHRASE` in `.env` if it is missing
 or empty, including when refreshing an existing installation. When using a checkout,
-`manage --backup local` or `manage --backup s3` generates it before starting services.
+`manage configure --backup local --start` or `manage configure --backup s3 --start` generates it before starting services.
 Manual backups use the running service's key and do not generate a replacement. Existing nonempty keys are
 preserved. Generated keys are never printed, and `.env` is saved with mode `600`.
 The initializer uses Python 3 and a persistent `.env.lock` sidecar to serialize
-concurrent launches without replacing an existing key.
+concurrent configuration runs without replacing an existing key.
 You can set your own passphrase in `.env` before installation or startup.
 
-`manage backup --backup local|s3` runs inside the existing backup service, using
+`manage backup` runs inside the existing backup service, using
 its configuration and exclusive lock. Scheduled and manual backups wait for
 each other. Start the matching backup mode first; a stopped backup service causes
-the command to fail. Recreate the service with `manage start --backup local|s3`
+the command to fail. Recreate the service with `manage configure --start`
 after changing its settings or encryption key.
 
 **Save `BACKUP_GPG_PASSPHRASE` separately in a password manager or another secure location.**
 The home-volume backup does not include the host deployment's `.env`. Losing the key
 makes encrypted archives unrecoverable. Keep old keys if you change the passphrase;
-older archives still need the key used to create them. Restart the backup service
-with your usual launch options after changing the key. Existing plaintext archives
+older archives still need the key used to create them. Reconfigure the backup service
+with `manage configure --start` after changing the key. Existing plaintext archives
 remain unchanged.
 
 For direct Compose use, first set a passphrase in `.env` or generate one with
@@ -34,7 +34,7 @@ needs no host GPG installation. See Offen's [encryption documentation](https://o
 
 ## Optional local backups
 
-With `./manage --backup local`, new archives belong to the effective user running
+With `./manage configure --backup local --start`, new archives belong to the effective user running
 `manage` (`id -u` and `id -g`). If that user is root, root owns the files.
 The launcher does not inspect sudo environment variables.
 Scheduled backups retain that ownership configuration until the backup service
@@ -43,7 +43,7 @@ to that user and made private (mode `700`). Completed archives have mode `600`;
 file ownership inside
 the archives is preserved. Existing archives are unchanged.
 
-To apply this to an existing deployment, rerun `manage --backup local` with your
+To apply this to an existing deployment, rerun `manage configure --backup local --start` with your
 usual options (and `sudo` if installed with `sudo`). This recreates the backup
 service with the updated configuration.
 

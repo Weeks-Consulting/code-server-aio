@@ -39,9 +39,8 @@ These image artifacts use GitHub Actions artifact storage. This Docker-load publ
 also update `latest`; prereleases publish only the version tag. Stable version
 tags receive weekly Debian dependency rebuilds, so they can point to new image
 contents without a code-server version change. Pin an image digest if you need
-fixed contents. To apply a rebuild, run `manage --pull` with your usual launch
-options and `sudo` if you installed with `sudo`. This runs
-`docker compose up --pull always`: it checks the registry even when the tag is
+fixed contents. To apply a rebuild, run `manage configure --pull --start` and `sudo` if you installed with `sudo`. This runs
+`docker compose create --pull always`, followed by `docker compose start`: it checks the registry even when the tag is
 already available locally, and recreates containers when the pulled image changes,
 preserving mounted volumes. This applies to both `:latest` and version tags such
 as `:4.141.0-1`. A reference containing `@sha256:…` stays fixed to that digest;

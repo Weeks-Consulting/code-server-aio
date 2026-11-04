@@ -18,11 +18,11 @@ allowlist below in addition to restricting the Access policy.
 3. Start the services:
 
    ```sh
-   ~/code-server/manage --pull
+   ~/code-server/manage configure --pull --start
    ```
 
    Run it as the user that installed the deployment, with `sudo` if you
-   installed with `sudo`. From a checkout, use `./manage --pull`.
+   installed with `sudo`. From a checkout, use `./manage configure --pull --start`.
 
 Find the AUD under **Zero Trust → Access controls → Applications → Configure →
 Additional settings**. Open your public hostname and sign in through Access.
@@ -38,12 +38,12 @@ Edit `.env` beside the Compose files. Values such as `replace-with-...` and
 Compose uses the defaults below when an optional value is unset or empty.
 Variables exported in your shell take precedence over `.env`.
 
-After changing runtime settings, rerun `docker compose up -d` with your usual
-Compose file options to recreate affected containers. `docker compose restart`
+After changing runtime settings, run `manage configure --start` to recreate affected
+containers, or use `docker compose up -d` with your usual Compose file options. `docker compose restart`
 does not apply environment changes. Changing a build version also requires
 `--build`. Backups require `compose.backup-common.yaml` followed by either
 `compose.backup.yaml` (S3) or `compose.backup-local.yaml` (local folder).
-Use one destination at a time, or let `manage --backup local|s3` select the files.
+Use one destination at a time, or let `manage configure --backup local|s3` select the files.
 Setting backup variables alone does not enable them.
 
 ### Application and local builds
@@ -152,7 +152,7 @@ refresh success. Open sockets are not revalidated when their JWT expires. To rev
 access immediately, remove the user from the Access policy, revoke
 its Access sessions, then run `docker compose restart code-server` with the deployment's
 usual Compose options to disconnect existing sockets. Apply origin allowlist changes
-with `manage start`, which recreates the workspace container with its updated environment.
+with `manage configure --start`, which recreates the workspace container with its updated environment.
 
 The entrypoint completes workspace setup before starting Supervisor and its services.
 While code-server starts, authenticated visitors can see the startup page. The
@@ -164,7 +164,7 @@ restart policy can retry.
 
 ## Memory and logs
 
-`manage start` asks the active Docker daemon for its host memory total and limits
+`manage configure` asks the active Docker daemon for its host memory total and limits
 the workspace to 80% of that value. With Docker Desktop or a remote Docker context,
 this is the daemon's VM or host, not the client machine. CPU use is unlimited.
 cloudflared has a fixed 256 MiB memory limit. Direct Compose users can export

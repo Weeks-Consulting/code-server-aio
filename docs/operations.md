@@ -6,13 +6,11 @@
 ./manage logs -f
 docker compose exec --user cloud-user code-server bash
 docker compose exec code-server supervisorctl status
-docker compose down
+./manage stop
 ```
 
 `./manage logs` prints logs from all services and exits. Add `-f` (or `--follow`)
-to keep streaming new output; press Ctrl+C to stop following. Use the same
-`--backup local` or `--backup s3` and `--project-name` options as startup to include
-the backup sidecar and select your deployment.
+to keep streaming new output; press Ctrl+C to stop following. Logs use the backup mode and project name saved by `configure`.
 
 The container healthcheck expects HTTP 403 from an unauthenticated request to the
 real Envoy listener every 30 seconds. Only the exact `GET /` probe with the
@@ -56,7 +54,7 @@ as a separate user in the same container. Restarting an individual service does
 not repeat workspace initialization.
 
 Envoy configuration is rendered from `build/runtime/envoy.json.template` at startup;
-changing Access settings with `manage start` recreates the application container.
+changing Access settings with `manage configure --start` recreates the application container.
 Code-server starts with `--socket` and removes a stale socket before binding it.
 
 If reusing the previous home-volume layout, move its existing contents into a

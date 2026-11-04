@@ -53,7 +53,7 @@ run `manage` with `sudo` too. On macOS, keep the deployment and backup folders
 somewhere shared with Docker, such as your home directory.
 
 Then configure `.env` as described in [configuration](configuration.md#setup) and
-start with `~/code-server/manage --pull`. The installer never starts services.
+start with `~/code-server/manage configure --pull --start`. The installer never starts services.
 
 ### What the installer does
 
@@ -83,7 +83,7 @@ release publisher remain the trust anchor. To check provenance yourself, see
 Rerun the installer (or `manage install --directory PATH`) to refresh the files
 for the selected release while keeping any digest pin. To move to the latest
 release, use `manage upgrade`; see [deployment](deployment.md#upgrade-to-the-latest-release).
-Review new `.env` settings, then run `manage --pull` with your usual options.
+Review new `.env` settings, then run `manage configure --pull --start` with the saved configuration.
 
 Refreshes serialize on `.env.lock`, and replacements are staged so a failed
 refresh restores the previous deployment, including the encryption key. If the

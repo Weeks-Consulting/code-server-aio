@@ -3,145 +3,120 @@
 ## Deploy
 
 Complete [installation](installation.md) and [configuration](configuration.md#setup),
-then start the deployment with `manage --pull` as described below.
-
-### Launch options
-
-Run `./manage` from a checkout, or `~/code-server/manage` for the default
-installation. Run it as the same user that installed the deployment, with
-`sudo` if you installed with `sudo` (`sudo /opt/code-server/manage`).
-Keep `manage` in the same directory as `compose.yaml`.
-The launcher always uses `.env` and Compose files beside itself, regardless of
-your current working directory. It starts services in the background by default
-and is included by the installer. Installed deployments include runtime Compose files, `manage`, `manage.py`,
-`restore-home.sh`, `backup-key.py`, and `.env`. Management creates `.env.lock`,
-and installer refreshes preserve previous files as `*.bak`. Build files and source
-code stay in the checkout.
+then create and start the deployment:
 
 ```sh
-~/code-server/manage --backup local --pull
-./manage --foreground
-/another/deployment/manage --project-name my-workspace
+~/code-server/manage configure --pull --start
 ```
 
-| Option | Purpose |
-| --- | --- |
-| `--backup none\|s3\|local` | Choose one backup mode; defaults to `none`. |
-| `--foreground` | Attach to logs instead of running in the background. |
-| `--pull` | Pull current images for the configured tags and recreate containers whose image changed. |
-| `--project-name NAME` | Set the Compose project name. |
-| `--help` | Show usage. |
+### Configure containers
 
-Configure the selected backup mode in `.env` before starting. Use the same launch
-options when applying updates so the same services and project are selected.
+Run `./manage` from a checkout, or `~/code-server/manage` for the default installation.
+Use the same user that installed it, with `sudo` if installed with `sudo`.
+Commands use the deployment directory beside the launcher regardless of your current directory.
+
+`configure` reads `.env` and the selected Compose files, sizes workspace memory at
+80% of the Docker host's total, and creates or recreates containers. It may stop
+containers whose configuration changes. By default it leaves newly created
+containers stopped; add `--start` to start the deployment afterward.
+
+```sh
+./manage configure --backup local --pull --start
+./manage configure --backup s3 --project-name my-workspace --start
+```
+
+Configure your selected backup destination in `.env` first. Backup mode defaults
+to `none` on the first configure. Later configuration runs retain the saved backup
+mode and project name unless you override them. Use `--backup none` to disable
+backups. Obsolete service containers are removed during configuration; volumes remain.
+
+The resolved Compose configuration, including backup settings, project name,
+image references, and memory limit, is saved in `.manage.compose.json` with mode
+`600`. It contains secrets; protect it like `.env`. Do not edit it by hand.
+Configuration writes use `.manage.compose.json.lock`, and temporary snapshots are
+removed on failure. The saved file is replaced only after container creation succeeds.
+Docker may already have changed some containers if creation fails; correct the
+error and rerun `configure` to finish applying the configuration.
+
+Installed deployments include runtime Compose files, `manage`, `manage.py`,
+`restore-home.sh`, `backup-key.py`, and `.env`. Installer refreshes preserve old
+release files as `*.bak` and keep the saved configuration. Build files stay in the checkout.
 
 ### Command option reference
 
 Commands and options may appear in any order. Omitting the command runs `start`.
-Every command accepts `-h` or `--help`. Brackets below mark optional arguments;
-arguments outside brackets are required.
+Every command accepts `-h` or `--help`. Brackets mark optional arguments.
 
 | Command | All applicable options |
 | --- | --- |
-| `start` (default) | `[--backup none\|s3\|local] [--project-name NAME] [--foreground] [--pull]` |
-| `stop` | `[--backup none\|s3\|local] [--project-name NAME]` |
-| `logs` | `[--backup none\|s3\|local] [--project-name NAME] [-f\|--follow]` |
-| `upgrade` | No command-specific options. |
-| `backup` | `--backup local\|s3 [--project-name NAME]` |
-| `backups` | `--backup local [--project-name NAME]` |
-| `restore` | `--archive FILE --volume NAME` |
+| `configure` | `[--backup none\|s3\|local] [--project-name NAME] [--pull] [--start]` |
+| `start` (default) | No command-specific options; start existing containers. |
+| `stop` | No command-specific options; stop existing containers. |
+| `logs` | `[-f\|--follow]` |
+| `upgrade` | No command-specific options; install latest release files and image setting. |
+| `backup` | No command-specific options; requires configured, running local or S3 backups. |
+| `backups` | No command-specific options; requires configured local backups. |
+| `restore` | `--archive FILE --volume NAME` (both required) |
 | `install` | `[--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]` |
 
-`--backup` defaults to `none` on each invocation; setting backup variables in `.env`
-does not enable the backup service. To enable local backups, configure their settings
-in `.env` and start with `./manage start --backup local --pull`. For S3 or R2, use
-`./manage start --backup s3 --pull`. Repeat that mode on subsequent `start`, `stop`,
-`logs`, and `backup` commands, and use the same `--project-name NAME` if you set one.
-For example:
+`--pull` pulls configured images before creating containers. `--start` starts them
+after configuration. For attached output, use `manage logs --follow` after starting.
+See [installation](installation.md) for install option defaults and
+[restore](restore.md) for archive and volume requirements.
 
-```sh
-./manage start --backup local --pull
-./manage logs --backup local --follow
-./manage backup --backup local
-./manage backups --backup local
-./manage stop --backup local
-```
+### Start, stop, and logs
 
-`--foreground` and `--pull` apply only to `start`; `-f`/`--follow` applies only to
-`logs`. `upgrade` refreshes files without restarting; apply the upgrade with
-`start --pull` and the same backup and project options. See the
-[installation guide](installation.md) for install option defaults and the
-[restore guide](restore.md) for archive and volume requirements.
-
-### Upgrade to the latest release
-
-Run `manage upgrade` to install the latest stable GitHub release, then run
-`manage --pull` with your usual launch options to apply it. No GitHub
-account is needed. The upgrade uses the GitHub owner/repository from the configured
-GHCR image and installs that release the same way as `manage install --version`:
-it checks the release bundle against the release's `SHA256SUMS`, refreshes the Compose files
-and helpers (saving `.bak` copies), appends new `.env` settings, and sets
-`CODE_SERVER_IMAGE` to the release tag. Unlike an installer refresh, it replaces an
-existing image digest pin. Updating the files with the image keeps a new image from
-running against an older release's Compose configuration. It does not pull images or
-restart services. Failed lookups or checksum failures leave the deployment
-unchanged. Review any new `.env` settings before restarting.
-In a source checkout, `manage upgrade` refuses to overwrite tracked files; check
-out the release tag with git and set `CODE_SERVER_IMAGE` instead.
-
-### Shut down containers
-
-Stop the deployment and remove its containers and networks while keeping all volumes:
+After configuring once, use:
 
 ```sh
 ./manage stop
+./manage start
+./manage logs --follow
 ```
 
-Use `sudo` if installed with `sudo`, and pass the same `--project-name` if you set one.
-This also removes the project's optional backup container. You can include the same
-`--backup local` or `--backup s3` option used to start it. Start the deployment again
-with `./manage` and your usual options.
+These commands use the saved project and backup configuration. `stop` keeps
+containers, networks, and volumes; `start` resumes those containers without
+pulling images, recalculating memory, or applying changed settings. Changes to
+`.env`, Compose files, and image tags take effect when you run `configure` again.
+If containers were deleted, recreate them with `configure --start`.
 
-Nested Docker stores images, stopped containers, and build cache in `docker-data`.
-Monitor free disk space on the VM. Review `docker compose exec code-server docker system df`
-and periodically run `docker compose exec code-server docker system prune` to
-remove unused data after reviewing its prompt. Docker volumes require separate
-retention decisions; home backups do not include nested Docker data.
+**Existing deployments:** run `configure` once with your existing backup mode and
+project name to create the saved configuration. For example,
+`./manage configure --backup local --project-name my-workspace --start`.
+
+### Upgrade to the latest release
+
+```sh
+./manage upgrade
+./manage configure --pull --start
+```
+
+`upgrade` installs the latest stable GitHub release without changing containers.
+It uses the repository from your configured GHCR image, verifies the release bundle
+against `SHA256SUMS`, refreshes release files (saving `.bak` copies), appends new
+`.env` settings, and replaces the image setting, including an existing digest pin.
+Review new settings, then run `configure --pull --start`; the saved backup mode and
+project name are retained. No GitHub account is needed.
+In a source checkout, `upgrade` refuses to overwrite tracked files; check out the
+release tag with git and set `CODE_SERVER_IMAGE` instead.
 
 ### Backup and restore commands
 
-Run a backup immediately using the configured local or S3 destination:
-
-The examples below use `./manage`; add `sudo` if you installed with `sudo`.
-
 ```sh
-./manage backup --backup local
-./manage backup --backup s3
+./manage configure --backup local --start
+./manage backup
+./manage backups
 ```
 
-Use the same `--project-name` as the running deployment, if you set one. Start
-the deployment with the matching `--backup` mode first so code-server has the
-label that allows the backup service to stop it while archiving and restart it
-afterward. Manual backups execute inside the running backup service, sharing its
-exclusive lock with scheduled backups and other manual runs. The command waits
-for the lock and the backup to finish; it fails if that service is stopped.
-It uses the running service's configuration. After editing backup settings or
-the encryption key in `.env`, rerun `manage start` with the matching backup mode
-before triggering a backup.
+For S3 or R2 use `configure --backup s3 --start`. Manual backups execute inside
+the running backup service and share its exclusive lock with scheduled runs.
+They fail if it is stopped. After changing backup settings or the encryption key
+in `.env`, run `configure --start` before taking a backup.
 
-List local `.tar.gz.gpg` archives (and legacy `.tar.gz` archives) with their sizes and modification times:
-
-```sh
-./manage backups --backup local
-```
-
-This lists files in the configured `BACKUP_LOCAL_PATH`. To browse S3 or R2
-archives, use your storage provider's console or CLI.
-
-For recovery, follow the [restore guide](restore.md) to identify the home volume,
-stop the deployment, and restore an archive with its original encryption key.
-It covers validation, rollback, ownership, and restarting after recovery.
-See [backups](backups.md) for destination settings, scheduling, and retention.
+`backups` lists local archives with sizes and modification times. Browse S3 or R2
+archives with your storage provider's console or CLI.
+See [backups](backups.md) for scheduling and retention, and [restore](restore.md)
+for volume selection, encryption keys, validation, and rollback.
 
 ### Deploy a local build
 

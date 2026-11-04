@@ -70,7 +70,7 @@ logs attached. Open your configured Cloudflare hostname to access code-server.
 Press Ctrl-C to stop and remove the services and network; named volumes preserve your data.
 
 Daemon-wide stop and cleanup commands are not provided. Use `./manage stop` to
-remove this deployment's containers and network while preserving volumes.
+stop this deployment's configured containers while preserving volumes.
 Build images and Docker build cache are intentional outputs; disposable test
 containers, volumes, and temporary files are cleaned up by their owning commands.
 `just run` removes its Compose containers and network when it exits, preserving volumes.

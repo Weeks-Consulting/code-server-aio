@@ -23,7 +23,7 @@ This optional check needs the GitHub CLI logged in to GitHub (`gh auth login`), 
 for public images; deployments themselves never need it. The installers check
 downloaded files against `SHA256SUMS` and fail closed. Restrict package publishing to
 trusted maintainers.
-`manage start --pull` also warns when a version-tagged GHCR image differs from its repository's
+`manage configure --pull` also warns when a version-tagged GHCR image differs from its repository's
 latest stable release, with a best-effort check that stays quiet on network errors. Starts without
 `--pull` skip the network check.
 

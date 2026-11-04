@@ -5,3 +5,6 @@ __pycache__/
 backups/
 .test-tmp.*/
 CODE_REVIEW.md
+.manage.compose.json
+.manage.compose.json.lock
+.manage.*.json

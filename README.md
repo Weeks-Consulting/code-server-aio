@@ -25,7 +25,7 @@ hostname with a Cloudflare Access application and a policy for trusted users.
 Then start the deployment:
 
 ```sh
-~/code-server/manage --pull
+~/code-server/manage configure --pull --start
 ```
 
 Anyone granted access effectively has root access to the Docker host. Use a
@@ -40,30 +40,29 @@ these volumes. See [operations](docs/operations.md) for logs and customization.
 
 ## Commands
 
-Run `manage` from the installation directory, or use its full path. It always
-reads the configuration beside itself. If installed with `sudo`, run it with
-`sudo` too. Add the same `--project-name NAME` to commands if you selected one.
+Run `manage` from the installation directory, or use its full path. If installed
+with `sudo`, run it with `sudo` too. `configure` reads `.env` and saves the resolved
+configuration, including backup mode and project name, for later commands.
 
 | Command | Purpose |
 | --- | --- |
-| `./manage --pull` | Start in the background and pull configured images. |
-| `./manage --foreground` | Start attached to logs. |
-| `./manage logs` | Print logs from all services. |
-| `./manage logs -f` | Print logs and follow new output. |
-| `./manage --backup local --pull` | Start with local backups. |
-| `./manage --backup s3 --pull` | Start with S3 or R2 backups. |
-| `./manage stop` | Remove project containers and networks; keep volumes. |
-| `./manage upgrade` | Install the latest release's files and image; then start with `--pull` and your usual options. |
+| `./manage configure --pull --start` | Configure containers, pull images, and start. |
+| `./manage configure --backup local --start` | Configure and start with local backups. |
+| `./manage configure --backup s3 --start` | Configure and start with S3 or R2 backups. |
+| `./manage start` | Start existing configured containers (default command). |
+| `./manage stop` | Stop containers; keep containers, networks, and volumes. |
+| `./manage logs [-f]` | Print logs; add `-f` to follow. |
+| `./manage upgrade` | Install latest release files and image setting; apply with `configure --pull --start`. |
 | `./manage install` | Install or refresh deployment files. |
-| `./manage backup --backup local` | Run a backup now; use `s3` for S3 backups. |
-| `./manage backups --backup local` | List local archives. |
-| `./manage restore --archive FILE --volume NAME` | Restore an archive into an explicit existing home volume. |
-| `./manage --help` | Show all options. |
+| `./manage backup` | Run a backup inside the configured, running backup service. |
+| `./manage backups` | List configured local archives. |
+| `./manage restore --archive FILE --volume NAME` | Restore an archive into an existing home volume. |
+| `./manage --help` | Show every command and its applicable options. |
 
 See the [command option reference](docs/deployment.md#command-option-reference) for
-every command’s applicable options. `--backup` defaults to `none` on each invocation;
-to enable local backups, use `./manage start --backup local --pull` and repeat
-`--backup local` on later starts, stops, logs, and manual backups.
+all options. Run `configure --start` to apply changed `.env` or Compose settings;
+`start` resumes the existing containers. Later configuration runs retain your
+backup mode and project name; use `configure --backup none` to disable backups.
 
 Configure the selected backup destination in `.env` before enabling it. Backups
 pause the application while archiving `/home`; nested Docker data is excluded.

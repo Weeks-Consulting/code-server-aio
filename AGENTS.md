@@ -66,7 +66,7 @@ Do not change these without discussing it first.
 
 ### Resource use and backups
 
-- `manage start` caps workspace memory at 80% of the active Docker daemon host's
+- `manage configure` caps workspace memory at 80% of the active Docker daemon host's
   reported total, including Docker Desktop/remote contexts. Leave CPU unlimited.
 - cloudflared has a fixed 256 MiB memory cap. Do not invent a workspace PID cap
   without sizing it for developer processes and nested containers.
@@ -91,6 +91,11 @@ Do not change these without discussing it first.
   and newer commits cancel them. Release, schedule, and manual runs always complete.
 
 ### Host tooling and cleanup
+
+- `manage configure` creates/recreates containers and saves a private resolved Compose
+  configuration. `start` and `stop` only resume/stop those containers; they do not
+  apply changes to `.env` or Compose files. Preserve the saved backup mode and project
+  name on reconfiguration unless explicitly overridden.
 
 - Do not add daemon-wide `just stop` or `just cleanup` commands. Each command must
   clean up its own temporary files, containers, networks, and volumes; preserve

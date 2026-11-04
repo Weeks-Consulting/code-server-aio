@@ -36,9 +36,14 @@ class LauncherTests(unittest.TestCase):
             '#!/usr/bin/env python3\nimport json, os, sys\n'
             'from pathlib import Path\n'
             'Path(os.environ["ARGUMENT_LOG"]).write_text(json.dumps(sys.argv[1:]))\n'
+            'with open(os.environ["ARGUMENT_LOG"] + ".calls", "a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")\n'
             'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("BACKUP_LOCAL_UID", "BACKUP_LOCAL_GID", "CODE_SERVER_MEMORY_LIMIT")}))\n'
             'if sys.argv[1:] == ["info", "--format", "{{.MemTotal}}"]: print(os.environ.get("TEST_HOST_MEMORY", "10737418240"))\n'
-            'if sys.argv[-3:] == ["config", "--format", "json"]: print(os.environ.get("TEST_MODEL", ""))\n'
+            'if sys.argv[-3:] == ["config", "--format", "json"]:\n'
+            '    args = sys.argv[1:]\n'
+            '    model = {"name": args[args.index("--project-name") + 1] if "--project-name" in args else "example", "services": {"code-server": {"image": "test", "mem_limit": os.environ.get("CODE_SERVER_MEMORY_LIMIT")}}}\n'
+            '    print(os.environ.get("TEST_MODEL", json.dumps(model)))\n'
+            'if "create" in sys.argv and os.environ.get("FAIL_CREATE"): sys.exit(9)\n'
             'sys.exit(int(os.environ.get("DOCKER_EXIT", "0")))\n'
         )
         docker.chmod(0o755)
@@ -51,94 +56,110 @@ class LauncherTests(unittest.TestCase):
             env=self.env, cwd=self.root, capture_output=True, text=True,
         )
 
+    def calls(self):
+        return [json.loads(line) for line in Path(str(self.log) + '.calls').read_text().splitlines()]
+
+    def snapshot(self):
+        return json.loads((self.deployment / '.manage.compose.json').read_text())
+
+    def configure(self, *options):
+        result = self.run_launcher('configure', *options)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
     def test_modes(self):
         for mode, overlay in (("none", None), ("s3", "compose.backup.yaml"),
                               ("local", "compose.backup-local.yaml")):
             with self.subTest(mode=mode):
-                result = self.run_launcher("--backup", mode)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                expected = ["compose", "--project-directory", str(self.deployment),
-                            "--env-file", str(self.deployment / ".env"),
-                            "-f", str(self.deployment / "compose.yaml")]
+                self.configure('--backup', mode)
+                render = next(call for call in reversed(self.calls()) if call[-3:] == ['config', '--format', 'json'])
+                self.assertIn(str(self.deployment / 'compose.yaml'), render)
                 if overlay:
-                    expected += ["-f", str(self.deployment / "compose.backup-common.yaml"),
-                                 "-f", str(self.deployment / overlay)]
-                expected += ["up", "--remove-orphans", "-d"]
-                self.assertEqual(json.loads(self.log.read_text()), expected)
+                    self.assertIn(str(self.deployment / overlay), render)
+                self.assertEqual(self.snapshot()['x-manage-backup'], mode)
+                self.assertEqual(self.calls()[-1][-2:], ['create', '--remove-orphans'])
+                self.assertEqual((self.deployment / '.manage.compose.json').stat().st_mode & 0o777, 0o600)
 
-    def test_stop_preserves_volumes_and_does_not_generate_key(self):
-        for mode in ("none", "local", "s3"):
-            with self.subTest(mode=mode):
-                result = self.run_launcher("stop", "--backup", mode, "--project-name", "example")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                args = json.loads(self.log.read_text())
-                self.assertEqual(args[-2:], ["down", "--remove-orphans"])
-                self.assertIn("example", args)
-                self.assertNotIn("-v", args)
-                self.assertNotIn("--volumes", args)
-                self.assertEqual((self.deployment / ".env").read_text(), "")
+    def test_start_stop_use_saved_configuration(self):
+        self.configure('--backup', 'local', '--project-name', 'custom')
+        saved = (self.deployment / '.manage.compose.json').read_bytes()
+        self.env['COMPOSE_PROJECT_NAME'] = 'unrelated-project'
+        # Lifecycle commands work after source configuration changes or disappears.
+        (self.deployment / '.env').unlink()
+        (self.deployment / 'compose.yaml').unlink()
+        for action in ('stop', 'start'):
+            before = len(self.calls())
+            result = self.run_launcher(action)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = self.calls()[before:]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][-1], action)
+            self.assertEqual(calls[0][calls[0].index('--project-name') + 1], 'custom')
+            self.assertIn(str(self.deployment / '.manage.compose.json'), calls[0])
+            self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
+        self.assertEqual(self.snapshot()['name'], 'custom')
+        self.assertEqual(self.snapshot()['x-manage-backup'], 'local')
+
+    def test_configure_preserves_selection_and_can_disable_backups(self):
+        self.configure('--backup', 'local', '--project-name', 'custom')
+        self.configure()
+        self.assertEqual(self.snapshot()['name'], 'custom')
+        self.assertEqual(self.snapshot()['x-manage-backup'], 'local')
+        self.configure('--backup', 'none')
+        self.assertEqual(self.snapshot()['x-manage-backup'], 'none')
+
+    def test_configure_start_is_explicit(self):
+        self.configure()
+        self.assertEqual(self.calls()[-1][-2:], ['create', '--remove-orphans'])
+        self.configure('--start')
+        self.assertEqual(self.calls()[-2][-2:], ['create', '--remove-orphans'])
+        self.assertEqual(self.calls()[-1][-1], 'start')
+
+    def test_failed_create_keeps_saved_configuration_and_cleans_temporary_file(self):
+        self.configure('--backup', 'none')
+        saved = (self.deployment / '.manage.compose.json').read_bytes()
+        self.env['FAIL_CREATE'] = '1'
+        result = self.run_launcher('configure', '--backup', 'local', '--start')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
+        self.assertEqual(list(self.deployment.glob('.manage.*.json')), [self.deployment / '.manage.compose.json'])
+        self.assertNotEqual(self.calls()[-1][-1], 'start')
 
     def test_local_backup_owner(self):
-        for sudo in (False, True):
-            with self.subTest(sudo=sudo):
-                self.env.pop("SUDO_UID", None)
-                self.env.pop("SUDO_GID", None)
-                if sudo:
-                    self.env.update(SUDO_UID="1234", SUDO_GID="5678")
-                result = self.run_launcher("--backup", "local")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                owner = json.loads(Path(str(self.log) + ".env").read_text())
-                self.assertEqual(owner.pop('CODE_SERVER_MEMORY_LIMIT'), '8589934592')
-                self.assertEqual(owner, {
-                    "BACKUP_LOCAL_UID": str(os.getuid()),
-                    "BACKUP_LOCAL_GID": str(os.getgid()),
-                })
+        self.env.update(SUDO_UID='1234', SUDO_GID='5678')
+        self.configure('--backup', 'local')
+        owner = json.loads(Path(str(self.log) + '.env').read_text())
+        self.assertEqual(owner, {'BACKUP_LOCAL_UID': str(os.getuid()),
+                                'BACKUP_LOCAL_GID': str(os.getgid()),
+                                'CODE_SERVER_MEMORY_LIMIT': '8589934592'})
 
     def test_logs(self):
-        for mode in ('none', 'local', 's3'):
-            for follow in ((), ('-f',), ('--follow',)):
-                with self.subTest(mode=mode, follow=follow):
-                    result = self.run_launcher('logs', *follow, '--backup', mode,
-                                               '--project-name', 'example')
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    args = json.loads(self.log.read_text())
-                    self.assertEqual(args[args.index('logs'):],
-                                     ['logs', '--follow'] if follow else ['logs'])
-                    self.assertEqual(args[args.index('--project-name') + 1], 'example')
-                    if mode != 'none':
-                        overlay = 'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml'
-                        self.assertIn(str(self.deployment / overlay), args)
-                    self.assertEqual((self.deployment / '.env').read_text(), '')
+        self.configure('--backup', 'local', '--project-name', 'custom')
+        for follow in ((), ('-f',), ('--follow',)):
+            result = self.run_launcher('logs', *follow)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(self.log.read_text())
+            self.assertEqual(args[args.index('logs'):], ['logs', '--follow'] if follow else ['logs'])
         self.env['DOCKER_EXIT'] = '7'
         self.assertEqual(self.run_launcher('-f', 'logs').returncode, 7)
 
     def test_follow_requires_logs(self):
-        for action in ('install', 'start', 'stop', 'upgrade', 'backup', 'backups', 'restore'):
-            with self.subTest(action=action):
-                result = self.run_launcher(action, '-f')
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('only supported by the logs command', result.stderr)
-                self.assertFalse(self.log.exists())
+        for action in ('install', 'configure', 'start', 'stop', 'upgrade', 'backup', 'backups', 'restore'):
+            result = self.run_launcher(action, '-f')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('only supported by the logs command', result.stderr)
+            self.assertFalse(self.log.exists())
 
     def test_workspace_memory_uses_docker_host_and_rejects_invalid_totals(self):
         self.env['TEST_HOST_MEMORY'] = '1000000000'
-        result = self.run_launcher()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        environment = json.loads(Path(str(self.log) + '.env').read_text())
-        self.assertEqual(environment['CODE_SERVER_MEMORY_LIMIT'], '800000000')
+        self.configure()
+        self.assertEqual(self.snapshot()['services']['code-server']['mem_limit'], '800000000')
+        saved = (self.deployment / '.manage.compose.json').read_bytes()
         for value in ('0', '-1', 'invalid'):
             self.env['TEST_HOST_MEMORY'] = value
-            result = self.run_launcher()
+            result = self.run_launcher('configure')
             self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn('up', json.loads(self.log.read_text()))
-
-    def test_foreground_pull_and_project(self):
-        result = self.run_launcher("--foreground", "--pull", "--project-name", "example")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        args = json.loads(self.log.read_text())
-        self.assertIn("example", args)
-        self.assertNotIn("-d", args)
-        self.assertEqual(args[-4:], ["up", "--remove-orphans", "--pull", "always"])
+            self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
 
     def test_release_warning_is_best_effort(self):
         # Exercise the full launcher, replacing only the upstream network response.
@@ -160,10 +181,10 @@ class LauncherTests(unittest.TestCase):
                     self.env["TEST_OFFLINE"] = "1"
                 else:
                     self.env.pop("TEST_OFFLINE", None)
-                result = self.run_launcher("--pull")
+                result = self.run_launcher("configure", "--pull")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual("differs from latest release" in result.stderr, warn)
-                self.assertEqual(json.loads(self.log.read_text())[-5:], ["up", "--remove-orphans", "-d", "--pull", "always"])
+                self.assertEqual(json.loads(self.log.read_text())[-4:], ["create", "--remove-orphans", "--pull", "always"])
 
         # Invalid or non-stable upstream responses must not warn or block startup.
         self.env.pop("TEST_OFFLINE", None)
@@ -173,7 +194,7 @@ class LauncherTests(unittest.TestCase):
                         {"tag_name": "v9.0.0", "prerelease": True}):
             with self.subTest(release=release):
                 self.env["TEST_RELEASE"] = json.dumps(release)
-                result = self.run_launcher("--pull")
+                result = self.run_launcher("configure", "--pull")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn("differs from latest release", result.stderr)
                 self.assertEqual(json.loads(self.log.read_text())[-2:], ["--pull", "always"])
@@ -232,7 +253,7 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("CODE_SERVER_IMAGE=ghcr.io/example/fork:9.0.0-1\n", text)
         self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.deployment / "compose.yaml").read_bytes(), (repository / "compose.yaml").read_bytes())
-        self.assertIn("manage --pull", result.stdout)
+        self.assertIn("manage configure --pull --start", result.stdout)
         self.assertFalse((self.root / "gh-called").exists())
 
     def test_start_without_pull_skips_network(self):
@@ -243,7 +264,7 @@ class LauncherTests(unittest.TestCase):
         self.env['PYTHONPATH'] = str(self.root)
         self.env['TEST_MODEL'] = json.dumps({'services': {'code-server': {
             'image': 'ghcr.io/example/app:1.0.0'}}})
-        result = self.run_launcher()
+        result = self.run_launcher("configure")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / 'network-called').exists())
 
@@ -266,7 +287,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertFalse(self.log.exists())
 
     def test_missing_files(self):
-        for name, args in ((".env", ()), ("compose.backup.yaml", ("--backup", "s3"))):
+        for name, args in ((".env", ("configure",)), ("compose.backup.yaml", ("configure", "--backup", "s3"))):
             path = self.deployment / name
             path.unlink()
             self.assertNotEqual(self.run_launcher(*args).returncode, 0)
@@ -279,20 +300,19 @@ class LauncherTests(unittest.TestCase):
         dotenv = self.deployment / ".env"
         dotenv.chmod(0)
         self.addCleanup(dotenv.chmod, 0o600)
-        result = self.run_launcher()
+        result = self.run_launcher("configure")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("sudo", result.stderr)
         self.assertFalse(self.log.exists())
 
     def test_command_after_options(self):
-        result = self.run_launcher("--backup", "local", "backup", "--project-name", "example")
+        self.configure()
+        result = self.run_launcher('--backup', 'local', 'configure', '--project-name', 'example')
         self.assertEqual(result.returncode, 0, result.stderr)
-        args = json.loads(self.log.read_text())
-        self.assertEqual(args[-4:], ["exec", "-T", "backup", "backup"])
-        self.assertIn("example", args)
-        result = self.run_launcher("start", "stop")
+        self.assertEqual(self.snapshot()['name'], 'example')
+        result = self.run_launcher('start', 'stop')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unrecognized arguments", result.stderr)
+        self.assertIn('unrecognized arguments', result.stderr)
 
     def test_help(self):
         result = self.run_launcher("--help")
@@ -301,27 +321,32 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
     def test_docker_exit_status(self):
+        self.configure()
         self.env["DOCKER_EXIT"] = "17"
         self.assertEqual(self.run_launcher().returncode, 17)
 
     def test_manual_backup(self):
         for mode in ("s3", "local"):
             with self.subTest(mode=mode):
-                result = self.run_launcher("backup", "--backup", mode)
+                self.configure("--backup", mode)
+                result = self.run_launcher("backup")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = json.loads(self.log.read_text())
                 self.assertEqual(args[-4:], ["exec", "-T", "backup", "backup"])
 
     def test_manual_backup_propagates_service_failure_without_fallback(self):
+        self.configure("--backup", "local")
         self.env["DOCKER_EXIT"] = "17"
-        result = self.run_launcher("backup", "--backup", "local")
+        result = self.run_launcher("backup")
         self.assertEqual(result.returncode, 17)
         self.assertEqual(json.loads(self.log.read_text())[-4:], ["exec", "-T", "backup", "backup"])
 
     def test_manual_backup_does_not_generate_a_key_unused_by_the_running_service(self):
         dotenv = self.deployment / ".env"
+        self.configure("--backup", "local")
         dotenv.write_text("BACKUP_GPG_PASSPHRASE=\n")
-        result = self.run_launcher("backup", "--backup", "local")
+        (self.deployment / ".env.lock").unlink()
+        result = self.run_launcher("backup")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(dotenv.read_text(), "BACKUP_GPG_PASSPHRASE=\n")
         self.assertFalse((self.deployment / ".env.lock").exists())
@@ -329,19 +354,20 @@ class LauncherTests(unittest.TestCase):
     def test_backup_key_generated_and_preserved(self):
         dotenv = self.deployment / ".env"
         dotenv.write_text("BACKUP_GPG_PASSPHRASE=\n")
-        result = self.run_launcher("--backup", "local")
+        result = self.run_launcher("configure", "--backup", "local")
         self.assertEqual(result.returncode, 0, result.stderr)
         contents = dotenv.read_text()
         self.assertRegex(contents, r"BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}")
-        result = self.run_launcher("backup", "--backup", "local")
+        result = self.run_launcher("backup")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(dotenv.read_text(), contents)
 
     def test_list_local_backups(self):
-        result = self.run_launcher("backups", "--backup", "local")
+        self.configure("--backup", "local")
+        result = self.run_launcher("backups")
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads(self.log.read_text())
-        self.assertIn(str(self.deployment / "compose.backup-local.yaml"), args)
+        self.assertIn(str(self.deployment / ".manage.compose.json"), args)
         self.assertIn("find /archive", args[-1])
         self.assertIn("--no-deps", args)
 
@@ -385,6 +411,36 @@ class LauncherTests(unittest.TestCase):
             env={**env, "TEST_MODEL": model}, cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(), "pa$$word")
+
+    def test_missing_configuration_explains_setup(self):
+        for action in ('start', 'stop', 'logs', 'backup', 'backups'):
+            result = self.run_launcher(action)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('manage configure --start', result.stderr)
+            self.assertFalse(self.log.exists())
+
+    def test_configuration_options_require_configure(self):
+        for action in ('start', 'stop', 'logs', 'backup', 'backups', 'upgrade', 'install', 'restore'):
+            for options in (('--backup', 'none'), ('--project-name', 'example'), ('--pull',), ('--start',)):
+                with self.subTest(action=action, options=options):
+                    result = self.run_launcher(action, *options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('only supported by configure', result.stderr)
+                    self.assertFalse(self.log.exists())
+
+    def test_backup_commands_require_selected_mode(self):
+        self.configure()
+        for action in ('backup', 'backups'):
+            before = len(self.calls())
+            result = self.run_launcher(action)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(self.calls()), before)
+        self.configure('--backup', 's3')
+        before = len(self.calls())
+        result = self.run_launcher('backups')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('storage provider', result.stderr)
+        self.assertEqual(len(self.calls()), before)
 
     def test_invalid_commands(self):
         for args in (("backup",), ("backups", "--backup", "s3"), ("restore",),

@@ -214,12 +214,19 @@ def saved_configuration(directory):
 
 def compose_command(directory, path):
     # The snapshot is already interpolated; do not read changing deployment .env values.
-    return ['docker', 'compose', '--project-directory', str(directory),
-            '--env-file', '/dev/null', '-f', str(path)]
+    command = ['docker', 'compose', '--project-directory', str(directory),
+               '--env-file', '/dev/null', '-f', str(path)]
+    project = json.loads(Path(path).read_text()).get('name')
+    if project:
+        # An exported COMPOSE_PROJECT_NAME must not override the saved deployment.
+        command += ['--project-name', project]
+    return command
 
 
 def configure(args, directory):
     path = directory / CONFIGURATION
+    if path.is_symlink():
+        fail('Expected a regular saved configuration file: ' + str(path))
     with env_lock(path):
         previous = saved_configuration(directory) if path.exists() else {}
         mode = args.backup if args.backup is not None else previous.get('x-manage-backup', 'none')
@@ -314,7 +321,7 @@ def manage(args, directory):
         if model.get('x-manage-backup') != 'local':
             fail('backups requires configured local backups; use your storage provider to list S3 archives.')
         command += ['run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'backup', '-ec',
-                    'find /archive -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \) -exec ls -lh {} \;']
+                    r'find /archive -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \) -exec ls -lh {} \;']
     os.execvp(command[0], command)
 
 

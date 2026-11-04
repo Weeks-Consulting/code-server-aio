@@ -37,7 +37,7 @@ Inspect and remove that specific directory before restarting after an interrupte
    ```
 
    Use your usual Compose project name and file options for this command and `down`.
-2. Stop the stack with `sh manage stop` (and your usual `--project-name`, if set),
+2. Stop the stack with `sh manage stop`, which uses the saved project configuration,
    or `docker compose down` using those same Compose options. Do not use
    `down -v`, which deletes volumes. Stop any other containers using the home volume.
 3. Run the launcher with the actual volume name:
@@ -53,7 +53,7 @@ Inspect and remove that specific directory before restarting after an interrupte
    archives, the standalone helper requires an exported `BACKUP_GPG_PASSPHRASE`; it does
    not read `.env`. When using `sudo`, the launcher reads `.env` as root; to use an
    exported older key on Debian, pass it with `sudo --preserve-env=BACKUP_GPG_PASSPHRASE sh ...`.
-4. Restart with your usual `manage` options and verify files, extensions,
+4. Restart with `manage start` and verify files, extensions,
    Homebrew, and sign-in. The volume name stays unchanged; no Compose override is needed.
 
 The target volume must already exist and have no running containers attached.
