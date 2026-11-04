@@ -1,6 +1,7 @@
 """Check real launcher serialization with manual and scheduled sidecar backups."""
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import shutil
@@ -30,8 +31,14 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
     # Keep the configuration mountable by Docker Desktop and act siblings.
     with tempfile.TemporaryDirectory(prefix='.test-tmp.', dir=os.environ.get('TEST_TMPDIR', ROOT)) as temporary:
         directory = Path(temporary).resolve()
-        for name in ('manage', 'compose.yaml', 'compose.backup-common.yaml', 'compose.backup-local.yaml'):
+        for name in ('manage', 'compose.backup-common.yaml', 'compose.backup-local.yaml'):
             shutil.copyfile(ROOT / name, directory / name)
+        # Configure real backup services without creating the IDE and tunnel.
+        # The application under test is the separately controlled fixture below.
+        (directory / 'compose.yaml').write_text(json.dumps({
+            'services': {'code-server': {'image': image}},
+            'volumes': {'code-server-home': {}},
+        }))
         shutil.copyfile(management_source, directory / 'manage.py')
         shutil.copyfile(ROOT / 'build/tools/backup-key.py', directory / 'backup-key.py')
         (directory / '.env').write_text(
@@ -47,7 +54,7 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
                    '--env-file', str(directory / '.env'), '-f', str(directory / 'compose.yaml'),
                    '-f', str(directory / 'compose.backup-common.yaml'),
                    '-f', str(directory / 'compose.backup-local.yaml')]
-        launcher = ['sh', str(directory / 'manage'), 'backup', '--backup', 'local', '--project-name', project]
+        launcher = ['sh', str(directory / 'manage'), 'backup']
 
         def docker(*arguments):
             return subprocess.check_output(['docker', *arguments], text=True, env=environment).strip()
@@ -85,11 +92,19 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
             expression = scheduled.strftime('%S %M %H %d %m *') if mode == 'scheduled' else '0 0 31 2 *'
             with (directory / '.env').open('a') as output:
                 output.write(f'BACKUP_CRON_EXPRESSION="{expression}"\n')
+            subprocess.run(['sh', str(directory / 'manage'), 'configure', '--backup', 'local',
+                            '--project-name', project], env=environment, check=True)
             subprocess.run([*compose, 'up', '-d', '--no-deps', 'backup'], env=environment, check=True)
             with first_log.open('w') as output:
                 if mode == 'manual':
                     first = start_manual(output)
-                wait_for(lambda: hook_count() == 1, 'first archive hook')
+
+                def first_hook():
+                    if first is not None and first.poll() is not None:
+                        raise AssertionError('First backup exited before its archive hook: ' + first_log.read_text())
+                    return hook_count() == 1
+
+                wait_for(first_hook, 'first archive hook')
                 # Isolate locking from the separate second-resolution filename
                 # collision: Offen records its start time before waiting on the
                 # lock, so queued runs can otherwise overwrite the same archive.
