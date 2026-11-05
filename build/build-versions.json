@@ -26,8 +26,8 @@
       "sha": "9000827ccba6bdab643e8b6fd33ac0654aef8333"
     },
     "docker/login-action": {
-      "version": "v4.7.0",
-      "sha": "81c6f93d4bc991e510b342a00b419b3bb4efc5c6"
+      "version": "v4.8.0",
+      "sha": "8aa5831fb8d48d8f76594c7ddde61ae58019f550"
     },
     "actions/attest-build-provenance": {
       "version": "v4.2.2",

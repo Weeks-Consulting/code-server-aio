@@ -58,7 +58,7 @@ docker exec "$name" /bin/bash -ec '
     done
     test "$(sudo -u cloud-user sudo -n id -u)" = 0
     # Nested Docker must run containers, without host block devices exposed.
-    sudo -u cloud-user docker run --rm debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 true
+    sudo -u cloud-user docker run --rm debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 true
     test ! -e /dev/sda -a ! -e /dev/nvme0n1 -a ! -e /dev/vda
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
     test "$(stat -c %a /run/code-server/backend.sock)" = 660

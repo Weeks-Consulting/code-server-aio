@@ -6,7 +6,7 @@ Use the configured `BACKUP_AWS_S3_PATH`; older backups keep their original locat
 
 For encrypted archives, install `gpg` and `python3` on the Docker host (`sudo apt-get install gpg python3`
 on Debian, or `brew install gnupg python` on macOS). Put the **original** `BACKUP_GPG_PASSPHRASE` in the deployment's `.env`;
-`manage restore` reads it without executing the file. An exported `BACKUP_GPG_PASSPHRASE`
+`manage backup --restore` reads it without executing the file. An exported `BACKUP_GPG_PASSPHRASE`
 can override it to restore an archive encrypted with an older key. Do not generate a
 new key for recovery: it cannot decrypt old backups. On a replacement host, recover
 the original key from your password manager first.
@@ -43,7 +43,7 @@ Inspect and remove that specific directory before restarting after an interrupte
 3. Run the launcher with the actual volume name:
 
    ```sh
-   sh manage restore --archive /absolute/path/to/backup.tar.gz.gpg --volume code-server_code-server-home
+   sh manage backup --restore --archive /absolute/path/to/backup.tar.gz.gpg --volume code-server_code-server-home
    ```
 
    Run as the user that installed the deployment, with `sudo` if you installed
@@ -65,7 +65,7 @@ volume contents. Failed extraction leaves no empty rollback directory. It saves
 `original-home.tar.gz.gpg` when `BACKUP_GPG_PASSPHRASE` is available, otherwise
 `original-home.tar.gz`, in a new private `pre-restore.*` directory beside the input
 archive. The rollback uses the supplied key for encryption and has mode `600` inside a
-mode `700` directory. Both belong to the effective user running `manage restore`
+mode `700` directory. Both belong to the effective user running `manage backup --restore`
 (or the standalone helper), so that user can read and copy the rollback archive.
 If the command runs as root, root owns these files; sudo environment variables are
 ignored. This host-file ownership does not change the UID/GID values inside the archive.

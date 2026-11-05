@@ -100,6 +100,50 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.snapshot()['name'], 'custom')
         self.assertEqual(self.snapshot()['x-manage-backup'], 'local')
 
+    def test_start_pull_refreshes_saved_images_without_reconfiguration(self):
+        for image in ('ghcr.io/example/app:1.2.3', 'ghcr.io/example/app@sha256:' + 'a' * 64):
+            with self.subTest(image=image):
+                self.env['TEST_MODEL'] = json.dumps({'name': 'custom', 'services': {
+                    'code-server': {'image': image}}})
+                self.configure('--backup', 'local', '--project-name', 'custom')
+                saved = (self.deployment / '.manage.compose.json').read_bytes()
+                # Refresh the saved image even if .env/Compose have since changed.
+                (self.deployment / '.env').write_text('CODE_SERVER_IMAGE=other/app:changed\n')
+                (self.deployment / 'compose.yaml').write_text('invalid: [\n')
+                self.env['COMPOSE_PROJECT_NAME'] = 'unrelated'
+                before = len(self.calls())
+                result = self.run_launcher('start', '--pull')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.calls()[before:]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0][-3:], ['create', '--pull', 'always'])
+                self.assertEqual(calls[1][-1], 'start')
+                for call in calls:
+                    self.assertIn(str(self.deployment / '.manage.compose.json'), call)
+                    self.assertEqual(call[call.index('--project-name') + 1], 'custom')
+                    self.assertEqual(call[call.index('--env-file') + 1], '/dev/null')
+                self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
+                self.assertEqual(self.snapshot()['x-manage-backup'], 'local')
+
+    def test_failed_start_pull_does_not_start_or_replace_saved_configuration(self):
+        self.configure()
+        saved = (self.deployment / '.manage.compose.json').read_bytes()
+        self.env['FAIL_CREATE'] = '1'
+        before = len(self.calls())
+        result = self.run_launcher('start', '--pull')
+        self.assertEqual(result.returncode, 9, result.stderr)
+        self.assertEqual(len(self.calls()[before:]), 1)
+        self.assertEqual(self.calls()[-1][-3:], ['create', '--pull', 'always'])
+        self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
+
+    def test_pull_is_limited_to_start_and_configure(self):
+        for action in ('stop', 'upgrade', 'install', 'logs', 'backup'):
+            with self.subTest(action=action):
+                result = self.run_launcher(action, '--pull')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('--pull is only supported by configure and start', result.stderr)
+                self.assertFalse(self.log.exists())
+
     def test_configure_preserves_selection_and_can_disable_backups(self):
         self.configure('--backup', 'local', '--project-name', 'custom')
         self.configure()
@@ -144,7 +188,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.run_launcher('-f', 'logs').returncode, 7)
 
     def test_follow_requires_logs(self):
-        for action in ('install', 'configure', 'start', 'stop', 'upgrade', 'backup', 'backups', 'restore'):
+        for action in ('install', 'configure', 'start', 'stop', 'upgrade', 'backup'):
             result = self.run_launcher(action, '-f')
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('only supported by the logs command', result.stderr)
@@ -318,18 +362,29 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher("--help")
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage:", result.stdout)
+        self.assertIn('backup --run | --list | --restore --archive FILE --volume NAME', result.stdout)
         self.assertFalse(self.log.exists())
 
     def test_docker_exit_status(self):
         self.configure()
         self.env["DOCKER_EXIT"] = "17"
-        self.assertEqual(self.run_launcher().returncode, 17)
+        self.assertEqual(self.run_launcher('start').returncode, 17)
+
+    def test_command_is_required(self):
+        self.configure()
+        before = self.calls()
+        for args in ((), ('--pull',)):
+            with self.subTest(args=args):
+                result = self.run_launcher(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('required: COMMAND', result.stderr)
+                self.assertEqual(self.calls(), before)
 
     def test_manual_backup(self):
         for mode in ("s3", "local"):
             with self.subTest(mode=mode):
                 self.configure("--backup", mode)
-                result = self.run_launcher("backup")
+                result = self.run_launcher("backup", "--run")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = json.loads(self.log.read_text())
                 self.assertEqual(args[-4:], ["exec", "-T", "backup", "backup"])
@@ -337,7 +392,7 @@ class LauncherTests(unittest.TestCase):
     def test_manual_backup_propagates_service_failure_without_fallback(self):
         self.configure("--backup", "local")
         self.env["DOCKER_EXIT"] = "17"
-        result = self.run_launcher("backup")
+        result = self.run_launcher("backup", "--run")
         self.assertEqual(result.returncode, 17)
         self.assertEqual(json.loads(self.log.read_text())[-4:], ["exec", "-T", "backup", "backup"])
 
@@ -346,7 +401,7 @@ class LauncherTests(unittest.TestCase):
         self.configure("--backup", "local")
         dotenv.write_text("BACKUP_GPG_PASSPHRASE=\n")
         (self.deployment / ".env.lock").unlink()
-        result = self.run_launcher("backup")
+        result = self.run_launcher("backup", "--run")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(dotenv.read_text(), "BACKUP_GPG_PASSPHRASE=\n")
         self.assertFalse((self.deployment / ".env.lock").exists())
@@ -358,13 +413,13 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         contents = dotenv.read_text()
         self.assertRegex(contents, r"BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}")
-        result = self.run_launcher("backup")
+        result = self.run_launcher("backup", "--run")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(dotenv.read_text(), contents)
 
     def test_list_local_backups(self):
         self.configure("--backup", "local")
-        result = self.run_launcher("backups")
+        result = self.run_launcher("backup", "--list")
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads(self.log.read_text())
         self.assertIn(str(self.deployment / ".manage.compose.json"), args)
@@ -384,7 +439,7 @@ class LauncherTests(unittest.TestCase):
         for caller in (self.root, alias):
             with self.subTest(caller=caller):
                 result = subprocess.run(
-                    ["sh", str(self.script), "restore", "--archive", archive.name,
+                    ["sh", str(self.script), "backup", "--restore", "--archive", archive.name,
                      "--volume", "new-home"],
                     env={**self.env, "PWD": str(caller)}, cwd=caller,
                     capture_output=True, text=True,
@@ -407,21 +462,21 @@ class LauncherTests(unittest.TestCase):
             "BACKUP_GPG_PASSPHRASE": "pa$$$$word"}}}})
         env = {key: value for key, value in self.env.items() if key != "BACKUP_GPG_PASSPHRASE"}
         result = subprocess.run(
-            ["sh", str(self.script), "restore", "--archive", str(archive), "--volume", "home"],
+            ["sh", str(self.script), "backup", "--restore", "--archive", str(archive), "--volume", "home"],
             env={**env, "TEST_MODEL": model}, cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text(), "pa$$word")
 
     def test_missing_configuration_explains_setup(self):
-        for action in ('start', 'stop', 'logs', 'backup', 'backups'):
-            result = self.run_launcher(action)
+        for args in (('start',), ('start', '--pull'), ('stop',), ('logs',), ('backup', '--run'), ('backup', '--list')):
+            result = self.run_launcher(*args)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('manage configure --start', result.stderr)
             self.assertFalse(self.log.exists())
 
     def test_configuration_options_require_configure(self):
-        for action in ('start', 'stop', 'logs', 'backup', 'backups', 'upgrade', 'install', 'restore'):
-            for options in (('--backup', 'none'), ('--project-name', 'example'), ('--pull',), ('--start',)):
+        for action in ('start', 'stop', 'logs', 'backup', 'upgrade', 'install'):
+            for options in (('--backup', 'none'), ('--project-name', 'example'), ('--start',)):
                 with self.subTest(action=action, options=options):
                     result = self.run_launcher(action, *options)
                     self.assertNotEqual(result.returncode, 0)
@@ -430,14 +485,14 @@ class LauncherTests(unittest.TestCase):
 
     def test_backup_commands_require_selected_mode(self):
         self.configure()
-        for action in ('backup', 'backups'):
+        for option in ('--run', '--list'):
             before = len(self.calls())
-            result = self.run_launcher(action)
+            result = self.run_launcher('backup', option)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(len(self.calls()), before)
         self.configure('--backup', 's3')
         before = len(self.calls())
-        result = self.run_launcher('backups')
+        result = self.run_launcher('backup', '--list')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('storage provider', result.stderr)
         self.assertEqual(len(self.calls()), before)
@@ -450,6 +505,35 @@ class LauncherTests(unittest.TestCase):
                      ("start", "--volume", "existing"), ("unknown",)):
             with self.subTest(args=args):
                 self.assertNotEqual(self.run_launcher(*args).returncode, 0)
+                self.assertFalse(self.log.exists())
+
+    def test_backup_requires_one_action(self):
+        for options in ((), ('--run', '--list'), ('--run', '--restore'),
+                        ('--list', '--restore')):
+            with self.subTest(options=options):
+                result = self.run_launcher('backup', *options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.log.exists())
+
+    def test_backup_action_options_require_backup(self):
+        for action in ('install', 'configure', 'start', 'stop', 'logs', 'upgrade'):
+            for option in ('--run', '--list', '--restore'):
+                with self.subTest(action=action, option=option):
+                    result = self.run_launcher(action, option)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('only supported by backup', result.stderr)
+                    self.assertFalse(self.log.exists())
+
+    def test_restore_options_require_restore_action(self):
+        for args in (('backup', '--restore'),
+                     ('backup', '--restore', '--archive', 'saved.tar.gz'),
+                     ('backup', '--restore', '--volume', 'home'),
+                     ('backup', '--run', '--archive', 'saved.tar.gz'),
+                     ('backup', '--list', '--volume', 'home')):
+            with self.subTest(args=args):
+                result = self.run_launcher(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('backup --restore', result.stderr)
                 self.assertFalse(self.log.exists())
 
 

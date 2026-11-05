@@ -51,7 +51,7 @@ These image artifacts use GitHub Actions artifact storage. This Docker-load publ
 Weekly rebuilds update `latest` only for the currently approved stable release. Stable version
 tags receive weekly Debian dependency rebuilds, so they can point to new image
 contents without a code-server version change. Pin an image digest if you need
-fixed contents. To apply a rebuild, run `manage configure --pull --start` and `sudo` if you installed with `sudo`. This runs
+fixed contents. To apply a rebuild to an already configured deployment, run `manage start --pull` and `sudo` if you installed with `sudo`. This runs
 `docker compose create --pull always`, followed by `docker compose start`: it checks the registry even when the tag is
 already available locally, and recreates containers when the pulled image changes,
 preserving mounted volumes. This applies to both `:latest` and version tags such

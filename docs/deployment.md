@@ -44,22 +44,20 @@ release files as `*.bak` and keep the saved configuration. Build files stay in t
 
 ### Command option reference
 
-Commands and options may appear in any order. Omitting the command runs `start`.
+Commands and options may appear in any order. A command is required.
 Every command accepts `-h` or `--help`. Brackets mark optional arguments.
 
 | Command | All applicable options |
 | --- | --- |
 | `configure` | `[--backup none\|s3\|local] [--project-name NAME] [--pull] [--start]` |
-| `start` (default) | No command-specific options; start existing containers. |
+| `start` | `[--pull]`; start saved deployment, optionally refreshing its images. |
 | `stop` | No command-specific options; stop existing containers. |
 | `logs` | `[-f\|--follow]` |
 | `upgrade` | `[--version TAG]`; install selected release files and image setting (default: latest stable). |
-| `backup` | No command-specific options; requires configured, running local or S3 backups. |
-| `backups` | No command-specific options; requires configured local backups. |
-| `restore` | `--archive FILE --volume NAME` (both required) |
+| `backup` | Exactly one of `--run`, `--list`, or `--restore`. `--run` requires configured, running local or S3 backups; `--list` requires configured local backups; `--restore` requires `--archive FILE --volume NAME`. |
 | `install` | `[--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]` |
 
-`--pull` pulls configured images before creating containers. `--start` starts them
+`configure --pull` pulls configured images before creating containers. `--start` starts them
 after configuration. For attached output, use `manage logs --follow` after starting.
 See [installation](installation.md) for install option defaults and
 [restore](restore.md) for archive and volume requirements.
@@ -76,7 +74,17 @@ After configuring once, use:
 
 These commands use the saved project and backup configuration. `stop` keeps
 containers, networks, and volumes; `start` resumes those containers without
-pulling images, recalculating memory, or applying changed settings. Changes to
+pulling images, recalculating memory, or applying changed settings. To refresh
+images for the saved tags and start the deployment, use:
+
+```sh
+./manage start --pull
+```
+
+This pulls all configured service images and recreates containers as needed using
+the saved configuration, including the project name and backup mode. A digest pin
+stays on that digest. Pull or creation failures stop the command before startup.
+Changes to
 `.env`, Compose files, and image tags take effect when you run `configure` again.
 If containers were deleted, recreate them with `configure --start`.
 
@@ -111,8 +119,8 @@ release tag with git and set `CODE_SERVER_IMAGE` instead.
 
 ```sh
 ./manage configure --backup local --start
-./manage backup
-./manage backups
+./manage backup --run
+./manage backup --list
 ```
 
 For S3 or R2 use `configure --backup s3 --start`. Manual backups execute inside
@@ -120,7 +128,7 @@ the running backup service and share its exclusive lock with scheduled runs.
 They fail if it is stopped. After changing backup settings or the encryption key
 in `.env`, run `configure --start` before taking a backup.
 
-`backups` lists local archives with sizes and modification times. Browse S3 or R2
+`backup --list` lists local archives with sizes and modification times. Browse S3 or R2
 archives with your storage provider's console or CLI.
 See [backups](backups.md) for scheduling and retention, and [restore](restore.md)
 for volume selection, encryption keys, validation, and rollback.

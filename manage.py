@@ -152,27 +152,23 @@ def upgrade(directory, version=None):
 
 def parser():
     result = argparse.ArgumentParser(
-        prog='manage', usage='%(prog)s [COMMAND] [OPTIONS]',
+        prog='manage', usage='%(prog)s COMMAND [OPTIONS]',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description='Install and manage a code-server deployment.\n'
-                    'Commands and options may appear in any order. With no command, start is used.\n\n'
+                    'Commands and options may appear in any order. A command is required.\n\n'
                     'commands (brackets mark optional arguments):\n'
                     '  configure [--backup {none,s3,local}] [--project-name NAME] [--pull] [--start]\n'
                     '      Create/update containers and save configuration; --start starts them afterward.\n'
-                    '  start\n'
-                    '      Start existing configured containers (default command).\n'
+                    '  start [--pull]\n'
+                    '      Start configured containers; --pull refreshes images and recreates as needed.\n'
                     '  stop\n'
                     '      Stop containers; keep containers, networks, and volumes.\n'
                     '  logs [-f|--follow]\n'
                     '      Print logs from the saved deployment; add -f to follow.\n'
                     '  upgrade [--version TAG]\n'
                     '      Install a selected release (default: latest stable); no container changes.\n'
-                    '  backup\n'
-                    '      Run a backup inside the configured, running backup service.\n'
-                    '  backups\n'
-                    '      List archives from the configured local backup destination.\n'
-                    '  restore --archive FILE --volume NAME\n'
-                    '      Replace an existing home volume.\n'
+                    '  backup --run | --list | --restore --archive FILE --volume NAME\n'
+                    '      Run a backup, list local archives, or restore an existing home volume.\n'
                     '  install [--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]\n'
                     '      Install or refresh deployment files; no services started.\n'
                     '  All commands accept -h or --help.',
@@ -182,31 +178,40 @@ def parser():
                '  manage stop                                    Stop existing containers\n'
                '  manage start                                   Resume existing containers\n'
                '  manage logs -f                                 Follow service logs\n'
-               '  manage backup                                  Run a backup now\n'
-               '  manage restore --archive FILE --volume NAME\n\n'
+               '  manage backup --run                            Run a backup now\n'
+               '  manage backup --list                           List local archives\n'
+               '  manage backup --restore --archive FILE --volume NAME\n\n'
                'configure reads .env and Compose files beside manage and saves a private configuration.\n'
                'Later commands use that saved configuration, including backup mode and project name.\n'
                'Run configure again to apply changes. If installed with sudo, run with sudo.')
-    result.add_argument('action', nargs='?', default='start',
-                        choices=['install', 'configure', 'start', 'stop', 'logs', 'upgrade', 'backup', 'backups', 'restore'],
+    result.add_argument('action', metavar='COMMAND',
+                        choices=['install', 'configure', 'start', 'stop', 'logs', 'upgrade', 'backup'],
                         help=argparse.SUPPRESS)
     configure = result.add_argument_group('configure options')
     configure.add_argument('--backup', choices=['none', 's3', 'local'],
                            help='Backup services to include (default: saved mode, or none on first configure)')
     configure.add_argument('--project-name', metavar='NAME', help='Compose project name (default: saved name, or Compose default)')
-    configure.add_argument('--pull', action='store_true', help='Pull configured images before creating containers')
     configure.add_argument('--start', action='store_true', help='Start containers after configuring them')
     logs = result.add_argument_group('logs options')
     logs.add_argument('-f', '--follow', action='store_true', help='Keep streaming new log output')
-    restore = result.add_argument_group('restore options (both required)')
-    restore.add_argument('--archive', metavar='FILE', help='Backup archive to restore (.tar.gz or .tar.gz.gpg)')
-    restore.add_argument('--volume', metavar='NAME', help='Existing home volume to replace')
+    backup = result.add_argument_group('backup options (choose exactly one action)')
+    actions = backup.add_mutually_exclusive_group()
+    actions.add_argument('--run', dest='backup_action', action='store_const', const='run',
+                         help='Run a backup inside the configured, running backup service')
+    actions.add_argument('--list', dest='backup_action', action='store_const', const='list',
+                         help='List archives from the configured local backup destination')
+    actions.add_argument('--restore', dest='backup_action', action='store_const', const='restore',
+                         help='Restore an existing home volume; requires --archive and --volume')
+    backup.add_argument('--archive', metavar='FILE', help='Archive for --restore (.tar.gz or .tar.gz.gpg)')
+    backup.add_argument('--volume', metavar='NAME', help='Existing home volume to replace with --restore')
     install = result.add_argument_group('install options')
     install.add_argument('--directory', metavar='PATH', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
     install.add_argument('--repository', metavar='OWNER/REPO', help='GitHub repository (default: Weeks-Consulting/code-server-aio)')
     install.add_argument('--dry-run', action='store_true', help='Preview installation without changes or network requests')
     release = result.add_argument_group('release selection (install and upgrade)')
     release.add_argument('--version', metavar='TAG', help='Release tag vX.Y.Z[-N], including prereleases (default: latest stable)')
+    images = result.add_argument_group('image refresh (configure and start)')
+    images.add_argument('--pull', action='store_true', help='Pull configured images and recreate containers as needed')
     return result
 
 
@@ -286,7 +291,7 @@ def configure(args, directory):
 
 
 def manage(args, directory):
-    if args.action == 'restore':
+    if args.action == 'backup' and args.backup_action == 'restore':
         archive = os.path.abspath(args.archive)
         restore = helper(directory, 'restore-home.sh')
         if archive.endswith('.gpg') and not os.environ.get('BACKUP_GPG_PASSPHRASE'):
@@ -314,6 +319,14 @@ def manage(args, directory):
         else:
             configure(args, directory)
         return
+    if args.action == 'start' and args.pull:
+        path = directory / CONFIGURATION
+        with env_lock(path):
+            saved_configuration(directory)
+            command = compose_command(directory, path)
+            subprocess.run(command + ['create', '--pull', 'always'], check=True)
+            subprocess.run(command + ['start'], check=True)
+        return
     model = saved_configuration(directory)
     command = compose_command(directory, directory / CONFIGURATION)
     if args.action in ('start', 'stop'):
@@ -322,14 +335,14 @@ def manage(args, directory):
         command += ['logs']
         if args.follow:
             command += ['--follow']
-    elif args.action == 'backup':
+    elif args.action == 'backup' and args.backup_action == 'run':
         if model.get('x-manage-backup', 'none') == 'none':
-            fail('backup requires a configured backup service; run manage configure --backup local or s3 --start.')
+            fail('backup --run requires a configured backup service; run manage configure --backup local or s3 --start.')
         # Scheduled and manual runs must share the sidecar's filesystem lock.
         command += ['exec', '-T', 'backup', 'backup']
-    elif args.action == 'backups':
+    elif args.action == 'backup' and args.backup_action == 'list':
         if model.get('x-manage-backup') != 'local':
-            fail('backups requires configured local backups; use your storage provider to list S3 archives.')
+            fail('backup --list requires configured local backups; use your storage provider to list S3 archives.')
         command += ['run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'backup', '-ec',
                     r'find /archive -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \) -exec ls -lh {} \;']
     os.execvp(command[0], command)
@@ -582,17 +595,23 @@ def validate_args(args):
     for option in ('directory', 'repository', 'version', 'project_name', 'archive', 'volume'):
         if getattr(args, option) == '':
             fail('Missing value for --' + option.replace('_', '-'))
-    if args.action != 'configure' and (args.backup is not None or args.project_name is not None or args.pull or args.start):
-        fail('--backup, --project-name, --pull, and --start are only supported by configure')
+    if args.action != 'configure' and (args.backup is not None or args.project_name is not None or args.start):
+        fail('--backup, --project-name, and --start are only supported by configure')
+    if args.pull and args.action not in ('configure', 'start'):
+        fail('--pull is only supported by configure and start')
     if args.action != 'install' and (args.directory is not None or args.repository is not None or args.dry_run):
         fail('--directory, --repository, and --dry-run are only supported by install')
     if args.version is not None and args.action not in ('install', 'upgrade'):
         fail('--version is only supported by install and upgrade')
-    if args.action == 'restore':
+    if args.action == 'backup' and args.backup_action is None:
+        fail('backup requires one of --run, --list, or --restore')
+    if args.action != 'backup' and args.backup_action is not None:
+        fail('--run, --list, and --restore are only supported by backup')
+    if args.action == 'backup' and args.backup_action == 'restore':
         if not args.archive or not args.volume:
-            fail('restore requires --archive FILE and --volume NAME')
+            fail('backup --restore requires --archive FILE and --volume NAME')
     elif args.archive or args.volume:
-        fail('--archive and --volume are only supported by restore')
+        fail('--archive and --volume are only supported by backup --restore')
 
 
 def main():

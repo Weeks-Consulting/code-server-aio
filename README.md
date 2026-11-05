@@ -49,14 +49,14 @@ configuration, including backup mode and project name, for later commands.
 | `./manage configure --pull --start` | Configure containers, pull images, and start. |
 | `./manage configure --backup local --start` | Configure and start with local backups. |
 | `./manage configure --backup s3 --start` | Configure and start with S3 or R2 backups. |
-| `./manage start` | Start existing configured containers (default command). |
+| `./manage start [--pull]` | Start saved deployment; `--pull` refreshes images and recreates as needed. |
 | `./manage stop` | Stop containers; keep containers, networks, and volumes. |
 | `./manage logs [-f]` | Print logs; add `-f` to follow. |
 | `./manage upgrade` | Install latest release files and image setting; apply with `configure --pull --start`. |
 | `./manage install` | Install or refresh deployment files. |
-| `./manage backup` | Run a backup inside the configured, running backup service. |
-| `./manage backups` | List configured local archives. |
-| `./manage restore --archive FILE --volume NAME` | Restore an archive into an existing home volume. |
+| `./manage backup --run` | Run a backup inside the configured, running backup service. |
+| `./manage backup --list` | List configured local archives. |
+| `./manage backup --restore --archive FILE --volume NAME` | Restore an archive into an existing home volume. |
 | `./manage --help` | Show every command and its applicable options. |
 
 See the [command option reference](docs/deployment.md#command-option-reference) for

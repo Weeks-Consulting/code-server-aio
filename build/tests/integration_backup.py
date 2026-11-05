@@ -54,7 +54,7 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
                    '--env-file', str(directory / '.env'), '-f', str(directory / 'compose.yaml'),
                    '-f', str(directory / 'compose.backup-common.yaml'),
                    '-f', str(directory / 'compose.backup-local.yaml')]
-        launcher = ['sh', str(directory / 'manage'), 'backup']
+        launcher = ['sh', str(directory / 'manage'), 'backup', '--run']
 
         def docker(*arguments):
             return subprocess.check_output(['docker', *arguments], text=True, env=environment).strip()

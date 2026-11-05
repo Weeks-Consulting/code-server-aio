@@ -102,7 +102,7 @@ cp "$restore_script" "$archive_dir/restore-home.sh"
 # fit even when the caller's temporary directory exceeds the Unix socket limit.
 restore_tmp="$archive_dir/restore-temporary-directory-with-a-long-path-for-agent-socket-coverage"
 mkdir "$restore_tmp"
-env -u BACKUP_GPG_PASSPHRASE TMPDIR="$restore_tmp" RESTORE_IMAGE="$image" sh "$archive_dir/manage" restore \
+env -u BACKUP_GPG_PASSPHRASE TMPDIR="$restore_tmp" RESTORE_IMAGE="$image" sh "$archive_dir/manage" backup --restore \
     --archive "$archive_dir/restore-test.tar.gz.gpg" --volume "$prefix-restored"
 assert_restored_home
 rollback=$(find "$archive_dir" -name original-home.tar.gz.gpg -print -quit)

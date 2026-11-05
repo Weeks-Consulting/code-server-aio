@@ -12,7 +12,7 @@ The initializer uses Python 3 and a persistent `.env.lock` sidecar to serialize
 concurrent configuration runs without replacing an existing key.
 You can set your own passphrase in `.env` before installation or startup.
 
-`manage backup` runs inside the existing backup service, using
+`manage backup --run` runs inside the existing backup service, using
 its configuration and exclusive lock. Scheduled and manual backups wait for
 each other. Start the matching backup mode first; a stopped backup service causes
 the command to fail. Recreate the service with `manage configure --start`

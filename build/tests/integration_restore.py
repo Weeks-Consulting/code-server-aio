@@ -162,7 +162,7 @@ def run(image):
                 if phase == 'extract':
                     script += 'test -z "$(find /data -maxdepth 1 -name ".restore-staging-*")"'
                 else:
-                    assert 'manage restore --archive' in stderr, stderr
+                    assert 'manage backup --restore --archive' in stderr, stderr
                     rollback = list(directory.glob('pre-restore.*/original-home.tar.gz'))
                     assert len(rollback) == 1, rollback
                     with tarfile.open(rollback[0]) as source:

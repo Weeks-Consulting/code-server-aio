@@ -1,10 +1,10 @@
 {
   "packages": {
     "code-server": {
-      "version": "4.144.0",
+      "version": "4.145.0",
       "sha256": {
-        "code-server_4.144.0_amd64.deb": "45f5533b502edac68b7eb09c5cec44fd281f80264af9a87fde0bfb2c5e190615",
-        "code-server_4.144.0_arm64.deb": "6baef72b340da08e76e5cf1e9504f657d00e80c8776bdaf86e97c30a80cd48e8"
+        "code-server_4.145.0_amd64.deb": "43fa1dc0e7929753bb3442e4ef40d4beb8bb5f8fe63601ede31b305536e6275b",
+        "code-server_4.145.0_arm64.deb": "43813b81df484b49facf19d99faaa51683a2cdd8c652dc97ebddefa9cbe7fd6a"
       }
     },
     "envoy": {
@@ -18,7 +18,7 @@
   "images": {
     "cloudflare/cloudflared:latest": "4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba",
     "offen/docker-volume-backup:v2": "06fccb4c6ff79c4d5e4a839ace17c174da82a9327f43594f8a2c6a15f43bc660",
-    "debian:13-slim": "f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4"
+    "debian:13-slim": "a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2"
   },
   "actions": {}
 }

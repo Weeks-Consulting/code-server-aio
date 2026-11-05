@@ -61,7 +61,7 @@ os.chmod(rollback, 0o700)
 name = 'original-home.tar.gz' + ('.gpg' if key else '')
 partial = rollback / ('.' + name + '.partial')
 stage = '.restore-staging-' + uuid.uuid4().hex
-image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4')
+image = os.environ.get('RESTORE_IMAGE', 'debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2')
 guard = 'code-server-restore-' + hashlib.sha256(volume.encode()).hexdigest()[:24]
 create = ['docker', 'create', '--name', guard, '--network', 'none', '--user', '0:0',
         '--label', 'code-server.restore-owner=' + stage,
@@ -199,7 +199,7 @@ finally:
         signal.signal(signum, signal.SIG_IGN)
     # Give recovery guidance before any cleanup call that could stall.
     if replacement_started and not restored and (rollback / name).exists():
-        print(f'Keep the stack stopped. Recover with: manage restore --archive '
+        print(f'Keep the stack stopped. Recover with: manage backup --restore --archive '
               f'{shlex.quote(str(rollback / name))} --volume {shlex.quote(volume)}', file=sys.stderr)
 
     def cleanup(*arguments):

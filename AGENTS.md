@@ -96,8 +96,9 @@ Do not change these without discussing it first.
 ### Host tooling and cleanup
 
 - `manage configure` creates/recreates containers and saves a private resolved Compose
-  configuration. `start` and `stop` only resume/stop those containers; they do not
-  apply changes to `.env` or Compose files. Preserve the saved backup mode and project
+  configuration. Plain `start` and `stop` only resume/stop those containers;
+  `start --pull` refreshes images and recreates containers from the saved configuration.
+  They do not apply changes to `.env` or Compose files. Preserve the saved backup mode and project
   name on reconfiguration unless explicitly overridden.
 
 - Do not add daemon-wide `just stop` or `just cleanup` commands. Each command must

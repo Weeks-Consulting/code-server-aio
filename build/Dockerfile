@@ -1,4 +1,4 @@
-FROM debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS download-tools
+FROM debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS download-tools
 
 # Only used to fetch checksum-pinned artifacts; never copied into the runtime.
 RUN apt-get update && \
@@ -7,9 +7,9 @@ RUN apt-get update && \
 
 FROM download-tools AS code-server-download
 # Defaults are synchronized from build/versions.json by just sync-pins.
-ARG CODE_SERVER_VERSION=4.144.0
-ARG CODE_SERVER_SHA256_AMD64=45f5533b502edac68b7eb09c5cec44fd281f80264af9a87fde0bfb2c5e190615
-ARG CODE_SERVER_SHA256_ARM64=6baef72b340da08e76e5cf1e9504f657d00e80c8776bdaf86e97c30a80cd48e8
+ARG CODE_SERVER_VERSION=4.145.0
+ARG CODE_SERVER_SHA256_AMD64=43fa1dc0e7929753bb3442e4ef40d4beb8bb5f8fe63601ede31b305536e6275b
+ARG CODE_SERVER_SHA256_ARM64=43813b81df484b49facf19d99faaa51683a2cdd8c652dc97ebddefa9cbe7fd6a
 RUN --mount=type=bind,source=build/tools/fetch-pinned.py,target=/tmp/fetch-pinned.py \
     arch=$(dpkg --print-architecture) && \
     case "$arch" in \
@@ -33,7 +33,7 @@ RUN --mount=type=bind,source=build/tools/fetch-pinned.py,target=/tmp/fetch-pinne
     esac && \
     python3 /tmp/fetch-pinned.py envoy "$ENVOY_VERSION" "$arch" "$checksum" /tmp/envoy
 
-FROM debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime
+FROM debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     SHELL=/bin/bash
