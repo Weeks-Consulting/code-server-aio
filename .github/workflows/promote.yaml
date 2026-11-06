@@ -9,7 +9,7 @@ permissions:
 jobs:
   promote:
     name: Promote tested release to latest
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     # Serialize with image publication, including weekly security rebuilds.
     concurrency:

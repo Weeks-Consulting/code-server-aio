@@ -35,8 +35,8 @@ class PipelineTests(unittest.TestCase):
         for job in ('test', 'check-host'):
             self.assertIn("if: needs.source.outputs.dispatched != 'true'", jobs[job])
         host = jobs['check-host']
-        self.assertIn('runner: macos-14', host)
-        self.assertIn('runner: ubuntu-24.04', host)
+        self.assertIn('runner: macos-26', host)
+        self.assertIn('runner: ubuntu-26.04', host)
         self.assertRegex(host, r'container-image: debian:13-slim@sha256:[a-f0-9]{64}')
         self.assertEqual(host.count('run: sh build/tests/check.sh'), 1)
         self.assertEqual(host.count('run: sh build/tests/install-host-deps.sh'), 1)

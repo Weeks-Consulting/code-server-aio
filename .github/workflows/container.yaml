@@ -29,7 +29,7 @@ concurrency:
 jobs:
   source:
     name: Select source release
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       # Latest-release rebuilds requested off the tag dispatch a run on the tag.
@@ -65,9 +65,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -162,10 +162,10 @@ jobs:
       matrix:
         include:
           - host: Debian
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             container-image: debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
           - host: macOS
-            runner: macos-14
+            runner: macos-26
     runs-on: ${{ matrix.runner }}
     # macOS runs on the host; Debian retains its pinned userland and /bin/sh.
     container: ${{ matrix.container-image }}
@@ -188,7 +188,7 @@ jobs:
       queue: max
     needs: [source, test, check-host]
     if: needs.source.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -244,7 +244,7 @@ jobs:
     name: Publish installer and deployment checksums
     needs: [source, publish]
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       id-token: write
