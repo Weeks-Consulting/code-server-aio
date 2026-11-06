@@ -1,5 +1,6 @@
 """Regression coverage for downloads, startup diagnostics, and restore preflight."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -17,12 +18,15 @@ spec.loader.exec_module(manage)
 class ReviewFixTests(unittest.TestCase):
     def test_download_retries_only_transient_errors_with_backoff(self):
         for status, attempts in ((403, 1), (404, 1), (429, 4), (503, 4)):
-            error = urllib.error.HTTPError('https://example.org', status, 'failure', {}, None)
+            body = io.BytesIO(b'failure')
+            error = urllib.error.HTTPError('https://example.org', status, 'failure', {}, body)
+            self.addCleanup(error.close)
             with self.subTest(status=status), patch.object(manage.urllib.request, 'urlopen', side_effect=error) as fetch, \
                     patch.object(manage.time, 'sleep') as sleep:
                 with self.assertRaises(urllib.error.HTTPError):
                     manage.download('https://example.org')
                 self.assertEqual(fetch.call_count, attempts)
+                self.assertTrue(body.closed)
                 self.assertEqual([call.args[0] for call in sleep.call_args_list], [] if attempts == 1 else [1, 2, 4])
 
     def test_empty_or_invalid_access_settings_have_friendly_startup_errors(self):

@@ -400,6 +400,10 @@ def download(url):
             with urllib.request.urlopen(request, timeout=30) as response:
                 return response.read()
         except (OSError, http.client.HTTPException) as error:
+            # HTTPError owns a response body even when urlopen raises before
+            # entering the response context manager.
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
             if isinstance(error, urllib.error.HTTPError) and 400 <= error.code < 500 and error.code != 429:
                 raise
             if attempt == 3:

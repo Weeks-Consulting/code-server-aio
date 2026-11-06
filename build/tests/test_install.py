@@ -163,9 +163,11 @@ class InstallationTests(unittest.TestCase):
         env.write_text('SECRET=original\n')
         for missing in (management.BUNDLE, 'SHA256SUMS'):
             with self.subTest(missing=missing):
+                error = urllib.error.HTTPError('https://example.org/' + missing, 404, 'missing', {}, None)
+                self.addCleanup(error.close)
                 def fetch(url):
                     if url.endswith('/' + missing):
-                        raise urllib.error.HTTPError(url, 404, 'missing', {}, None)
+                        raise error
                     return self.fetch(url)
                 with patch.object(management, 'download', side_effect=fetch):
                     with self.assertRaisesRegex(ValueError, 'lacks required deployment files'):
