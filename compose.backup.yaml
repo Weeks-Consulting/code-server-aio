@@ -2,6 +2,8 @@
 services:
   backup:
     environment:
+      # An unset filter executes hooks from every deployment on the Docker host.
+      EXEC_LABEL: ${COMPOSE_PROJECT_NAME}-s3-home
       AWS_S3_BUCKET_NAME: ${BACKUP_AWS_S3_BUCKET_NAME:?Set BACKUP_AWS_S3_BUCKET_NAME in .env}
       AWS_S3_PATH: ${BACKUP_AWS_S3_PATH:-${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}/home}
       AWS_ENDPOINT: ${BACKUP_AWS_ENDPOINT:-s3.amazonaws.com}

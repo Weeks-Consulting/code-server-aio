@@ -78,6 +78,9 @@ Do not change these without discussing it first.
 - Manual backups execute inside the running backup sidecar so they share its
   filesystem lock with scheduled runs. Do not use a separate `compose run`
   container for manual backups; its private lock permits overlapping archives.
+- Both backup destinations set a project-specific `EXEC_LABEL`. An unset filter
+  runs hooks from unrelated containers on the Docker host, including local archive
+  permission hooks during S3 backups. Keep hook selection scoped to the destination.
 - Mutable release tags and weekly security rebuilds are intentional. Installers
   preserve existing digest pins; `manage upgrade` deliberately replaces them.
 - Publishing bypasses the `runtime` build stage cache to refresh Debian packages.

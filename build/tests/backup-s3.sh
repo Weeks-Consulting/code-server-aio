@@ -9,6 +9,7 @@ project_dir=$(cd -- "$script_dir/../.." && pwd)
 prefix="code-server-s3-$$"
 source_volume="${prefix}_code-server-home"
 app_name="$prefix-app"
+unrelated_app="$prefix-unrelated"
 archive_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
 # Override deployment settings, including optional prefix/name settings inherited
 # from the caller. No real credentials or endpoints are used.
@@ -32,6 +33,7 @@ cleanup() {
     trap - EXIT
     if [ "$result" -ne 0 ]; then compose logs rustfs >&2 || true; fi
     docker rm -f "$app_name" >/dev/null 2>&1 || true
+    docker rm -f "$unrelated_app" >/dev/null 2>&1 || true
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
     docker volume rm "$source_volume" "$prefix-restored" >/dev/null 2>&1 || true
     remove_test_archives
@@ -60,8 +62,16 @@ done
 s3 -X PUT "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME"
 # A lightweight application verifies backup stop/restart behavior.
 start_backup_fixture
+# Other deployments may have local copy hooks that cannot handle this S3 archive.
+# A different exec label must exclude their hooks, even on the same Docker host.
+docker run -d --name "$unrelated_app" --network none \
+    --label "docker-volume-backup.exec-label=$prefix-unrelated" \
+    --label "docker-volume-backup.copy-post=/bin/sh -ec 'touch /tmp/unexpected-backup-hook; exit 1'" \
+    --entrypoint /bin/sleep "$image" infinity >/dev/null
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
 compose run --rm --no-deps --entrypoint backup backup
+docker exec "$unrelated_app" test ! -e /tmp/unexpected-backup-hook
+echo 'PASS: S3 backup ignored hooks from an unrelated deployment.'
 assert_backup_restarted_app
 echo 'PASS: S3 backup stopped and restarted the labeled application.'
 # List the whole bucket so an upload to an unexpected prefix also fails.

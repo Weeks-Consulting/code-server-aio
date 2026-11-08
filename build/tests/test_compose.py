@@ -60,7 +60,11 @@ class ComposeTests(unittest.TestCase):
                 backup = s3["services"]["backup"]["environment"]
                 label = s3["services"]["code-server"]["labels"]["docker-volume-backup.stop-during-backup"]
                 assert label == backup["BACKUP_STOP_DURING_BACKUP_LABEL"]
-                deployments.append((label, backup["AWS_S3_PATH"], backup["BACKUP_FILENAME"]))
+                assert backup["EXEC_LABEL"] == project + "-s3-home"
+                local_hooks = model("compose.backup-local.yaml", project)["services"]["backup"]["environment"]["EXEC_LABEL"]
+                assert local_hooks == project + "-local-home"
+                assert backup["EXEC_LABEL"] != local_hooks
+                deployments.append((label, backup["AWS_S3_PATH"], backup["BACKUP_FILENAME"], backup["EXEC_LABEL"]))
             assert all(left != right for left, right in zip(*deployments))
 
             local = model("compose.backup-local.yaml")
