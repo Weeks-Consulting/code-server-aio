@@ -31,6 +31,9 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
     # Keep the configuration mountable by Docker Desktop and act siblings.
     with tempfile.TemporaryDirectory(prefix='.test-tmp.', dir=os.environ.get('TEST_TMPDIR', ROOT)) as temporary:
         directory = Path(temporary).resolve()
+        # Create the bind source on the host: Docker's automatic mkdir/chown
+        # can fail on macOS shared filesystems (including Colima).
+        (directory / 'archives').mkdir(mode=0o700)
         for name in ('manage', 'compose.backup-common.yaml', 'compose.backup-local.yaml'):
             shutil.copyfile(ROOT / name, directory / name)
         # Configure real backup services without creating the IDE and tunnel.
