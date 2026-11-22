@@ -102,7 +102,8 @@ class ComposeTests(unittest.TestCase):
             assert not any(key.startswith("AWS_") for key in backup["environment"])
             archive_mount = next(v for v in backup["volumes"] if v["target"] == "/archive")
             assert archive_mount["type"] == "bind"
-            assert archive_mount['bind']['create_host_path'] is False
+            # Older Compose (Debian's 2.26) omits false bind options from rendered output.
+            assert archive_mount.get('bind', {}).get('create_host_path', False) is False
             assert backup["environment"]["BACKUP_STOP_DURING_BACKUP_LABEL"] == local["services"]["code-server"]["labels"]["docker-volume-backup.stop-during-backup"]
 
     def test_development_override_labels_both_services(self):
