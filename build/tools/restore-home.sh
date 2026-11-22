@@ -3,10 +3,12 @@
 set -eu
 command -v python3 >/dev/null || { echo 'Install python3 to restore backups.' >&2; exit 1; }
 exec python3 - "$@" <<'PYTHON'
+import contextlib
 import os
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import signal
 import shlex
@@ -28,6 +30,14 @@ def run(*arguments, **kwargs):
     return subprocess.run(arguments, check=True, **kwargs)
 
 
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 if len(sys.argv) != 3:
     sys.exit('Usage: sh restore-home.sh ARCHIVE.tar.gz[.gpg] EXISTING_VOLUME')
 archive = Path(sys.argv[1]).resolve()
@@ -40,17 +50,18 @@ key = os.environ.get('BACKUP_GPG_PASSPHRASE', '')
 encrypted = archive.name.endswith('.gpg')
 if encrypted and not key:
     sys.exit('Encrypted restore requires the original BACKUP_GPG_PASSPHRASE (manage reads it from .env).')
+if key and not re.fullmatch(r'[0-9a-f]{64}', key):
+    sys.exit('BACKUP_GPG_PASSPHRASE must be exactly 64 lowercase hexadecimal characters.')
 if key and not shutil.which('gpg'):
     sys.exit('Install gpg on the Docker host to restore encrypted backups or encrypt rollback backups.')
 try:
     run('docker', 'volume', 'inspect', volume, stdout=subprocess.DEVNULL)
     if subprocess.check_output(['docker', 'ps', '-q', '--filter', 'volume=' + volume]).strip():
-        sys.exit('Stop all containers using ' + volume + ' before restoring (use docker compose down).')
+        sys.exit('Stop all containers using ' + volume + ' before restoring (use manage stop).')
 except (OSError, subprocess.CalledProcessError) as error:
     sys.exit('Cannot inspect restore volume; check its name and Docker access: ' + str(error))
 parent = archive.parent
 if archive.name in ('original-home.tar.gz', 'original-home.tar.gz.gpg'):
-    import re
     while re.fullmatch(r'pre-restore\.[A-Za-z0-9_]{8}', parent.name):
         parent = parent.parent
 try:
@@ -72,6 +83,7 @@ processes = []
 acquired = False
 create_attempted = False
 start_attempted = False
+extraction_attempted = False
 replacement_started = False
 restored = False
 
@@ -94,11 +106,25 @@ def gpg(arguments, **kwargs):
     finally:
         os.close(writer)
     try:
-        return spawn(['gpg', '--homedir', gpg_home, '--batch', '--yes',
-                                 '--pinentry-mode', 'loopback', '--passphrase-fd', str(reader),
-                                 *arguments], pass_fds=(reader,), **kwargs)
+        # Never leave the key cached in the agent after the restore.
+        return spawn(['gpg', '--homedir', gpg_home, '--batch', '--yes', '--no-symkey-cache',
+                      '--pinentry-mode', 'loopback', '--passphrase-fd', str(reader),
+                      *arguments], pass_fds=(reader,), **kwargs)
     finally:
         os.close(reader)
+
+
+@contextlib.contextmanager
+def gpg_agent_stopped(home):
+    # gpg auto-starts an agent that outlives its deleted homedir; stop it first.
+    try:
+        yield
+    finally:
+        try:
+            subprocess.run(['gpgconf', '--homedir', home, '--kill', 'gpg-agent'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def finish(processes):
@@ -121,9 +147,20 @@ try:
     attached = subprocess.check_output(['docker', 'ps', '-q', '--no-trunc', '--filter', 'volume=' + volume]).decode().split()
     if any(container != own_id for container in attached):
         raise RuntimeError('Another container is using the target volume; keep the stack stopped during restore.')
+    # Check under the volume reservation, before creating a second staged tree.
+    staging = run(*base, r'''
+        find /restore -regextype posix-extended -mindepth 1 -maxdepth 1 -type d \
+            -regex '/restore/\.restore-staging-[0-9a-f]{32}' -printf '/%f\n'
+    ''', stdout=subprocess.PIPE, text=True).stdout.splitlines()
+    if staging:
+        paths = ', '.join(sorted(staging))
+        raise RuntimeError(
+            f'Previous restore staging in Docker volume {volume}: {paths}. '
+            'Keep the stack stopped. Inspect and manually remove only the listed staging directories '
+            'before retrying. See docs/restore.md#clean-up-after-an-interrupted-restore.')
     # GPG's agent creates Unix sockets here. Shared Docker TMPDIR paths (act,
     # Docker Desktop) can exceed their length limit; this directory is host-only.
-    with tempfile.TemporaryDirectory(prefix='restore-gpg-', dir='/tmp') as gpg_home:
+    with tempfile.TemporaryDirectory(prefix='restore-gpg-', dir='/tmp') as gpg_home, gpg_agent_stopped(gpg_home):
         # GNU tar rejects traversal and directory symlink attacks. The entire
         # archive is isolated under a new directory until layout validation.
         extract = '''
@@ -136,6 +173,7 @@ try:
             test "$(find "$root" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
             test "$(find "$root/backup" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
         '''
+        extraction_attempted = True
         if encrypted:
             decrypt = gpg(['--decrypt', str(archive)], stdout=subprocess.PIPE)
             try:
@@ -166,6 +204,8 @@ try:
                 shutil.copyfileobj(backup.stdout, output, length=1024 * 1024)
                 backup.stdout.close()
                 finish([backup])
+            output.flush()
+            os.fsync(output.fileno())
         # Verify the completed rollback before modifying the original entries.
         verify_script = 'tar -tzf - >/dev/null'
         if key:
@@ -177,6 +217,8 @@ try:
             with partial.open('rb') as source:
                 finish([helper(verify_script, stdin=source)])
         partial.rename(rollback / name)
+        sync_directory(rollback)
+        sync_directory(parent)
         print('Original volume backup: ' + str(rollback / name), flush=True)
         print('Original volume backup complete; replacing volume contents.', flush=True)
         replacement_started = True
@@ -198,9 +240,13 @@ finally:
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, signal.SIG_IGN)
     # Give recovery guidance before any cleanup call that could stall.
-    if replacement_started and not restored and (rollback / name).exists():
-        print(f'Keep the stack stopped. Recover with: manage backup --restore --archive '
-              f'{shlex.quote(str(rollback / name))} --volume {shlex.quote(volume)}', file=sys.stderr)
+    if replacement_started and not restored:
+        print(f'Replacement interrupted; staged files remain at /{stage} in Docker volume {volume}. '
+              'Keep the stack stopped and inspect and manually remove this staging directory before retrying. '
+              'See docs/restore.md#clean-up-after-an-interrupted-restore.', file=sys.stderr)
+        if (rollback / name).exists():
+            print(f'After staging cleanup, recover with: manage backup --restore --archive '
+                  f'{shlex.quote(str(rollback / name))} --volume {shlex.quote(volume)}', file=sys.stderr)
 
     def cleanup(*arguments):
         try:
@@ -208,6 +254,14 @@ finally:
                                   timeout=60).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
+
+    def not_running(container):
+        try:
+            result = subprocess.run(['docker', 'inspect', '--format', '{{.State.Running}}', container],
+                                    capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == 'false'
 
     incomplete = False
     if create_attempted and not start_attempted:
@@ -232,7 +286,8 @@ finally:
     elif acquired:
         # Kill the container first: terminating a Docker CLI does not guarantee
         # that its remote extraction/replacement process has stopped.
-        stopped = cleanup('docker', 'kill', guard)
+        # docker kill fails for a guard that was created but never started.
+        stopped = cleanup('docker', 'kill', own_id) or not_running(own_id)
         for process in processes:
             if process.poll() is None:
                 process.terminate()
@@ -241,16 +296,14 @@ finally:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        if stopped and (not replacement_started or restored):
+        if stopped and extraction_attempted and (not replacement_started or restored):
             if not (cleanup('docker', 'start', guard) and cleanup(*base, 'rm -rf -- "/restore/$STAGE"')):
                 incomplete = True
                 print(f'Could not remove staging /{stage} in {volume}; remove it before restarting.', file=sys.stderr)
-        elif replacement_started and not restored:
-            print(f'Replacement interrupted; staged files remain at /{stage} in {volume}.', file=sys.stderr)
         if not stopped:
             incomplete = True
             print(f'Could not stop restore container {guard}; inspect it before removing staging or restarting.', file=sys.stderr)
-        elif not cleanup('docker', 'rm', '-f', guard):
+        elif not cleanup('docker', 'rm', '-f', own_id):
             incomplete = True
             print(f'Could not remove restore container {guard}; remove it before another restore.', file=sys.stderr)
     partial.unlink(missing_ok=True)

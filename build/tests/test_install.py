@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +57,19 @@ class InstallationTests(unittest.TestCase):
         management.validate_dotenv(
             "# OTHER='ignored\nSINGLE='literal' # comment\n"
             'DOUBLE="escaped \\" quote"\nEMPTY=""\nAPOSTROPHE=it\'s fine\n')
+        # Match Compose, which rejects a trailing backslash before either closing quote.
+        for value in ('"escaped end\\"', "'C:\\dir\\'"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Multiline or unterminated"):
+                management.validate_dotenv('KEY=' + value + '\n')
+
+    def test_checksum_manifest_rules(self):
+        digest = 'a' * 64
+        self.assertEqual(management.parse_checksums(f'{digest}  one\n\n{digest}  two words\n'.encode()),
+                         {'one': digest, 'two words': digest})
+        for manifest in (f'{digest}  one\n{digest}  one\n', 'not-a-digest  one\n', f'{digest}\n',
+                         f'{digest.upper()}  one\n'):
+            with self.subTest(manifest=manifest), self.assertRaisesRegex(ValueError, 'malformed'):
+                management.parse_checksums(manifest.encode())
 
     def test_upgrade_repository_defaults_and_comments(self):
         for value in ('', "''", 'ghcr.io/example/fork:1.0.0\t# pinned', "'ghcr.io/example/fork:1.0.0' # pinned"):
@@ -90,16 +104,20 @@ class InstallationTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
-    def test_zero_revision_keeps_bundle_and_image_on_selected_release(self):
-        self.args.version = 'v4.144.0-0'
+    def test_revision_keeps_bundle_and_image_on_selected_release(self):
+        self.args.version = 'v4.144.0-1'
         management.install(self.args)
         self.assertEqual(self.downloads, [
-            'https://github.com/Weeks-Consulting/code-server-aio/releases/download/v4.144.0-0/' + management.BUNDLE,
-            'https://github.com/Weeks-Consulting/code-server-aio/releases/download/v4.144.0-0/SHA256SUMS',
+            'https://github.com/Weeks-Consulting/code-server-aio/releases/download/v4.144.0-1/' + management.BUNDLE,
+            'https://github.com/Weeks-Consulting/code-server-aio/releases/download/v4.144.0-1/SHA256SUMS',
         ])
-        self.assertIn('CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:4.144.0-0',
+        self.assertIn('CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:4.144.0-1',
                       (self.directory / '.env').read_text())
-        self.assertEqual(management.stable_tag({'tag_name': 'v4.144.0-0'}), 'v4.144.0-0')
+        self.assertEqual(management.stable_tag({'tag_name': 'v4.144.0-1'}), 'v4.144.0-1')
+        # CI never publishes a zero revision; installers share its tag grammar.
+        for tag in ('v4.144.0-0', 'v4.144.0-01'):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                management.stable_tag({'tag_name': tag})
 
     def test_install_and_refresh_preserve_settings_and_backup_files(self):
         management.install(self.args)
@@ -110,11 +128,12 @@ class InstallationTests(unittest.TestCase):
         self.assertIn('CODE_SERVER_IMAGE=ghcr.io/weeks-consulting/code-server-aio:1.2.3', env.read_text())
         self.assertRegex(env.read_text(), r'BACKUP_GPG_PASSPHRASE=[a-f0-9]{64}')
         digest = 'ghcr.io/example/image@sha256:' + 'a' * 64
-        env.write_text('# My settings\nCODE_SERVER_IMAGE=' + digest + '\nSECRET=$(never-execute)\nBACKUP_GPG_PASSPHRASE=existing\n')
+        key = 'BACKUP_GPG_PASSPHRASE: ' + 'a' * 64
+        env.write_text('# My settings\nCODE_SERVER_IMAGE=' + digest + '\nSECRET=$(never-execute)\n' + key + '\n')
         management.install(self.args)
         self.assertIn('CODE_SERVER_IMAGE=' + digest, env.read_text())
         self.assertIn('SECRET=$(never-execute)', env.read_text())
-        self.assertIn('BACKUP_GPG_PASSPHRASE=existing', env.read_text())
+        self.assertIn(key, env.read_text())
         self.assertIn('CF_TUNNEL_TOKEN=', env.read_text())
         self.assertEqual((self.directory / 'manage.py.bak').read_bytes(), self.files['manage.py'])
 
@@ -388,6 +407,18 @@ class InstallationTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    def test_release_redirects_require_https(self):
+        opener = management.release_opener()
+        handler = next(handler for handler in opener.handlers
+                       if isinstance(handler, urllib.request.HTTPRedirectHandler))
+        request = urllib.request.Request('https://example.invalid/release')
+        redirected = handler.redirect_request(request, None, 302, 'Found', {},
+                                              'https://assets.example.invalid/bundle')
+        self.assertEqual(redirected.full_url, 'https://assets.example.invalid/bundle')
+        with self.assertRaisesRegex(ValueError, 'require HTTPS'):
+            handler.redirect_request(request, None, 302, 'Found', {},
+                                     'http://assets.example.invalid/bundle')
+
     def test_truncated_responses_are_retried(self):
         class Response:
             def __init__(self, outcome):
@@ -400,10 +431,11 @@ class DownloadTests(unittest.TestCase):
                 if isinstance(self.outcome, Exception):
                     raise self.outcome
                 return self.outcome
-        outcomes = [http.client.IncompleteRead(b'partial'), b'complete']
-        with patch.object(management.urllib.request, 'urlopen',
-                          side_effect=lambda *a, **k: Response(outcomes.pop(0))), \
+        with patch.object(management, 'release_opener') as opener, \
                 patch.object(management.time, 'sleep') as sleep:
+            opener.return_value.open.side_effect = [
+                Response(http.client.IncompleteRead(b'partial')), Response(b'complete'),
+            ]
             self.assertEqual(management.download('https://example.invalid/file'), b'complete')
         sleep.assert_called_once_with(1)
 
@@ -424,6 +456,39 @@ class DependencyTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_help_and_dry_run_work_with_only_python(self):
+        script = (ROOT / 'build/tools/install.sh').read_text()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            tools = root / 'bin'
+            tools.mkdir()
+            (tools / 'python3').symlink_to(sys.executable)
+            directory = root / 'install path'
+            env = {**os.environ, 'PATH': str(tools), 'TMPDIR': str(root / 'missing-tmp')}
+
+            def bootstrap(*args):
+                return subprocess.run(['/bin/sh', '-s', '--', *args], input=script, cwd=root, env=env,
+                                      capture_output=True, text=True)
+
+            for flag in ('-h', '--help'):
+                with self.subTest(flag=flag):
+                    result = bootstrap(flag)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('--dry-run', result.stdout)
+            result = bootstrap('--dry-run', '--repository=Example/Fork', '--version=v1.2.3-1',
+                               '--directory', str(directory))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('ghcr.io/example/fork:1.2.3-1', result.stdout)
+            self.assertIn(str(directory), result.stdout)
+            result = bootstrap('--dry-run')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('latest stable release', result.stdout)
+            self.assertNotIn(':latest', result.stdout)
+            result = bootstrap('--dry-run', '--version=invalid')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Expected a release tag', result.stderr)
+            self.assertEqual(list(root.iterdir()), [tools])
+
     def test_checksum_precedes_execution_and_needs_no_github_cli(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -440,11 +505,11 @@ class BootstrapTests(unittest.TestCase):
                 'args = sys.argv[1:]\n'
                 'url = args[args.index("--output") - 1]\n'
                 'repo = os.environ.get("EXPECTED_REPOSITORY", "Weeks-Consulting/code-server-aio")\n'
-                'tag = os.environ.get("EXPECTED_VERSION", "v4.144.0-0")\n'
+                'tag = os.environ.get("EXPECTED_VERSION", "v4.144.0-1")\n'
                 'base = f"https://github.com/{repo}/releases/download/{tag}/"\n'
                 'if os.environ.get("PUBLISHING"): sys.exit(22)\n'
                 'if url == f"https://api.github.com/repos/{repo}/releases/latest":\n'
-                '    pathlib.Path(args[args.index("--output") + 1]).write_text(json.dumps({"tag_name": "v4.144.0-0"}))\n'
+                '    pathlib.Path(args[args.index("--output") + 1]).write_text(json.dumps({"tag_name": "v4.144.0-1"}))\n'
                 '    sys.exit(0)\n'
                 'if not url.startswith(base): sys.exit(22)\n'
                 f'payload = {payload!r}\nmanifest = {manifest!r}\n'
@@ -467,7 +532,7 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual((root / 'executed').exists(), succeeds)
             # Both version spellings and fork selection control every asset URL.
             for options, overrides, expected in (
-                (['--version', 'v4.144.0-0'], {}, 'install --version v4.144.0-0 --version v4.144.0-0'),
+                (['--version', 'v4.144.0-1'], {}, 'install --version v4.144.0-1 --version v4.144.0-1'),
                 (['--version=v1.2.0', '--repository=Example/Fork'],
                  {'EXPECTED_VERSION': 'v1.2.0', 'EXPECTED_REPOSITORY': 'Example/Fork'},
                  'install --version=v1.2.0 --repository=Example/Fork --version v1.2.0'),

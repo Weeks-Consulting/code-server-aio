@@ -47,7 +47,7 @@ configuration, including backup mode and project name, for later commands.
 | Command | Purpose |
 | --- | --- |
 | `./manage configure --pull --start` | Configure containers, pull images, and start. |
-| `./manage configure --backup local --start` | Configure and start with local backups. |
+| `./manage configure --backup local --start` | Configure and start with [local backups](docs/backups.md#optional-local-backups). |
 | `./manage configure --backup s3 --start` | Configure and start with S3 or R2 backups. |
 | `./manage start [--pull]` | Start saved deployment; `--pull` refreshes images and recreates as needed. |
 | `./manage stop` | Stop containers; keep containers, networks, and volumes. |

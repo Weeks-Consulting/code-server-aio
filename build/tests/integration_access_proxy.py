@@ -89,6 +89,7 @@ class AccessProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.directory.cleanup)
         cls.root = Path(cls.directory.name)
         cls.root.chmod(0o755)
         cls.private = []
@@ -106,38 +107,37 @@ class AccessProxyTests(unittest.TestCase):
                 '-keyout', str(tls_key), '-out', str(cls.cert), '-subj', '/CN=' + DOMAIN,
                 '-addext', 'subjectAltName=DNS:' + DOMAIN)
         cls.keys_server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Keys)
+        cls.addClassCleanup(cls.keys_server.server_close)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cls.cert, tls_key)
         cls.keys_server.socket = context.wrap_socket(cls.keys_server.socket, server_side=True)
         threading.Thread(target=cls.keys_server.serve_forever, daemon=True).start()
+        cls.addClassCleanup(cls.keys_server.shutdown)
         cls.socket_path = cls.root / 'backend.sock'
         cls.backend = UnixServer(str(cls.socket_path), Backend)
+        cls.addClassCleanup(cls.backend.server_close)
         cls.socket_path.chmod(0o666)
         threading.Thread(target=cls.backend.serve_forever, daemon=True).start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.backend.shutdown()
-        cls.backend.server_close()
-        cls.keys_server.shutdown()
-        cls.keys_server.server_close()
-        cls.directory.cleanup()
+        cls.addClassCleanup(cls.backend.shutdown)
 
     def setUp(self):
         self.process = None
         self.log = tempfile.TemporaryFile()
+        self.addCleanup(self.log.close)
+        self.addCleanup(self.stop)
         self.keys_server.keys = [self.jwks[0]]
         self.keys_server.fail = False
         self.start()
 
-    def tearDown(self):
-        self.stop()
-        self.log.close()
-
     def stop(self):
-        if self.process:
-            self.process.terminate()
-            self.process.wait(timeout=10)
+        if self.process is not None:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=10)
             self.process = None
 
     def start(self, emails=(), change=None, env_override=None, expect_ready=True):
@@ -166,10 +166,6 @@ class AccessProxyTests(unittest.TestCase):
             change(config, manager, provider)
         path = self.root / 'envoy.json'
         path.write_text(json.dumps(config))
-        def demote():
-            os.setgroups([])
-            os.setgid(10000)
-            os.setuid(10000)
         environment = {**os.environ, 'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD,
                        'CF_ACCESS_ALLOWED_EMAILS': ','.join(emails),
                        **(env_override or {})}
@@ -181,7 +177,8 @@ class AccessProxyTests(unittest.TestCase):
                                          '\nexcept ValueError as e: sys.exit(str(e))'
                                          '\nos.execv(sys.argv[1], sys.argv[1:])', '/usr/local/bin/envoy', '-c', str(path), '--concurrency', '2',
                                          '--disable-hot-restart', '--log-level', 'warn'],
-                                        stdout=self.log, stderr=self.log, preexec_fn=demote, env=environment)
+                                        stdout=self.log, stderr=self.log, user=10000, group=10000,
+                                        extra_groups=[], env=environment)
         if expect_ready:
             self.wait_status(None, 403)
 
@@ -235,6 +232,26 @@ class AccessProxyTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(self.status(), 403)
+
+    def test_setup_failure_releases_envoy_listeners(self):
+        class FailingSetup(AccessProxyTests):
+            def wait_status(self, *args, **kwargs):
+                super().wait_status(*args, **kwargs)
+                self.fail('forced readiness failure')
+
+            def runTest(self):
+                self.fail('readiness failure did not abort setup')
+
+        self.stop()
+        fixture = FailingSetup()
+        result = unittest.TestResult()
+        fixture.run(result)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn('forced readiness failure', result.failures[0][1])
+        self.assertIsNone(fixture.process)
+        self.assertTrue(fixture.log.closed)
+        self.start()
+        self.check_health()
 
     def test_access_logs_only_suppress_the_exact_local_denial_probe(self):
         marker = {'User-Agent': 'code-server-container-healthcheck'}
@@ -305,7 +322,7 @@ class AccessProxyTests(unittest.TestCase):
                   self.token({'iss': 'https://other.cloudflareaccess.com'}),
                   self.token({'aud': ['b' * 64]}), self.token({'aud': ['prefix-' + AUD]}),
                   self.token({'aud': []}), self.token({'aud': None}), self.token({'aud': [{'nested': AUD}]}),
-                  self.token({'exp': int(time.time()) - 5}), self.token(omit=['exp']),
+                  self.token({'exp': int(time.time()) - 120}), self.token(omit=['exp']),
                   self.token({'exp': 'invalid'}), self.token({'nbf': int(time.time()) + 300}),
                   self.token({'nbf': 'invalid'}), self.token(algorithm='none'),
                   self.token(algorithm='HS256'), self.token(omit=['aud'])]
@@ -318,6 +335,8 @@ class AccessProxyTests(unittest.TestCase):
         self.assertEqual(self.status(None, headers={'Authorization': 'Bearer ' + self.token()}), 403)
         self.assertEqual(self.status(None, '/?access_token=' + self.token()), 403)
         self.assertEqual(self.status(self.token({'nbf': int(time.time()) - 30})), 200)
+        # A host clock slightly behind the issuer must not reject fresh tokens.
+        self.assertEqual(self.status(self.token({'nbf': int(time.time()) + 10})), 200)
 
     def test_duplicate_token_headers(self):
         token = self.token()

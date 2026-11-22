@@ -1,11 +1,17 @@
 """Check deployment management commands without starting containers."""
 
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import unittest
 
 
@@ -39,11 +45,29 @@ class LauncherTests(unittest.TestCase):
             'with open(os.environ["ARGUMENT_LOG"] + ".calls", "a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")\n'
             'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("BACKUP_LOCAL_UID", "BACKUP_LOCAL_GID", "CODE_SERVER_MEMORY_LIMIT")}))\n'
             'if sys.argv[1:] == ["info", "--format", "{{.MemTotal}}"]: print(os.environ.get("TEST_HOST_MEMORY", "10737418240"))\n'
+            'if sys.argv[1:4] == ["container", "ls", "--quiet"] and "status=running" not in sys.argv: print(os.environ.get("TEST_RUNNING_CONTAINERS", ""))\n'
+            'if sys.argv[1:5] == ["volume", "ls", "--quiet", "--filter"]: print(os.environ.get("TEST_PROJECT_VOLUMES", ""))\n'
+            'if sys.argv[1:] == ["volume", "ls", "--quiet"]: print(os.environ.get("TEST_ALL_VOLUMES", ""))\n'
             'if sys.argv[-3:] == ["config", "--format", "json"]:\n'
             '    args = sys.argv[1:]\n'
+            '    if args[args.index("-f") + 1] == "-":\n'
+            f'        os.execv({shutil.which("docker")!r}, sys.argv)\n'
             '    model = {"name": args[args.index("--project-name") + 1] if "--project-name" in args else "example", "services": {"code-server": {"image": "test", "mem_limit": os.environ.get("CODE_SERVER_MEMORY_LIMIT")}}}\n'
             '    print(os.environ.get("TEST_MODEL", json.dumps(model)))\n'
+            'if sys.argv[-4:] == ["ps", "--all", "--quiet", "code-server"]: print("workspace-container")\n'
+            'if sys.argv[1:] == ["inspect", "--format", "{{.Image}}", "workspace-container"]: print("sha256:workspace-image")\n'
+            'if sys.argv[1:3] == ["create", "--name"]: print("workspace-reservation")\n'
+            'if sys.argv[1:4] == ["container", "ls", "--quiet"] and "status=running" in sys.argv: print(os.environ.get("TEST_BACKUP_SIDECAR", ""))\n'
+            'if sys.argv[1:2] == ["exec"] and "flock" in sys.argv:\n'
+            '    lock = os.environ.get("TEST_BACKUP_LOCK", "free")\n'
+            '    if lock == "held": sys.exit(1)\n'
+            '    if lock == "exec-error": sys.stderr.write("Error response from daemon: Container sidecar is restarting\\n"); sys.exit(1)\n'
+            '    print("locked", flush=True); sys.stdin.read(); sys.exit(0)\n'
+            'if sys.argv[1:4] == ["inspect", "--format", "{{.State.Status}}"]: print(os.environ.get("TEST_SIDECAR_STATE", "running"))\n'
+            'if sys.argv[1:3] == ["image", "inspect"] and sys.argv[-1] in os.environ.get("TEST_MISSING_IMAGES", "").split(): sys.exit(1)\n'
             'if "create" in sys.argv and os.environ.get("FAIL_CREATE"): sys.exit(9)\n'
+            'if "pull" in sys.argv and os.environ.get("TEST_PULL_SLEEP"):\n'
+            '    import time; time.sleep(float(os.environ["TEST_PULL_SLEEP"]))\n'
             'sys.exit(int(os.environ.get("DOCKER_EXIT", "0")))\n'
         )
         docker.chmod(0o755)
@@ -115,9 +139,11 @@ class LauncherTests(unittest.TestCase):
                 result = self.run_launcher('start', '--pull')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.calls()[before:]
-                self.assertEqual(len(calls), 2)
-                self.assertEqual(calls[0][-3:], ['create', '--pull', 'always'])
-                self.assertEqual(calls[1][-1], 'start')
+                # Images are pulled visibly before any lock; create then reuses them.
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[0][-2:], ['pull', 'code-server'])
+                self.assertEqual(calls[1][-1], 'create')
+                self.assertEqual(calls[2][-1], 'start')
                 for call in calls:
                     self.assertIn(str(self.deployment / '.manage.compose.json'), call)
                     self.assertEqual(call[call.index('--project-name') + 1], 'custom')
@@ -132,8 +158,9 @@ class LauncherTests(unittest.TestCase):
         before = len(self.calls())
         result = self.run_launcher('start', '--pull')
         self.assertEqual(result.returncode, 9, result.stderr)
-        self.assertEqual(len(self.calls()[before:]), 1)
-        self.assertEqual(self.calls()[-1][-3:], ['create', '--pull', 'always'])
+        self.assertEqual(len(self.calls()[before:]), 2)
+        self.assertEqual(self.calls()[-2][-2:], ['pull', 'code-server'])
+        self.assertEqual(self.calls()[-1][-1], 'create')
         self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
 
     def test_pull_is_limited_to_start_and_configure(self):
@@ -152,12 +179,94 @@ class LauncherTests(unittest.TestCase):
         self.configure('--backup', 'none')
         self.assertEqual(self.snapshot()['x-manage-backup'], 'none')
 
+    def test_configure_rejects_renaming_a_project_with_resources(self):
+        self.configure('--project-name', 'existing')
+        path = self.deployment / '.manage.compose.json'
+        saved = self.snapshot()
+        saved['volumes'] = {'code-server-home': {'name': 'existing-home'}}
+        path.write_text(json.dumps(saved))
+        original = path.read_bytes()
+        dotenv = self.deployment / '.env'
+        original_env = dotenv.read_bytes()
+        label = 'label=com.docker.compose.project=existing'
+        checks = [
+            ['container', 'ls', '--quiet', '--filter', label],
+            ['volume', 'ls', '--quiet', '--filter', label],
+            ['volume', 'ls', '--quiet'],
+        ]
+        for setting, output, message, expected_calls in (
+                ('TEST_RUNNING_CONTAINERS', 'tunnel-container', 'running containers', checks[:1]),
+                ('TEST_PROJECT_VOLUMES', 'previously-used-volume', 'Docker volumes', checks[:2]),
+                ('TEST_ALL_VOLUMES', 'unrelated\nexisting-home', 'Docker volumes', checks)):
+            with self.subTest(setting=setting):
+                self.env[setting] = output
+                before = len(self.calls())
+                result = self.run_launcher('configure', '--project-name', 'replacement',
+                                           '--backup', 'local', '--pull', '--start')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f'from existing to replacement while existing has {message}', result.stderr)
+                self.assertEqual(self.calls()[before:], expected_calls)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(dotenv.read_bytes(), original_env)
+                self.env.pop(setting)
+
+    def test_configure_can_rename_an_empty_project(self):
+        self.configure('--project-name', 'existing')
+        path = self.deployment / '.manage.compose.json'
+        saved = self.snapshot()
+        saved['volumes'] = {'code-server-home': {'name': 'existing-home'}}
+        path.write_text(json.dumps(saved))
+        self.env.update(COMPOSE_PROJECT_NAME='unrelated', TEST_ALL_VOLUMES='existing-home-copy\nother')
+        self.configure('--project-name', 'replacement')
+        self.assertEqual(self.snapshot()['name'], 'replacement')
+
+    def test_configure_keeps_project_name_when_docker_listing_fails(self):
+        self.configure('--project-name', 'existing')
+        self.env['DOCKER_EXIT'] = '7'
+        before = len(self.calls())
+        result = self.run_launcher('configure', '--project-name', 'replacement')
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(self.snapshot()['name'], 'existing')
+        self.assertEqual(self.calls()[before:], [
+            ['container', 'ls', '--quiet', '--filter', 'label=com.docker.compose.project=existing'],
+        ])
+
     def test_configure_start_is_explicit(self):
         self.configure()
         self.assertEqual(self.calls()[-1][-2:], ['create', '--remove-orphans'])
         self.configure('--start')
         self.assertEqual(self.calls()[-2][-2:], ['create', '--remove-orphans'])
         self.assertEqual(self.calls()[-1][-1], 'start')
+
+    def test_configure_waits_for_deployment_files_before_rendering(self):
+        dotenv = self.deployment / '.env'
+        compose_file = self.deployment / 'compose.yaml'
+        snapshot = self.deployment / '.manage.compose.json'
+        with (self.deployment / '.env.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with subprocess.Popen(['sh', str(self.script), 'configure'], env=self.env, cwd=self.root,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+                try:
+                    deadline = time.monotonic() + 10
+                    while not snapshot.with_name('.manage.compose.json.lock').exists():
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    # Configure must wait before reading deployment files or
+                    # invoking Docker.
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        process.wait(timeout=0.25)
+                    self.assertFalse(self.log.exists())
+                    self.assertFalse(snapshot.exists())
+                    dotenv.write_text('CODE_SERVER_IMAGE=test:new\n')
+                    compose_file.write_text('services: {}\n')
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    _, stderr = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    self.assertTrue(snapshot.exists())
+                finally:
+                    if process.poll() is None:
+                        process.kill()
 
     def test_failed_create_keeps_saved_configuration_and_cleans_temporary_file(self):
         self.configure('--backup', 'none')
@@ -207,18 +316,21 @@ class LauncherTests(unittest.TestCase):
 
     def test_release_warning_is_best_effort(self):
         # Exercise the full launcher, replacing only the upstream network response.
+        release_called = self.root / 'release-called'
         (self.root / "sitecustomize.py").write_text(
-            "import io, json, os, urllib.request\n"
-            "def release(request, timeout):\n"
+            "import io, os, pathlib, urllib.request\n"
+            "def release(self, request, timeout):\n"
             "    assert timeout == 2\n"
-            "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
             "    assert request.full_url == 'https://api.github.com/repos/weeks-consulting/code-server-aio/releases/latest'\n"
+            f"    pathlib.Path({str(release_called)!r}).touch()\n"
+            "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
             "    return io.BytesIO(os.environ.get('TEST_RELEASE', '{\"tag_name\": \"v9.0.0\"}').encode())\n"
-            "urllib.request.urlopen = release\n")
+            "urllib.request.OpenerDirector.open = release\n")
         self.env["PYTHONPATH"] = str(self.root)
         for tag, offline, warn in (("1.0.0", False, True), ("9.0.0", False, False),
                                    ("1.0.0", True, False), ("latest", False, False)):
             with self.subTest(tag=tag, offline=offline):
+                release_called.unlink(missing_ok=True)
                 self.env["TEST_MODEL"] = json.dumps({"services": {"code-server": {
                     "image": "ghcr.io/weeks-consulting/code-server-aio:" + tag}}})
                 if offline:
@@ -227,8 +339,10 @@ class LauncherTests(unittest.TestCase):
                     self.env.pop("TEST_OFFLINE", None)
                 result = self.run_launcher("configure", "--pull")
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(release_called.exists(), tag != "latest")
                 self.assertEqual("differs from latest release" in result.stderr, warn)
-                self.assertEqual(json.loads(self.log.read_text())[-4:], ["create", "--remove-orphans", "--pull", "always"])
+                self.assertEqual(self.calls()[-2][-2:], ["pull", "code-server"])
+                self.assertEqual(self.calls()[-1][-2:], ["create", "--remove-orphans"])
 
         # Invalid or non-stable upstream responses must not warn or block startup.
         self.env.pop("TEST_OFFLINE", None)
@@ -237,15 +351,49 @@ class LauncherTests(unittest.TestCase):
         for release in ({"tag_name": "invalid"}, {"tag_name": "v9.0.0", "draft": True},
                         {"tag_name": "v9.0.0", "prerelease": True}):
             with self.subTest(release=release):
+                release_called.unlink(missing_ok=True)
                 self.env["TEST_RELEASE"] = json.dumps(release)
                 result = self.run_launcher("configure", "--pull")
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(release_called.exists())
                 self.assertNotIn("differs from latest release", result.stderr)
-                self.assertEqual(json.loads(self.log.read_text())[-2:], ["--pull", "always"])
+                self.assertEqual(self.calls()[-2][-2:], ["pull", "code-server"])
+
+    def test_start_pull_warns_when_pinned_tag_is_no_longer_rebuilt(self):
+        (self.root / "sitecustomize.py").write_text(
+            "import io, os, urllib.request\n"
+            "def release(self, request, timeout):\n"
+            "    assert timeout == 2\n"
+            "    if os.environ.get('TEST_OFFLINE'): raise OSError('offline')\n"
+            "    return io.BytesIO(b'{\"tag_name\": \"v9.0.0\"}')\n"
+            "urllib.request.OpenerDirector.open = release\n")
+        self.env["PYTHONPATH"] = str(self.root)
+        saved = self.deployment / '.manage.compose.json'
+        for tag, offline, warn in (("1.0.0", False, True), ("9.0.0", False, False), ("1.0.0", True, False)):
+            with self.subTest(tag=tag, offline=offline):
+                saved.write_text(json.dumps({
+                    'name': 'example',
+                    'services': {'code-server': {
+                        'image': 'ghcr.io/weeks-consulting/code-server-aio:' + tag,
+                        'volumes': [{'type': 'volume', 'source': 'code-server-home', 'target': '/home'}]}},
+                    'volumes': {'code-server-home': {'name': 'example_code-server-home'}}}))
+                if offline:
+                    self.env["TEST_OFFLINE"] = "1"
+                else:
+                    self.env.pop("TEST_OFFLINE", None)
+                result = self.run_launcher("start", "--pull")
+                # The warning is advisory: start still pulls, recreates, and starts.
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual("differs from latest release v9.0.0" in result.stderr, warn)
+                if warn:
+                    self.assertIn("manage upgrade", result.stderr)
+                calls = self.calls()
+                self.assertEqual(calls[-2][0], 'compose')
+                self.assertEqual(calls[-2][-1], 'start')
+                self.assertEqual(calls[-1][:2], ['rm', 'workspace-reservation'])
 
     def test_upgrade_needs_no_github_account(self):
         # Refresh details and failure paths are covered by test_install's upgrade tests.
-        import hashlib
         repository = SCRIPT.parent
         sources = ["compose.yaml", "compose.backup-common.yaml", "compose.backup.yaml",
                    "compose.backup-local.yaml", "manage", "manage.py", ".env.example",
@@ -266,7 +414,7 @@ class LauncherTests(unittest.TestCase):
             "import io, json, os, pathlib, urllib.request\n"
             "os.geteuid = lambda: 1000\n"
             f"root = pathlib.Path({str(self.root)!r})\n"
-            "def respond(request, timeout):\n"
+            "def respond(self, request, timeout):\n"
             "    assert 'Authorization' not in request.headers\n"
             "    url = request.full_url\n"
             "    if url == 'https://api.github.com/repos/example/fork/releases/latest':\n"
@@ -276,7 +424,7 @@ class LauncherTests(unittest.TestCase):
             "    prefix = 'https://github.com/Example/Fork/releases/download/v9.0.0-1/'\n"
             "    assert url.startswith(prefix), url\n"
             "    return io.BytesIO((root / url[len(prefix):]).read_bytes())\n"
-            "urllib.request.urlopen = respond\n")
+            "urllib.request.OpenerDirector.open = respond\n")
         # No GitHub CLI or login; package managers must never run.
         for name, body in {"gh": f"touch {str(self.root / 'gh-called')!r}; exit 99",
                            "apt-get": "exit 99", "brew": "exit 99", "sudo": "exit 99"}.items():
@@ -300,17 +448,286 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("manage configure --pull --start", result.stdout)
         self.assertFalse((self.root / "gh-called").exists())
 
+    def write_backup_configuration(self):
+        saved = self.deployment / '.manage.compose.json'
+        saved.write_text(json.dumps({
+            'name': 'example', 'x-manage-backup': 'local',
+            'services': {'code-server': {'image': 'test'}, 'backup': {'image': 'offen'}},
+            'volumes': {'code-server-home': {'name': 'example_code-server-home'}},
+        }))
+        self.env['TEST_MODEL'] = saved.read_text()
+        self.env['TEST_BACKUP_SIDECAR'] = 'sidecar'
+
+    def test_lifecycle_holds_running_backup_lock(self):
+        self.write_backup_configuration()
+        for action in ('stop', 'start'):
+            result = self.run_launcher(action)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(['exec', '-i', 'sidecar', 'flock', '-n', '/var/lock/dockervolumebackup.lock',
+                           '/bin/sh', '-ec', 'echo locked; cat >/dev/null'], self.calls())
+
+    def test_running_backup_blocks_lifecycle(self):
+        self.write_backup_configuration()
+        self.env['TEST_BACKUP_LOCK'] = 'held'
+        for action in (('stop',), ('start',), ('configure', '--backup', 'none')):
+            result = self.run_launcher(*action)
+            self.assertNotEqual(result.returncode, 0, action)
+            self.assertIn('Could not acquire the backup lock for example: a backup is running', result.stderr)
+            self.assertFalse(any(call[-1:] == ['stop'] and call[0] == 'compose' for call in self.calls()), action)
+
+    def test_restarting_backup_sidecar_does_not_block_lifecycle(self):
+        # A sidecar that began crash-looping after it was listed cannot hold the lock.
+        self.write_backup_configuration()
+        self.env.update(TEST_BACKUP_LOCK='exec-error', TEST_SIDECAR_STATE='restarting')
+        for action in (('stop',), ('start',), ('configure', '--backup', 'none')):
+            result = self.run_launcher(*action)
+            self.assertEqual(result.returncode, 0, (action, result.stderr))
+            self.assertIn('Backup service for example is restarting; continuing without its backup lock.',
+                          result.stderr)
+        compose = [call for call in self.calls() if call[0] == 'compose']
+        self.assertTrue(any(call[-1] == 'stop' for call in compose))
+
+    def test_backup_exec_error_on_running_sidecar_reports_docker_error(self):
+        self.write_backup_configuration()
+        self.env['TEST_BACKUP_LOCK'] = 'exec-error'
+        result = self.run_launcher('stop')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('backup container sidecar is running', result.stderr)
+        self.assertIn('Container sidecar is restarting', result.stderr)
+        self.assertNotIn('a backup is running', result.stderr)
+
+    def test_configure_rejects_invalid_backup_id_before_changing_containers(self):
+        self.env['TEST_MODEL'] = json.dumps({
+            'name': 'example',
+            'services': {'code-server': {'image': 'test'},
+                         'backup': {'image': 'offen', 'environment': {'BACKUP_ID': 'My-Host'}}},
+        })
+        result = self.run_launcher('configure', '--backup', 'local')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("BACKUP_ID must be 1 to 64 lowercase letters", result.stderr)
+        self.assertIn("'My-Host'", result.stderr)
+        self.assertFalse(any('create' in call for call in self.calls()))
+        self.assertFalse((self.deployment / '.manage.compose.json').exists())
+
     def test_start_without_pull_skips_network(self):
+        network_called = self.root / 'network-called'
         (self.root / "sitecustomize.py").write_text(
             "import pathlib, urllib.request\n"
-            f"def fail(*a, **k): pathlib.Path({str(self.root / 'network-called')!r}).touch(); raise OSError('offline')\n"
-            "urllib.request.urlopen = fail\n")
+            "def fail(*args, **kwargs):\n"
+            f"    pathlib.Path({str(network_called)!r}).touch()\n"
+            "    raise OSError('offline')\n"
+            "urllib.request.OpenerDirector.open = fail\n")
         self.env['PYTHONPATH'] = str(self.root)
-        self.env['TEST_MODEL'] = json.dumps({'services': {'code-server': {
-            'image': 'ghcr.io/example/app:1.0.0'}}})
-        result = self.run_launcher("configure")
+        saved = self.deployment / '.manage.compose.json'
+        volume_name = 'example_code-server-home'
+        saved.write_text(json.dumps({
+            'name': 'example',
+            'services': {'code-server': {
+                'image': 'ghcr.io/example/app:1.0.0',
+                'volumes': [{'type': 'volume', 'source': 'code-server-home', 'target': '/home'}],
+            }},
+            'volumes': {'code-server-home': {'name': volume_name}},
+        }))
+
+        result = self.run_launcher("start")
+
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.root / 'network-called').exists())
+        self.assertFalse(network_called.exists())
+        compose = ['compose', '--project-directory', str(self.deployment), '--env-file', '/dev/null',
+                   '-f', str(saved), '--project-name', 'example']
+        reservation = 'code-server-restore-' + hashlib.sha256(volume_name.encode()).hexdigest()[:24]
+        calls = self.calls()
+        owner_label = calls[2][calls[2].index('--pull') - 1]
+        self.assertRegex(owner_label, r'^code-server\.lifecycle-owner=[0-9a-f]{32}$')
+        self.assertEqual(calls, [
+            compose + ['ps', '--all', '--quiet', 'code-server'],
+            ['inspect', '--format', '{{.Image}}', 'workspace-container'],
+            ['create', '--name', reservation, '--network', 'none',
+             '--label', 'code-server.lifecycle-reservation=true', '--label', owner_label,
+             '--pull', 'never', '--entrypoint', '/bin/false', 'sha256:workspace-image'],
+            ['container', 'ls', '--quiet', '--filter', 'label=com.docker.compose.project=example',
+             '--filter', 'label=com.docker.compose.service=backup',
+             '--filter', 'label=com.docker.compose.oneoff=False', '--filter', 'status=running'],
+            compose + ['start'],
+            ['rm', 'workspace-reservation'],
+        ])
+
+    def interrupt_lifecycle(self, operation, phase, signum, owner='ours', repeat=False):
+        volume = 'lifecycle-home'
+        (self.deployment / '.manage.compose.json').write_text(json.dumps({
+            'name': 'example',
+            'services': {'code-server': {'image': 'test'}},
+            'volumes': {'code-server-home': {'name': volume}},
+        }))
+        self.env['TEST_MODEL'] = (self.deployment / '.manage.compose.json').read_text()
+        docker = self.root / 'docker'
+        docker.rename(self.root / 'docker-fixture')
+        docker.write_text('#!/usr/bin/env python3\n' + textwrap.dedent('''\
+            import json, os, signal, sys, time
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            root = Path(os.environ['ARGUMENT_LOG']).parent
+            reservation = root / 'reservation'
+            phase = os.environ['TEST_PAUSE_PHASE']
+
+            def pause():
+                (root / 'paused').touch()
+                if phase != 'release':
+                    time.sleep(60)
+                else:
+                    while not (root / 'continue').exists():
+                        time.sleep(0.01)
+
+            if args[:2] == ['create', '--name']:
+                owner = next(arg.split('=', 1)[1] for arg in args if arg.startswith('code-server.lifecycle-owner='))
+                if os.environ['TEST_RESERVATION_OWNER'] == 'other':
+                    owner = 'another-invocation'
+                reservation.write_text(owner)
+                if phase == 'acquire':
+                    pause()
+                print('workspace-reservation')
+            elif args[:3] == ['inspect', '--type', 'container']:
+                if os.environ['TEST_RESERVATION_OWNER'] == 'unresolved':
+                    sys.exit(1)
+                print(json.dumps({'Id': 'workspace-reservation',
+                                  'Config': {'Labels': {'code-server.lifecycle-owner': reservation.read_text()}}}))
+            elif args == ['rm', 'workspace-reservation']:
+                if phase == 'release':
+                    pause()
+                reservation.unlink()
+            elif args[0] == 'compose' and args[-1] == 'start' and phase in ('start', 'start-stuck'):
+                if phase == 'start-stuck':
+                    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+                        signal.signal(signum, signal.SIG_IGN)
+                pause()
+            else:
+                os.execv(root / 'docker-fixture', [str(root / 'docker-fixture'), *args])
+            '''))
+        docker.chmod(0o755)
+        env = {**self.env, 'TEST_PAUSE_PHASE': phase, 'TEST_RESERVATION_OWNER': owner}
+        with subprocess.Popen(['sh', str(self.script), *operation], env=env, cwd=self.root,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            try:
+                deadline = time.monotonic() + 10
+                while not (self.root / 'paused').exists():
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        self.fail('Lifecycle command did not reach ' + phase)
+                    time.sleep(0.01)
+                process.send_signal(signum)
+                if repeat:
+                    time.sleep(0.5)
+                    self.assertIsNone(process.poll())
+                    process.send_signal(signum)
+                if phase == 'release':
+                    # The cleanup subprocess should be allowed to finish.
+                    time.sleep(0.1)
+                    (self.root / 'continue').touch()
+                _, stderr = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 128 + signum, stderr)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        name = 'code-server-restore-' + hashlib.sha256(volume.encode()).hexdigest()[:24]
+        return name, stderr
+
+    def test_interrupted_acquisition_removes_its_own_reservation(self):
+        self.interrupt_lifecycle(('configure', '--start'), 'acquire', signal.SIGINT)
+        self.assertFalse((self.root / 'reservation').exists())
+        self.assertFalse(any('create' in call for call in self.calls()))
+
+    def test_interrupted_acquisition_preserves_another_reservation(self):
+        self.interrupt_lifecycle(('start',), 'acquire', signal.SIGTERM, owner='other')
+        self.assertEqual((self.root / 'reservation').read_text(), 'another-invocation')
+
+    def test_interrupted_acquisition_reports_an_unverified_reservation(self):
+        name, stderr = self.interrupt_lifecycle(('start',), 'acquire', signal.SIGHUP, owner='unresolved')
+        self.assertTrue((self.root / 'reservation').exists())
+        self.assertIn(f'Could not verify reservation {name}', stderr)
+
+    def test_interrupted_compose_start_stops_cleanly_and_releases_reservation(self):
+        # The signal is forwarded once; Compose exits by itself, so nothing is in flight.
+        name, stderr = self.interrupt_lifecycle(('start',), 'start', signal.SIGTERM)
+        self.assertFalse((self.root / 'reservation').exists())
+        self.assertNotIn('retained', stderr)
+
+    def test_abandoned_compose_start_retains_reservation_for_inspection(self):
+        # A second signal stops waiting for a client that did not exit.
+        name, stderr = self.interrupt_lifecycle(('start',), 'start-stuck', signal.SIGTERM, repeat=True)
+        self.assertTrue((self.root / 'reservation').exists())
+        self.assertIn(f'Reservation {name} (workspace-reservation) retained', stderr)
+
+    def test_configure_pulls_missing_images_before_reserving(self):
+        self.env['TEST_MODEL'] = json.dumps({'name': 'example', 'services': {
+            'code-server': {'image': 'workspace:1', 'volumes': [
+                {'type': 'volume', 'source': 'code-server-home', 'target': '/home'}]},
+            'cloudflared': {'image': 'tunnel:1'}, 'local': {'build': {'context': '.'}}},
+            'volumes': {'code-server-home': {'name': 'home'}}})
+        self.env['TEST_MISSING_IMAGES'] = 'workspace:1'
+        self.configure()
+        calls = self.calls()
+        pulls = [index for index, call in enumerate(calls) if call[-2:] == ['pull', 'code-server']]
+        reservation = next(index for index, call in enumerate(calls) if call[:2] == ['create', '--name'])
+        self.assertEqual(len(pulls), 1)
+        self.assertLess(pulls[0], reservation)
+        self.assertEqual(calls[reservation][calls[reservation].index('--pull') + 1], 'never')
+        # Present images are not refreshed without --pull.
+        self.env.pop('TEST_MISSING_IMAGES')
+        before = len(self.calls())
+        self.configure()
+        self.assertFalse(any('pull' in call for call in self.calls()[before:] if call[0] == 'compose'))
+
+    def signal_during_pull(self, signum, ignore=False):
+        self.env['TEST_MISSING_IMAGES'] = 'test'
+        self.env['TEST_PULL_SLEEP'] = '3' if ignore else '30'
+        Path(str(self.log) + '.calls').unlink(missing_ok=True)
+        process = subprocess.Popen(
+            ['sh', str(self.script), 'configure'], env=self.env, cwd=self.root,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            preexec_fn=(lambda: signal.signal(signum, signal.SIG_IGN)) if ignore else None)
+        try:
+            deadline = time.monotonic() + 15
+            while not (Path(str(self.log) + '.calls').exists()
+                       and any('pull' in call for call in self.calls())):
+                self.assertLess(time.monotonic(), deadline, 'pull did not start')
+                time.sleep(0.05)
+            process.send_signal(signum)
+            _, stderr = process.communicate(timeout=30)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        return process.returncode, stderr
+
+    def test_hangup_or_termination_during_pull_removes_temporary_snapshot(self):
+        for signum in (signal.SIGHUP, signal.SIGTERM):
+            with self.subTest(signal=signum.name):
+                returncode, stderr = self.signal_during_pull(signum)
+                self.assertEqual(returncode, 128 + signum, stderr)
+                # The interpolated model holds secrets; no copy may remain.
+                self.assertEqual(list(self.deployment.glob('.manage.*.json')), [])
+
+    def test_ignored_hangup_during_pull_is_preserved(self):
+        # nohup ignores SIGHUP; manage must not turn it back into an exit.
+        returncode, stderr = self.signal_during_pull(signal.SIGHUP, ignore=True)
+        self.assertEqual(returncode, 0, stderr)
+        self.assertEqual(list(self.deployment.glob('.manage.*.json')), [self.deployment / '.manage.compose.json'])
+
+    def test_failed_reservation_create_does_not_report_unverified_reservation(self):
+        (self.deployment / '.manage.compose.json').write_text(json.dumps({
+            'name': 'example', 'services': {'code-server': {'image': 'test'}},
+            'volumes': {'code-server-home': {'name': 'home'}}}))
+        self.env['TEST_MODEL'] = (self.deployment / '.manage.compose.json').read_text()
+        self.env['FAIL_CREATE'] = '1'
+        result = self.run_launcher('configure')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not reserve workspace volume home', result.stderr)
+        self.assertNotIn('Could not verify reservation', result.stderr)
+        self.assertFalse(any(call[:3] == ['inspect', '--type', 'container'] for call in self.calls()))
+
+    def test_interruption_does_not_abandon_reservation_removal(self):
+        self.interrupt_lifecycle(('start',), 'release', signal.SIGINT)
+        self.assertFalse((self.root / 'reservation').exists())
 
     def test_upgrade_rejects_custom_registry_and_launch_options(self):
         dotenv = self.deployment / ".env"
@@ -452,20 +869,41 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(Path(forwarded).resolve(), archive.resolve())
                 self.assertEqual(volume, "new-home")
 
-    def test_restore_decodes_compose_dollar_escaping(self):
+    def test_restore_reads_quoted_colon_form_key_from_dotenv(self):
         archive = self.root / "saved.tar.gz.gpg"
         archive.touch()
         (self.deployment / "restore-home.sh").write_text(
             '#!/bin/sh\nprintf "%s" "$BACKUP_GPG_PASSPHRASE" > "$ARGUMENT_LOG"\n')
-        # `docker compose config` writes the literal key pa$$word as pa$$$$word.
-        model = json.dumps({"services": {"restore-key": {"environment": {
-            "BACKUP_GPG_PASSPHRASE": "pa$$$$word"}}}})
+        key = '0123456789abcdef' * 4
+        (self.deployment / '.env').write_text(f"BACKUP_GPG_PASSPHRASE: '{key}'\n")
         env = {key: value for key, value in self.env.items() if key != "BACKUP_GPG_PASSPHRASE"}
         result = subprocess.run(
             ["sh", str(self.script), "backup", "--restore", "--archive", str(archive), "--volume", "home"],
-            env={**env, "TEST_MODEL": model}, cwd=self.root, capture_output=True, text=True)
+            env=env, cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.log.read_text(), "pa$$word")
+        self.assertEqual(self.log.read_text(), key)
+        self.assertNotIn('differs from the key', result.stderr)
+        # Warn, without printing either key, when backups use a different saved key.
+        saved = self.deployment / '.manage.compose.json'
+        for saved_key, warns in ((key, False), ('f' * 64, True)):
+            with self.subTest(warns=warns):
+                saved.write_text(json.dumps({'services': {'backup': {'environment': {'GPG_PASSPHRASE': saved_key}}}}))
+                result = subprocess.run(
+                    ["sh", str(self.script), "backup", "--restore", "--archive", str(archive), "--volume", "home"],
+                    env=env, cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual('differs from the key' in result.stderr, warns)
+                self.assertNotIn(saved_key, result.stderr)
+                self.assertNotIn(key, result.stderr)
+
+    def test_restore_rejects_invalid_key_before_using_docker(self):
+        archive = self.root / 'saved.tar.gz.gpg'
+        archive.touch()
+        self.env['BACKUP_GPG_PASSPHRASE'] = 'a' * 31 + '\n' + 'a' * 32
+        result = self.run_launcher('backup', '--restore', '--archive', str(archive), '--volume', 'home')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('64 lowercase hexadecimal characters', result.stderr)
+        self.assertFalse(self.log.exists())
 
     def test_missing_configuration_explains_setup(self):
         for args in (('start',), ('start', '--pull'), ('stop',), ('logs',), ('backup', '--run'), ('backup', '--list')):

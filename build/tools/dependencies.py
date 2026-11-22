@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import sys
 import tempfile
 from urllib.parse import quote, urlsplit
@@ -22,6 +23,9 @@ COMPOSE = ('compose.yaml', 'compose.backup-common.yaml',
 
 class SafeRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, newurl):
+        # Downloaded bytes become pinned checksums; never accept a downgraded redirect.
+        if urlsplit(newurl).scheme != 'https':
+            raise ValueError(f'Refusing non-HTTPS redirect to {newurl}')
         redirected = super().redirect_request(request, fp, code, message, headers, newurl)
         if redirected is not None and (urlsplit(request.full_url).scheme, urlsplit(request.full_url).netloc) != (urlsplit(newurl).scheme, urlsplit(newurl).netloc):
             redirected.remove_header('Authorization')
@@ -32,6 +36,8 @@ OPENER = build_opener(SafeRedirectHandler())
 
 
 def request(url, headers=None):
+    if urlsplit(url).scheme != 'https':
+        raise ValueError(f'Refusing non-HTTPS URL {url}')
     headers = {'User-Agent': 'code-server-aio-dependencies', **(headers or {})}
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if token and url.startswith('https://api.github.com/'):
@@ -351,7 +357,21 @@ def show(current, latest=None, hide_hashes=True):
             print(f'  latest: {display(latest[name])}{status}', flush=True)
 
 
+def unwind_on_termination():
+    """Make SIGHUP and SIGTERM unwind like Ctrl-C so staged pin edits roll back and temporary files are removed.
+
+    Signals the caller deliberately ignores (nohup ignores SIGHUP) stay ignored.
+    """
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        if signal.getsignal(signum) == signal.SIG_DFL:
+            signal.signal(signum, terminate)
+
+
 def main():
+    unwind_on_termination()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('version', 'outdated', 'upgrade', 'sync', 'check'))
     parser.add_argument('--scope', choices=('runtime', 'build'), default='runtime')

@@ -1,0 +1,8 @@
+# Development labels for just run. Include after compose.yaml and compose.build.yaml.
+services:
+  code-server:
+    labels:
+      io.github.weeks-consulting.code-server-aio.run-mode: development
+  cloudflared:
+    labels:
+      io.github.weeks-consulting.code-server-aio.run-mode: development

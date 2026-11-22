@@ -1,6 +1,8 @@
 services:
   code-server:
     image: ${CODE_SERVER_IMAGE:-ghcr.io/weeks-consulting/code-server-aio:latest}
+    labels:
+      io.github.weeks-consulting.code-server-aio.run-mode: production
     # manage computes 80% of the Docker host's memory. Direct Compose users
     # can export this value; zero leaves memory unlimited.
     mem_limit: ${CODE_SERVER_MEMORY_LIMIT:-0}
@@ -38,7 +40,9 @@ services:
 
   cloudflared:
     mem_limit: 256m
-    image: cloudflare/cloudflared:latest@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
+    image: cloudflare/cloudflared:latest@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
+    labels:
+      io.github.weeks-consulting.code-server-aio.run-mode: production
     command: tunnel --no-autoupdate run
     restart: unless-stopped
     logging:

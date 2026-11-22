@@ -4,6 +4,8 @@ set -euo pipefail
 
 # Root setup must never resolve commands from the user's mounted directories.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# supervisord is Python; a user HOME would load the user's site-packages as root.
+export HOME=/root USER=root LOGNAME=root
 
 # Without --privileged, Docker mounts cgroups read-only; nested Docker needs them writable.
 # Change only this mount's flags; a filesystem-wide remount can be denied in a user namespace.

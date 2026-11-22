@@ -11,7 +11,9 @@ not_ready() {
     exit 1
 }
 
-status=$(timeout 3 /usr/bin/supervisorctl status service-events dockerd code-server envoy 2>&1) || not_ready "$status"
+# supervisorctl is Python; never load user site-packages or PYTHON* settings as root.
+status=$(timeout 3 /usr/bin/env -i HOME=/root PYTHONNOUSERSITE=1 \
+    /usr/bin/supervisorctl status service-events dockerd code-server envoy 2>&1) || not_ready "$status"
 while read -r service state _; do
     case "$service:$state" in
         service-events:RUNNING|dockerd:RUNNING|code-server:RUNNING|envoy:RUNNING) ;;
@@ -22,7 +24,8 @@ done <<< "$status"
 # The CLI can exit 0 with an empty version when it cannot connect; require a
 # labeled, nonempty server version rather than trusting the exit status.
 docker_status=0
-docker_info=$(timeout 3 /usr/bin/docker info --format 'server-version={{.ServerVersion}}' 2>&1) \
+docker_info=$(timeout 3 /usr/bin/env -i /usr/bin/docker --config /run \
+    --host unix:///var/run/docker.sock info --format 'server-version={{.ServerVersion}}' 2>&1) \
     || docker_status=$?
 [[ $docker_status -ne 124 ]] || not_ready 'Docker did not respond within 3 seconds'
 [[ $docker_status -eq 0 && $docker_info =~ (^|$'\n')server-version=[^[:space:]] ]] \
@@ -31,7 +34,7 @@ docker_info=$(timeout 3 /usr/bin/docker info --format 'server-version={{.ServerV
 check_http() {
     local url=$1 expected=$2 code
     shift 2
-    code=$(curl --noproxy '*' --silent --show-error --max-time 2 \
+    code=$(curl --disable --noproxy '*' --silent --show-error --max-time 2 \
         --output /dev/null --write-out '%{http_code}' "$@" "$url") \
         || not_ready "Request to $url failed"
     [[ "$code" == "$expected" ]] \

@@ -4,17 +4,37 @@ services:
     labels:
       docker-volume-backup.exec-label: ${COMPOSE_PROJECT_NAME}-local-home
       docker-volume-backup.copy-pre: >-
-        /bin/sh -ec 'chmod 700 /archive;
-        chown ${BACKUP_LOCAL_UID:-0}:${BACKUP_LOCAL_GID:-0} /archive'
+        /bin/sh -ec '/bin/sh -ec "$$BACKUP_LOCAL_CHECK";
+        file="/archive/$${COMMAND_RUNTIME_ARCHIVE_FILEPATH##*/}";
+        if [ -e "$$file" ] || [ -L "$$file" ]; then
+          echo "Local backup archive already exists: $$file" >&2; exit 1;
+        fi'
       docker-volume-backup.copy-post: >-
         /bin/sh -ec 'file="/archive/$${COMMAND_RUNTIME_ARCHIVE_FILEPATH##*/}";
-        chown ${BACKUP_LOCAL_UID:-0}:${BACKUP_LOCAL_GID:-0} "$$file";
-        chmod 600 "$$file"'
+        test ! -L "$$file" && test -f "$$file" && test "$$(stat -c %h "$$file")" = 1 &&
+        chmod 600 "$$file" && chown "$$BACKUP_LOCAL_UID:$$BACKUP_LOCAL_GID" "$$file"'
+      docker-volume-backup.prune-pre: >-
+        /bin/sh -ec 'exec /bin/sh -ec "$$BACKUP_LOCAL_CHECK"'
     environment:
       EXEC_LABEL: ${COMPOSE_PROJECT_NAME}-local-home
+      EXEC_FORWARD_OUTPUT: "true"
+      BACKUP_LOCAL_UID: ${BACKUP_LOCAL_UID:-0}
+      BACKUP_LOCAL_GID: ${BACKUP_LOCAL_GID:-0}
+      BACKUP_LOCAL_CHECK: |
+        archive="/archive"
+        expected="$$BACKUP_LOCAL_UID:$$BACKUP_LOCAL_GID:700"
+        if [ ! -d "$$archive" ] || [ "$$(stat -c '%u:%g:%a' "$$archive")" != "$$expected" ]; then
+          echo "BACKUP_LOCAL_PATH must be a directory owned by $$BACKUP_LOCAL_UID:$$BACKUP_LOCAL_GID with mode 700." >&2
+          exit 1
+        fi
+        marker="$$archive/.code-server-aio-backups"
+        if [ ! -f "$$marker" ] || [ -L "$$marker" ]; then
+          echo 'BACKUP_LOCAL_PATH must contain a regular .code-server-aio-backups marker file.' >&2
+          exit 1
+        fi
     volumes:
       - type: bind
         source: ${BACKUP_LOCAL_PATH:-./backups}
         target: /archive
         bind:
-          create_host_path: true
+          create_host_path: false

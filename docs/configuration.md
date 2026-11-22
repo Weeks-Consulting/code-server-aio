@@ -50,7 +50,7 @@ Setting backup variables alone does not enable them.
 
 | Property | Required / default | Description |
 | --- | --- | --- |
-| `CODE_SERVER_IMAGE` | Optional; `ghcr.io/weeks-consulting/code-server-aio:latest`. | Full registry image reference to pull, such as `ghcr.io/weeks-consulting/code-server-aio:4.141.0` or `:4.141.0-1`. The installer sets this to `:latest` by default or the requested version on every installation, preserving existing digest pins. `latest` follows stable releases. Ignored when `compose.build.yaml` selects the local image. |
+| `CODE_SERVER_IMAGE` | Optional; `ghcr.io/weeks-consulting/code-server-aio:latest`. | Full registry image reference to pull, such as `ghcr.io/weeks-consulting/code-server-aio:4.141.0` or `:4.141.0-1`. The installer sets this to the resolved release's version tag (the latest stable release by default, or the requested version) on every installation, preserving existing digest pins. Set `:latest` yourself to follow stable releases. `latest` follows stable releases. Ignored when `compose.build.yaml` selects the local image. |
 | `CF_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `http://code-server:8080`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
 | `CF_ACCESS_TEAM_DOMAIN` | Required for access; no default. | Cloudflare Access team hostname, such as `my-team.cloudflareaccess.com`. Supply only the hostname, without `https://`, a path, or a trailing slash. Envoy fetches signing keys from this team and checks the JWT issuer. Missing or invalid configuration prevents Envoy from starting. |
 | `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Audience matching is case-sensitive: copy the value exactly as Cloudflare provides it, without changing letter casing. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration prevents Envoy from starting. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
@@ -76,9 +76,9 @@ archive filename prefix.
 | `BACKUP_NOTIFICATION_LEVEL` | Optional; `error`. | Use `error` for failures or `info` for all completed runs. |
 | `BACKUP_TIMEZONE` | Optional; `America/Chicago`. | Timezone used by the backup schedule. Use an IANA timezone such as `America/Chicago` or `Etc/UTC`. The schedule follows that timezone, including its daylight-saving changes. |
 | `BACKUP_CRON_EXPRESSION` | Optional; `0 3 * * *`. | Five-field cron schedule: minute, hour, day of month, month, day of week. The default runs daily at 03:00 in `BACKUP_TIMEZONE`. Quote the value in `.env`, for example `BACKUP_CRON_EXPRESSION="0 3 * * *"`. |
-| `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Host folder receiving `.tar.gz.gpg` archives. Relative paths resolve beside the Compose files, so the installer's default is `~/code-server/backups`. Use an absolute path such as `/mnt/backups/code-server` to select another location. Compose creates the folder if it does not exist and mounts it at `/archive` in the backup container. S3 settings are not passed to the local backup container. |
+| `BACKUP_LOCAL_PATH` | Optional; `./backups`. Local overlay only. | Dedicated folder for `.tar.gz.gpg` archives on the Docker daemon host. Relative paths resolve beside the Compose files. Create it before starting local backups, set mode `700` with the configured backup owner and group, and add a `.code-server-aio-backups` marker file. See [local backup setup](backups.md#optional-local-backups). |
 | `BACKUP_AWS_S3_BUCKET_NAME` | Required for S3 backups; no default. | Name of an existing S3 or S3-compatible bucket. Supply the bucket name alone, without `s3://`, an endpoint, or an object prefix. |
-| `BACKUP_ID` | Optional; Compose project name. | Identifies this deployment in archive names and in the default S3 prefix. Set a unique value, such as `devbox-home`, when multiple hosts share a bucket. Archive names are `<BACKUP_ID>-home-<timestamp>.tar.gz.gpg`; an empty value uses the Compose project name. It does not change the container stop label, which remains scoped to the Compose project. |
+| `BACKUP_ID` | Optional; Compose project name. | Identifies this deployment in archive names (`home.<backup-id>.<timestamp>.tar.gz.gpg`), the pruning prefix (`home.<backup-id>.`), and the default S3 prefix. Set a unique value, such as `devbox-home`, when multiple hosts share a bucket. An empty value uses the Compose project name. Container stop labels use the Compose project name. |
 | `BACKUP_AWS_S3_PATH` | Optional; `<BACKUP_ID or Compose project name>/home`. | Object-key prefix inside the bucket, such as `development/devbox/home`. An explicit value overrides the prefix derived from `BACKUP_ID`; an empty value selects the default. This controls where archives are stored, not the bucket addressing style. |
 | `BACKUP_AWS_ENDPOINT` | Optional; `s3.amazonaws.com`. | S3 service hostname without `https://` or a bucket path. For Cloudflare R2, use `<account-id>.r2.cloudflarestorage.com`. Use the endpoint supplied by your storage provider. |
 | `BACKUP_AWS_S3_BUCKET_LOOKUP` | Optional; `auto`. | Bucket addressing style: `auto` selects based on the endpoint; `path` addresses the bucket as `endpoint/bucket`; `dns` uses `bucket.endpoint`. R2 normally works with `auto`; use `path` when explicitly required by your endpoint. Independent of `BACKUP_AWS_S3_PATH`. |
@@ -89,8 +89,8 @@ Compose also accepts `COMPOSE_PROJECT_NAME`, although it is not listed in
 `.env.example`. By default, the project name comes from the deployment directory
 (`code-server` for `~/code-server`); `docker compose -p NAME` overrides it.
 This name scopes Docker volumes, backup stop labels, and the default backup ID.
-Changing it selects a different set of named volumes, so keep it consistent for
-an existing deployment.
+`manage configure --project-name` can change the saved name only when the old
+project has no running containers or volumes on the active Docker daemon.
 
 ## Access protection
 
@@ -117,10 +117,14 @@ version and both architecture checksums alongside the other dependency pins.
 
 **Existing deployments:** change the remotely managed tunnel origin from
 `http://envoy:8080` to `http://code-server:8080` when deploying this version.
-Rebuild or pull the updated workspace image, and use `docker compose up -d --remove-orphans` with your usual Compose options to remove the old Envoy sidecar.
+Then run `manage configure --pull --start`: it pulls the updated workspace image and
+removes the old Envoy sidecar as an orphan. For direct Compose deployments, use
+`docker compose -p NAME up -d --remove-orphans` with your usual Compose files.
 
 Envoy's native JWT filter checks signatures, issuer, audience, required expiration,
-and not-before timestamps with one second of clock tolerance; RBAC restricts the
+and not-before timestamps with 30 seconds of clock tolerance, so small host clock
+drift does not reject freshly issued tokens (keep the host clock synchronized with
+NTP); RBAC restricts the
 verified algorithm to RS256. Small Lua filters validate startup settings,
 reject duplicate or missing JWT headers, and match the optional literal email
 allowlist against verified claims. Invalid settings prevent Envoy
@@ -137,7 +141,7 @@ A newly introduced signing key may be rejected until the current cache expires.
 
 - **403:** Missing, duplicated, malformed, expired, or otherwise invalid token; incorrect AUD; denied identity; or signing keys unavailable when verification needs a fetch.
 - **503:** A valid authenticated request reaches Envoy while code-server is starting or the backend is unavailable.
-- **Connection unavailable:** Envoy is stopped or its environment configuration is missing/invalid. Check `docker compose logs code-server`.
+- **Connection unavailable:** Envoy is stopped or its environment configuration is missing/invalid. Check `manage logs`.
 
 The 403 and 503 pages include troubleshooting steps; the 503 page retries every five
 seconds. Edit `build/runtime/envoy/pages/` to change the error pages, and
@@ -150,8 +154,9 @@ WebSocket tokens are checked when the connection opens. Idle streams close after
 one hour, and all streams have an absolute two-hour lifetime, independent of key
 refresh success. Open sockets are not revalidated when their JWT expires. To revoke
 access immediately, remove the user from the Access policy, revoke
-its Access sessions, then run `docker compose restart code-server` with the deployment's
-usual Compose options to disconnect existing sockets. Apply origin allowlist changes
+its Access sessions, then run `manage stop && manage start` (with `sudo` if you
+installed with `sudo`) to disconnect existing sockets. These commands use the saved
+configuration and project name; a bare `docker compose restart` may target the wrong project. Apply origin allowlist changes
 with `manage configure --start`, which recreates the workspace container with its updated environment.
 
 The entrypoint completes workspace setup before starting Supervisor and its services.

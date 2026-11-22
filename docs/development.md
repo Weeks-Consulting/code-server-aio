@@ -64,16 +64,29 @@ APT cache mounts are not needed for this CI strategy: the GitHub Actions cache
 does not automatically preserve cache mounts between runners.
 
 To run the project locally, configure `.env` in the checkout (see
-[configuration](configuration.md#setup)), then run `just run`. It builds the
-local deployment image and starts code-server and the Cloudflare tunnel with
-logs attached. Open your configured Cloudflare hostname to access code-server.
-Press Ctrl-C to stop and remove the services and network; named volumes preserve your data.
+[configuration](configuration.md#setup)) with a dedicated development Cloudflare
+tunnel and hostname, then run `just run`. It builds the local image and starts
+code-server and the tunnel with logs attached.
 
-Daemon-wide stop and cleanup commands are not provided. Use `./manage stop` to
-stop this deployment's configured containers while preserving volumes.
+`just run` prints its Compose project name. The name starts with
+`code-server-aio-dev-` and is derived from the checkout's physical path, so
+development volumes are reused when you run from the same checkout. If that
+project already has containers or a network, the command stops before starting
+anything. Press Ctrl-C to remove the development containers and network while
+keeping the development volumes.
+
+List running and stopped development containers with:
+
+```sh
+docker ps -a --filter label=io.github.weeks-consulting.code-server-aio.run-mode=development
+```
+
+Daemon-wide stop and cleanup commands are not provided. Development containers
+belong to the `just run` project and are removed by pressing Ctrl-C in `just run`.
+`./manage stop` acts only on a deployment configured with `manage configure` (the
+project saved in `.manage.compose.json`), never on the development project.
 Build images and Docker build cache are intentional outputs; disposable test
 containers, volumes, and temporary files are cleaned up by their owning commands.
-`just run` removes its Compose containers and network when it exits, preserving volumes.
 
 Override the local image tag with `just image=my-image:test test`. Test recipes
 use isolated containers and temporary storage. CI runs the same scripts from
@@ -135,9 +148,10 @@ integration tests use the same Linux workflow on both local host platforms via
 
 Release installer assets and their attested checksums upload only after the
 multi-platform image is successfully published. Publication waits for both image
-architectures and every host check. A failed or skipped image publication leaves
-release assets unpublished. The release event still starts from published GitHub
-release metadata; installers fail closed until the required checksums exist.
+architectures and every host check. New releases stay in draft until all assets
+are attached. Reruns verify existing assets and upload missing files that match
+the release checksums. If an older partial release contains mismatched assets,
+recover matching files or publish a new tag.
 Bash is still used to check the container's Linux runtime scripts and the CI release
 scripts in `build/ci/`, which the workflow calls and the unit tests exercise directly;
 the version bundled with either host is sufficient.

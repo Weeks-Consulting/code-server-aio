@@ -34,7 +34,8 @@ git push origin v4.141.0
 The tagged commit must contain this workflow. After checks pass, CI creates a
 GitHub prerelease with generated notes, installer assets, and checksums. It never
 automatically promotes a new tag to latest. Failed runs can be rerun; existing
-release assets are refreshed without changing its promotion state.
+release assets are verified against the release checksums and only missing assets
+are uploaded, without changing its promotion state.
 
 CI, `just build`, and
 Compose builds use Dockerfile build-arg defaults synchronized from this file with
@@ -48,14 +49,20 @@ a single reusable `staging` tag holds the tested manifest during attestation. Th
 permissions. On publishing runs, they transfer the exact tested images as one-day
 artifacts to a single publish job with package write permission; images are not rebuilt.
 These image artifacts use GitHub Actions artifact storage. This Docker-load publication path does not generate BuildKit provenance or SBOM attestations. New tag pushes publish only the version tag.
-Weekly rebuilds update `latest` only for the currently approved stable release. Stable version
-tags receive weekly Debian dependency rebuilds, so they can point to new image
-contents without a code-server version change. Pin an image digest if you need
-fixed contents. To apply a rebuild to an already configured deployment, run `manage start --pull` and `sudo` if you installed with `sudo`. This runs
-`docker compose create --pull always`, followed by `docker compose start`: it checks the registry even when the tag is
+Weekly rebuilds cover only the currently approved stable release: they republish its
+version tag and `latest`, so both can point to new image contents without a code-server
+version change. Once a newer release is promoted, older version tags are no longer
+rebuilt. The installer and `manage upgrade` pin a version tag, so a deployment keeps
+receiving fixes only while its tag is the latest stable release; after a promotion, run
+`manage upgrade` and then `manage configure --pull --start`. Pin an image digest if you
+need fixed contents. To apply a rebuild to an already configured deployment, run `manage start --pull` and `sudo` if you installed with `sudo`. This first runs
+`docker compose pull` with visible progress, before taking any lifecycle or backup lock,
+then `docker compose create` and `docker compose start`: it checks the registry even when the tag is
 already available locally, and recreates containers when the pulled image changes,
-preserving mounted volumes. This applies to both `:latest` and version tags such
-as `:4.141.0-1`. A reference containing `@sha256:…` stays fixed to that digest;
+preserving mounted volumes. This applies to both `:latest` and the current release's
+version tag, such as `:4.141.0-1`. If the configured version tag is no longer the latest
+stable release, `start --pull` warns after pulling, because that tag receives no further
+rebuilds. A reference containing `@sha256:…` stays fixed to that digest;
 change the reference to receive a rebuild. A plain container restart does not
 pull images. Image names are
 derived from the repository and lowercased automatically. Publishing uses

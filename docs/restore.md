@@ -7,13 +7,15 @@ Use the configured `BACKUP_AWS_S3_PATH`; older backups keep their original locat
 For encrypted archives, install `gpg` and `python3` on the Docker host (`sudo apt-get install gpg python3`
 on Debian, or `brew install gnupg python` on macOS). Put the **original** `BACKUP_GPG_PASSPHRASE` in the deployment's `.env`;
 `manage backup --restore` reads it without executing the file. An exported `BACKUP_GPG_PASSPHRASE`
-can override it to restore an archive encrypted with an older key. Do not generate a
+can override it to restore an archive encrypted with an older key. The key must be
+exactly 64 lowercase hexadecimal characters. Do not generate a
 new key for recovery: it cannot decrypt old backups. On a replacement host, recover
 the original key from your password manager first.
 
 The helper streams decryption directly into a private staging directory on the target
-home volume. It writes no intermediate plaintext archive. On macOS, place the archive
-in a folder shared with Docker; the rollback is saved beside it. A missing or incorrect
+home volume. It writes no intermediate plaintext archive. The archive is read on the
+host and streamed to the helper container, so it does not need to be in a folder shared
+with Docker (including Docker Desktop on macOS); the rollback is saved beside it. A missing or incorrect
 key stops restoration before replacing original files. Legacy plaintext `.tar.gz`
 archives need no key or host GPG installation unless you choose to encrypt the rollback.
 
@@ -23,23 +25,25 @@ backup before removing original entries. Staged files move into place on the sam
 filesystem. Allow free space on the volume for one extracted home tree, plus space
 beside the archive for the compressed rollback. The helper container runs as root
 (`--user 0:0`) to preserve numeric ownership, permissions, and symlinks; the host
-command can run as any user with Docker access. Catchable termination stops the restore container before cleaning staging;
-if replacement has begun, staging and the verified rollback are retained, and the
-recovery command is printed first. Further interrupts during cleanup are ignored so
-it can finish; each cleanup Docker call times out after 60 seconds.
-SIGKILL or power loss can leave a `.restore-staging-*` directory on the home volume.
-Inspect and remove that specific directory before restarting after an interrupted restore.
+command can run as any user with Docker access. Catchable termination stops the restore
+container before cleaning staging. If replacement has begun, the helper retains staging
+and the verified rollback and prints the staging path and recovery command. Further
+interrupts during cleanup are ignored so it can finish. Each cleanup Docker call times out
+after 60 seconds.
 
-1. Identify the home volume before stopping the deployment:
+1. Identify the home volume from the saved configuration. Run this in the deployment
+   directory, with `sudo` if you installed with `sudo`:
 
    ```sh
-   docker compose ps -q code-server | xargs docker inspect --format '{{range .Mounts}}{{if eq .Destination "/home"}}{{.Name}}{{end}}{{end}}'
+   python3 -c 'import json; print(json.load(open(".manage.compose.json"))["volumes"]["code-server-home"]["name"])'
    ```
 
-   Use your usual Compose project name and file options for this command and `down`.
-2. Stop the stack with `sh manage stop`, which uses the saved project configuration,
-   or `docker compose down` using those same Compose options. Do not use
-   `down -v`, which deletes volumes. Stop any other containers using the home volume.
+   It prints the volume of the project saved by `manage configure`. Do not use a bare
+   `docker compose ps`: without `-p` it can resolve a different deployment's project.
+2. Stop the stack with `sh manage stop`, which uses the saved project configuration
+   and keeps the containers for `manage start` in step 4. Do not use `docker compose down`:
+   it removes the containers, so `manage start` then fails until you rerun
+   `manage configure`. Stop any other containers using the home volume.
 3. Run the launcher with the actual volume name:
 
    ```sh
@@ -70,8 +74,8 @@ mode `700` directory. Both belong to the effective user running `manage backup -
 If the command runs as root, root owns these files; sudo environment variables are
 ignored. This host-file ownership does not change the UID/GID values inside the archive.
 Keep it protected until the restored deployment is verified, then remove it. If
-replacement fails, keep the stack stopped and restore that rollback archive using
-the same command and volume. Each restore creates another rollback backup. When restoring
+replacement fails, keep the stack stopped and follow the cleanup steps below before
+restoring the rollback archive. Each restore creates another rollback backup. When restoring
 a rollback archive, the new `pre-restore.*` directory is placed beside the previous
 one rather than nested inside it. A failed replacement keeps the verified rollback.
 
@@ -85,12 +89,55 @@ contents, hidden files, shared home directories, and ownership for local and S3 
 
 Restores reserve a Docker container named `code-server-restore-<volume hash>` for
 their entire lifetime, so two restores against the same volume cannot overlap.
-If the coordinator is killed with SIGKILL or loses contact with Docker, the
-reservation can remain. Keep the stack stopped, inspect that container and its
-volume mount, and remove that specific container only after confirming the prior
-restore is no longer active. Review any staging and rollback files before retrying.
 If cancellation interrupts reservation creation, cleanup checks an invocation-specific
 label and removes only its own container, using its immutable ID. If Docker cannot
 confirm the result, the helper names the unresolved reservation and asks you to
 inspect it before removing it or retrying.
-An interrupted replacement prints a recovery command using the verified rollback.
+
+## Clean up after an interrupted restore
+
+An interrupted restore can leave a `.restore-staging-<32 lowercase hex digits>`
+directory at the root of the target Docker volume. The restore helper reports
+the existing staging paths and stops before extracting another tree.
+
+1. Keep the deployment stopped. Set `volume` to the exact Docker volume name and
+   check which containers use it. If a restore reservation remains, inspect its
+   mount and remove that specific container only after confirming the prior restore
+   has stopped.
+
+   ```sh
+   volume=code-server_code-server-home
+   docker volume inspect "$volume"
+   docker ps -a --filter "volume=$volume"
+   ```
+
+2. Set `stage` to the directory name reported by the helper, without the leading
+   slash. Inspect that directory through a read-only mount. Keep the verified
+   rollback archive and save any staged files you need before removing the directory.
+
+   ```sh
+   stage=.restore-staging-0123456789abcdef0123456789abcdef
+   mount="type=volume,src=$volume,dst=/restore"
+   docker volume inspect "$volume" >/dev/null &&
+     docker run --rm --network none --mount "$mount,readonly" \
+       --entrypoint /bin/ls debian:13-slim -ld -- "/restore/$stage"
+   ```
+
+3. Remove the inspected staging directory by its exact name. Repeat for each
+   reported directory after inspecting it.
+
+   ```sh
+   docker volume inspect "$volume" >/dev/null &&
+     docker run --rm --network none --mount "$mount" \
+       --entrypoint /bin/sh debian:13-slim -ec '
+         suffix=${1#.restore-staging-}
+         test "$suffix" != "$1" && test "${#suffix}" -eq 32 || exit 1
+         case "$suffix" in *[!0-9a-f]*) exit 1 ;; esac
+         path="/restore/$1"
+         test -d "$path" && test ! -L "$path" || exit 1
+         rm -rf -- "$path"
+       ' sh "$stage"
+   ```
+
+4. If replacement began, run the printed recovery command with the verified rollback
+   archive and the same volume. Otherwise, retry with the original input archive.

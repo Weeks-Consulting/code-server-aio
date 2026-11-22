@@ -28,6 +28,7 @@ default is `/opt/code-server`. Options:
 | `--directory PATH` | Install somewhere else. The directory, or its parent, must be writable. |
 | `--version vX.Y.Z[-N]` | Install a specific release instead of the latest stable one. |
 | `--repository OWNER/REPO` | Install from a fork. |
+| `-h`, `--help` | Show installer options. |
 | `--dry-run` | Show what would change without downloading or changing anything. |
 
 To install a specific release as root into `/opt/code-server`, use its tagged
@@ -47,6 +48,9 @@ stable release once and selects its versioned image.
 
 Pass options to the bootstrap after `sh -s --`, for example
 `... | sh -s -- --directory /srv/code-server`.
+Once you have the bootstrap script, its help and dry run work offline with Python
+3. If you omit `--version`, the preview describes how the installer will select
+the latest stable release when you run the installation.
 
 Run `manage` as the same user that installed it; if you installed with `sudo`,
 run `manage` with `sudo` too. On macOS, keep the deployment and backup folders
@@ -84,9 +88,13 @@ Rerun the installer (or `manage install --directory PATH`) to refresh the files
 for the selected release while keeping any digest pin. To move to the latest
 release, use `manage upgrade`; see [deployment](deployment.md#upgrade-to-the-latest-release).
 Review new `.env` settings, then run `manage configure --pull --start` with the saved configuration.
+The installer pins a version tag, and weekly security rebuilds cover only the latest stable
+release, so upgrade after each promotion to keep receiving fixes; `--pull` warns when the
+configured tag is no longer the latest.
 
 Refreshes serialize on `.env.lock`, and replacements are staged so a failed
 refresh restores the previous deployment, including the encryption key. If the
 rollback itself fails, the installer names the private `.install-*` directory
-holding the recovery files. A process or host crash can still leave mixed
+holding the recovery files. Ctrl-C, a hangup, or `SIGTERM` also rolls back and removes
+the staging directory. A process or host crash can still leave mixed
 release files: inspect the deployment and its `.bak` files before restarting.

@@ -326,6 +326,15 @@ class DependencyTests(unittest.TestCase):
         self.assertEqual(same.get_header('Authorization'), 'Bearer private')
         self.assertIsNone(other.get_header('Authorization'))
 
+    def test_redirect_and_request_require_https(self):
+        from urllib.request import Request
+        handler = deps.SafeRedirectHandler()
+        request = Request('https://github.com/start')
+        with self.assertRaisesRegex(ValueError, 'non-HTTPS'):
+            handler.redirect_request(request, None, 302, 'Found', {}, 'http://github.com/end')
+        with self.assertRaisesRegex(ValueError, 'non-HTTPS'):
+            deps.request('http://github.com/archive')
+
     def test_registry_resolution_and_official_images(self):
         for repository, host, path in (
             ('debian', 'registry-1.docker.io', 'library/debian'),

@@ -9,7 +9,6 @@ project_dir=$(cd -- "$script_dir/../.." && pwd)
 prefix="code-server-s3-$$"
 source_volume="${prefix}_code-server-home"
 app_name="$prefix-app"
-archive_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
 # Override deployment settings, including optional prefix/name settings inherited
 # from the caller. No real credentials or endpoints are used.
 BACKUP_AWS_ACCESS_KEY_ID=s3-test-access
@@ -18,8 +17,8 @@ BACKUP_GPG_PASSPHRASE=$(python3 -c 'import secrets; print(secrets.token_hex(32))
 BACKUP_AWS_S3_BUCKET_NAME=backup-test
 BACKUP_AWS_ENDPOINT=rustfs:9000
 BACKUP_AWS_S3_BUCKET_LOOKUP=path
-BACKUP_AWS_S3_PATH="$prefix/home"
-BACKUP_ID=$prefix
+BACKUP_AWS_S3_PATH=
+BACKUP_ID="$prefix-backup"
 export BACKUP_AWS_ACCESS_KEY_ID BACKUP_AWS_SECRET_ACCESS_KEY BACKUP_GPG_PASSPHRASE
 export BACKUP_AWS_S3_BUCKET_NAME BACKUP_AWS_ENDPOINT BACKUP_AWS_S3_BUCKET_LOOKUP BACKUP_AWS_S3_PATH BACKUP_ID
 compose() {
@@ -37,6 +36,8 @@ cleanup() {
     remove_test_archives
     exit "$result"
 }
+# Create the directory only once cleanup can remove it.
+archive_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -66,7 +67,7 @@ assert_backup_restarted_app
 echo 'PASS: S3 backup stopped and restarted the labeled application.'
 # List the whole bucket so an upload to an unexpected prefix also fails.
 s3 "http://rustfs:9000/$BACKUP_AWS_S3_BUCKET_NAME?list-type=2" > "$archive_dir/objects.xml"
-key=$(python3 - "$archive_dir/objects.xml" "$prefix" <<'PYTHON'
+key=$(python3 - "$archive_dir/objects.xml" "$BACKUP_ID" <<'PYTHON'
 import re, sys
 import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
@@ -74,8 +75,9 @@ ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 assert root.findtext("s3:IsTruncated", namespaces=ns) == "false"
 keys = [entry.text for entry in root.findall("s3:Contents/s3:Key", ns)]
 assert len(keys) == 1, keys
-project = re.escape(sys.argv[2])
-assert re.fullmatch(project + r"/home/" + project + r"-home-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.tar\.gz\.gpg", keys[0]), keys
+backup_id = re.escape(sys.argv[2])
+timestamp = r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{6}[+-]\d{4}"
+assert re.fullmatch(rf"{backup_id}/home/home\.{backup_id}\.{timestamp}\.tar\.gz\.gpg", keys[0]), keys
 print(keys[0])
 PYTHON
 )

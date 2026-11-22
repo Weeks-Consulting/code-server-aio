@@ -4,15 +4,16 @@ set -eu
 image=${1:?Pass the image to test}
 name="code-server-smoke-$$"
 project_dir=$(cd -- "$(dirname -- "$0")/../.." && pwd)
-home_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
-chmod 755 "$home_dir"
-home_mount="type=bind,src=$home_dir,dst=/home"
+# Validate settings before creating anything that cleanup must remove.
 home_storage=${TEST_HOME_STORAGE:-bind}
 if [ "$(uname -s)" = Darwin ]; then home_storage=volume; fi
 case "$home_storage" in
     bind|volume) ;;
     *) echo 'TEST_HOME_STORAGE must be bind or volume.' >&2; exit 1 ;;
 esac
+home_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
+chmod 755 "$home_dir"
+home_mount="type=bind,src=$home_dir,dst=/home"
 # macOS shared folders cannot represent all Linux ownership semantics. Production
 # uses named volumes too; act passes this choice into its Linux runner on macOS.
 # Keep the empty bind-mount coverage on native Linux.
@@ -51,6 +52,16 @@ docker run -d --name "$name" $run_flags --init \
     -e CF_ACCESS_AUD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --restart unless-stopped \
     --mount "$home_mount" "$image" >/dev/null
 wait_ready
+docker exec "$name" /bin/bash -ec '
+    settings=$(mktemp -d)
+    trap '"'"'rm -rf -- "$settings"'"'"' EXIT
+    mkdir "$settings/docker"
+    printf "fail\n" > "$settings/.curlrc"
+    printf "%s\n" "{\"currentContext\":\"workspace-context\"}" > "$settings/docker/config.json"
+    HOME="$settings" CURL_HOME="$settings" DOCKER_CONFIG="$settings/docker" \
+        DOCKER_CONTEXT=workspace-context DOCKER_HOST=unix:///run/unreachable-docker.sock \
+        /usr/local/bin/container-healthcheck
+'
 docker exec "$name" /bin/bash -ec '
     # Guard the workspace prerequisites used by Linux Homebrew.
     for executable in gcc make git curl file ps sudo; do
@@ -102,6 +113,12 @@ docker exec "$name" /bin/bash -ec '
         printf "#!/bin/sh\nexit 86\n" > "/home/cloud-user/.local/bin/$helper"
         chmod +x "/home/cloud-user/.local/bin/$helper"
     done
+    # Root Python services must never execute .pth files from the user site.
+    pyver=$(/usr/bin/python3 -c "import sys; print(\"python%d.%d\" % sys.version_info[:2])")
+    user_site="/home/cloud-user/.local/lib/$pyver/site-packages"
+    mkdir -p "$user_site"
+    printf "import sys; sys.exit(86)\n" > "$user_site/zz-smoke-hijack.pth"
+    chown -R 10000:10000 /home/cloud-user/.local
 '
 docker rm -f "$name" >/dev/null
 

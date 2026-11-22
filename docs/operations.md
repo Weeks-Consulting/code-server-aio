@@ -4,10 +4,17 @@
 
 ```sh
 ./manage logs -f
-docker compose exec --user cloud-user code-server bash
-docker compose exec code-server supervisorctl status
+project=my-workspace  # the saved Compose project name (see below)
+docker compose -p "$project" exec --user cloud-user code-server bash
+docker compose -p "$project" exec code-server supervisorctl status
 ./manage stop
 ```
+
+Run these from the deployment directory. Direct `docker compose` commands do not read the
+project name saved by `manage configure`; without `-p`, Compose uses `COMPOSE_PROJECT_NAME`
+or the directory name and can reach a different deployment on the same daemon. Print the saved
+name with `python3 -c 'import json; print(json.load(open(".manage.compose.json"))["name"])'`
+(with `sudo` if you installed with `sudo`).
 
 `./manage logs` prints logs from all services and exits. Add `-f` (or `--follow`)
 to keep streaming new output; press Ctrl+C to stop following. Logs use the backup mode and project name saved by `configure`.
@@ -42,7 +49,9 @@ Save projects under `/home/cloud-user`; `/workspace` is not provided.
 
 Named volumes persist all of `/home` (user files, settings, extensions, and shared
 installations such as `/home/linuxbrew`) and
-`/var/lib/docker`. `docker compose down` keeps them; `down -v` deletes them.
+`/var/lib/docker`. `manage stop` keeps them along with the containers. Only an explicit
+`docker compose -p "$project" down -v` deletes them; a plain `down` also removes the
+containers, so `manage start` then fails until you run `manage configure --start` again.
 
 You can install [Homebrew](https://docs.brew.sh/Homebrew-on-Linux) yourself after startup.
 Its installation and shell configuration persist in the mounted `/home` volume.
@@ -67,13 +76,14 @@ critical: the health check requires it to be running, and repeated startup failu
 restarts the container.
 
 Files shipped in the application image live in `build/runtime/`, including startup
-scripts and Supervisor configuration. Envoy configuration and error pages are
-embedded in `build/runtime/envoy.json.template`. Build-only version and checksum
+scripts and Supervisor configuration. Envoy configuration is
+in `build/runtime/envoy.json.template`; its Lua filters and error pages are separate
+files in `build/runtime/envoy/lua/` and `build/runtime/envoy/pages/`. Build-only version and checksum
 files stay beside `build/Dockerfile`. Host installation and restore helpers live
 in `build/tools/`; tests stay in `build/tests/`. Compose files stay at the project root.
 
 
 For a separate online JWKS reachability probe, run
-`docker compose exec -T code-server /usr/local/bin/container-healthcheck --access`.
+`docker compose -p "$project" exec -T code-server /usr/local/bin/container-healthcheck --access`.
 Normal Docker health deliberately works offline and does not fetch keys. The
 optional probe checks HTTPS connectivity and HTTP success, not a user's authorization.

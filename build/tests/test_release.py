@@ -1,5 +1,6 @@
 """Exercise release validation and weekly source selection from the CI helper."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,19 +26,42 @@ case "$*" in
   *imagetools\ create*) exit "${CREATE_STATUS:-0}";;
 esac
 '''
+ASSET_PATHS = ('install.sh', 'manage.py', 'code-server-aio.tar.gz')
+CHECKSUMS = ''.join(f'{hashlib.sha256(Path(path).name.encode()).hexdigest()}  {path}\n' for path in ASSET_PATHS)
+PUBLISH_GH_STUB = STUB + r'''
+case "$1 $2" in
+  "api --paginate")
+    case "$4" in
+      */releases\?*) printf '%s\n' "$TEST_RELEASES";;
+      */assets\?*) printf '%s\n' "$TEST_ASSETS";;
+      *) exit 99;;
+    esac;;
+  "api -H") printf '%s' "$TEST_CHECKSUMS";;
+  "api --method"|"release create"|"release edit") exit 0;;
+  "release upload") exit "${UPLOAD_STATUS:-0}";;
+  *) exit 99;;
+esac
+'''
 
 
 class ReleaseTests(unittest.TestCase):
-    def run_script(self, command, tag, **env):
+    def run_script(self, command, tag, *, publication=False, **env):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tools = root / "bin"
             tools.mkdir()
-            for name, body in (("gh", GH_STUB), ("docker", DOCKER_STUB)):
+            gh = PUBLISH_GH_STUB if publication else GH_STUB
+            for name, body in (("gh", gh), ("docker", DOCKER_STUB)):
                 (tools / name).write_text(body)
                 (tools / name).chmod(0o755)
             output, log = root / "output", root / "calls"
-            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+            if publication:
+                for name in ASSET_PATHS:
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(path.name)
+                (root / 'SHA256SUMS').write_text(CHECKSUMS)
+            result = subprocess.run(command, cwd=root if publication else ROOT, capture_output=True, text=True,
                                     env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}",
                                          "RELEASE_TAG": tag, "GITHUB_OUTPUT": str(output),
                                          "GITHUB_STEP_SUMMARY": str(root / "summary"),
@@ -121,20 +145,63 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual('--tag ghcr.io/example/app:latest' in docker, moves_latest)
                 self.assertTrue(docker.endswith('ghcr.io/example/app@sha256:' + 'a' * 64))
 
-    def test_publish_release_creation_and_retry(self):
-        for exists in ('true', 'false'):
-            with self.subTest(exists=exists):
-                result, _, calls = self.run_script(
-                    ['bash', 'build/ci/release.sh', 'publish-release'], 'v2.0.0', RELEASE_EXISTS=exists)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                if exists == 'false':
-                    self.assertIn('gh release create v2.0.0 ', calls)
-                    self.assertIn('--verify-tag', calls)
-                    self.assertIn('--prerelease --latest=false', calls)
-                else:
-                    self.assertIn('gh release upload v2.0.0 ', calls)
-                    self.assertNotIn('release edit', calls)
-                self.assertIn('code-server-aio.tar.gz SHA256SUMS', calls)
+    def publish(self, assets=(), *, draft=None, **env):
+        release = {'id': 1, 'tag_name': 'v2.0.0', 'draft': draft}
+        return self.run_script(
+            ['bash', str(ROOT / 'build/ci/release.sh'), 'publish-release'], 'v2.0.0', publication=True,
+            GH_REPO='example/app', TEST_RELEASES=json.dumps([[release]] if draft is not None else [[]]),
+            TEST_ASSETS=json.dumps([assets]), TEST_CHECKSUMS=CHECKSUMS, **env,
+        )
+
+    def uploaded(self, name, asset_id, digest=None):
+        return {'id': asset_id, 'name': name, 'state': 'uploaded',
+                'digest': 'sha256:' + (digest or hashlib.sha256(name.encode()).hexdigest())}
+
+    def test_new_release_stays_draft_until_all_assets_are_uploaded(self):
+        args = 'v2.0.0 --repo example/app'
+        result, _, calls = self.publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = f'gh release create {args} --verify-tag --title v2.0.0 --generate-notes --draft --prerelease --latest=false'
+        content = f'gh release upload v2.0.0 {" ".join(ASSET_PATHS)} --repo example/app'
+        checksum = 'gh release upload v2.0.0 SHA256SUMS --repo example/app'
+        edit = f'gh release edit {args} --draft=false --prerelease --latest=false'
+        self.assertEqual(calls.splitlines()[1:], [create, content, checksum, edit])
+        result, _, calls = self.publish(UPLOAD_STATUS='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.splitlines()[1:], [create, content])
+
+    def test_complete_published_release_is_untouched(self):
+        assets = [self.uploaded(Path(name).name, i) for i, name in enumerate((*ASSET_PATHS, 'SHA256SUMS'), 2)]
+        result, _, calls = self.publish(assets, draft=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(call.startswith('gh api ') for call in calls.splitlines()))
+        self.assertNotIn('--method DELETE', calls)
+
+    def test_partial_draft_reuses_uploads_and_removes_only_empty_placeholder(self):
+        assets = [self.uploaded('manage.py', 2), {'id': 3, 'name': 'SHA256SUMS', 'state': 'starter', 'size': 0}]
+        result, _, calls = self.publish(assets, draft=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.splitlines()[2:], [
+            'gh api --method DELETE repos/example/app/releases/assets/3',
+            'gh release upload v2.0.0 install.sh code-server-aio.tar.gz --repo example/app',
+            'gh release upload v2.0.0 SHA256SUMS --repo example/app',
+            'gh release edit v2.0.0 --repo example/app --draft=false --prerelease --latest=false',
+        ])
+
+    def test_partial_published_release_keeps_existing_manifest_and_promotion(self):
+        assets = [self.uploaded('manage.py', 2), self.uploaded('SHA256SUMS', 3)]
+        result, _, calls = self.publish(assets, draft=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call for call in calls.splitlines() if call.startswith('gh release ')], [
+            'gh release upload v2.0.0 install.sh code-server-aio.tar.gz --repo example/app',
+        ])
+
+    def test_mismatched_partial_release_is_untouched(self):
+        result, _, calls = self.publish([self.uploaded('manage.py', 2, '0' * 64)], draft=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('manage.py does not match', result.stderr)
+        self.assertNotIn('release upload', calls)
+        self.assertNotIn('--method DELETE', calls)
 
     def test_promote_existing_digest_without_building(self):
         result, _, calls = self.run_script(

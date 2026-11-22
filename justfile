@@ -15,16 +15,9 @@ build:
     python3 build/tools/dependencies.py check
     docker buildx build --load -f build/Dockerfile -t {{quote(image)}} .
 
-# Build and run the local deployment using the checkout's .env, attached to logs.
+# Build and run the checkout's development project, attached to logs.
 run:
-    #!/bin/sh
-    set -eu
-    python3 build/tools/dependencies.py check
-    trap 'docker compose --env-file .env -f compose.yaml -f compose.build.yaml down --remove-orphans' EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    docker compose --env-file .env -f compose.yaml -f compose.build.yaml up --build
+    sh build/tools/run-development.sh
 
 # Check shell syntax and all Compose file combinations without using .env.
 check:

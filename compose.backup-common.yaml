@@ -6,9 +6,33 @@ services:
 
   backup:
     image: offen/docker-volume-backup:v2@sha256:06fccb4c6ff79c4d5e4a839ace17c174da82a9327f43594f8a2c6a15f43bc660
+    labels:
+      io.github.weeks-consulting.code-server-aio.run-mode: production
     # Root reads files belonging to every archived UID/GID.
     user: "0:0"
     restart: unless-stopped
+    # Validate direct Compose use before handing off to Offen's entrypoint.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        case "$$BACKUP_ID" in
+          ''|[!a-z0-9]*|*[!a-z0-9_-]*|?????????????????????????????????????????????????????????????????*)
+            echo 'BACKUP_ID must be 1 to 64 lowercase letters, digits, hyphens or underscores, starting with a letter or digit.' >&2
+            exit 1 ;;
+        esac
+        if [ "$${#GPG_PASSPHRASE}" -eq 64 ]; then
+          case "$$GPG_PASSPHRASE" in
+            *[!0123456789abcdef]*) ;;
+            *)
+              if [ -n "$${BACKUP_LOCAL_CHECK:-}" ]; then
+                /bin/sh -ec "$$BACKUP_LOCAL_CHECK"
+              fi
+              exec /usr/bin/backup -foreground ;;
+          esac
+        fi
+        echo 'BACKUP_GPG_PASSPHRASE must be exactly 64 lowercase hexadecimal characters.' >&2
+        exit 1
     logging:
       driver: json-file
       options:
@@ -18,10 +42,12 @@ services:
       GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Run the installer or manage to generate a backup encryption key in .env}
       TZ: ${BACKUP_TIMEZONE:-America/Chicago}
       BACKUP_CRON_EXPRESSION: ${BACKUP_CRON_EXPRESSION:-0 3 * * *}
-      BACKUP_FILENAME: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-%Y-%m-%dT%H-%M-%S.tar.gz
+      BACKUP_ID: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}
+      # Offen's strftime supports %f (microseconds); %z also distinguishes DST folds.
+      BACKUP_FILENAME: home.${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}.%Y-%m-%dT%H-%M-%S-%f%z.tar.gz
       BACKUP_STOP_DURING_BACKUP_LABEL: ${COMPOSE_PROJECT_NAME}-home
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
-      BACKUP_PRUNING_PREFIX: ${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}-home-
+      BACKUP_PRUNING_PREFIX: home.${BACKUP_ID:-${COMPOSE_PROJECT_NAME}}.
       NOTIFICATION_URLS: ${BACKUP_NOTIFICATION_URLS:-}
       NOTIFICATION_LEVEL: ${BACKUP_NOTIFICATION_LEVEL:-error}
     volumes:

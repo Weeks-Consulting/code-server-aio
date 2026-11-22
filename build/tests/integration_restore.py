@@ -134,9 +134,13 @@ def run(image):
             process = None
             try:
                 subprocess.run([docker, 'volume', 'create', volume], check=True, stdout=subprocess.DEVNULL)
-                subprocess.run([docker, 'run', '--rm', '--network', 'none',
-                                '--mount', f'type=volume,src={volume},dst=/data',
-                                '--entrypoint', '/bin/sh', image, '-ec', 'echo original > /data/original'], check=True)
+                mount = f'type=volume,src={volume},dst=/data'
+                fixture = [docker, 'run', '--rm', '--network', 'none']
+                shell = ['--entrypoint', '/bin/sh', image, '-ec']
+                writable = [*fixture, '--mount', mount, *shell]
+                readonly = [*fixture, '--mount', mount + ',readonly', *shell]
+                subprocess.run([*writable, 'echo original > /data/original; mkdir /data/.restore-staging-notes'],
+                               check=True)
                 process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 deadline = time.monotonic() + 30
                 while not marker.exists():
@@ -160,24 +164,38 @@ def run(image):
                 assert absent.returncode != 0, 'Restore reservation leaked'
                 script = 'grep -qx original /data/original; test ! -e /data/restored; '
                 if phase == 'extract':
-                    script += 'test -z "$(find /data -maxdepth 1 -name ".restore-staging-*")"'
+                    script += 'test -z "$(find /data -maxdepth 1 -name ".restore-staging-*" ! -name ".restore-staging-notes")"'
                 else:
                     assert 'manage backup --restore --archive' in stderr, stderr
+                    assert 'After staging cleanup' in stderr, stderr
                     rollback = list(directory.glob('pre-restore.*/original-home.tar.gz'))
                     assert len(rollback) == 1, rollback
                     with tarfile.open(rollback[0]) as source:
                         assert source.extractfile('backup/code-server-home/original').read() == b'original\n'
-                    script += 'test -n "$(find /data -maxdepth 1 -name ".restore-staging-*")"'
-                subprocess.run([docker, 'run', '--rm', '--network', 'none',
-                                '--mount', f'type=volume,src={volume},dst=/data,readonly',
-                                '--entrypoint', '/bin/sh', image, '-ec', script], check=True)
+                    stage = subprocess.check_output([
+                        *readonly, 'set -- /data/.restore-staging-????????????????????????????????; '
+                                   'test "$#" -eq 1 && test -d "$1" && basename -- "$1"',
+                    ], text=True).strip()
+                    retry = [*command[:2], str(rollback[0]), volume]
+                    real_env = {**env, 'PATH': os.environ['PATH']}
+                    blocked = subprocess.run(retry, env=real_env, capture_output=True, text=True, timeout=15)
+                    assert blocked.returncode != 0 and f'Previous restore staging in Docker volume {volume}' in blocked.stderr, blocked
+                    assert f'/{stage}' in blocked.stderr and '.restore-staging-notes' not in blocked.stderr, blocked.stderr
+                    assert list(directory.glob('pre-restore.*')) == [rollback[0].parent]
+                    assert subprocess.run([docker, 'inspect', guard], capture_output=True).returncode != 0
+                    subprocess.run([*readonly, script + 'grep -qx restored "/data/$1/backup/code-server-home/restored"',
+                                    'sh', stage], check=True)
+                    subprocess.run([*writable, 'rm -rf -- "/data/$1"', 'sh', stage], check=True)
+                    subprocess.run(retry, env=real_env, check=True, timeout=30)
+                    script += 'test -d /data/.restore-staging-notes'
+                subprocess.run([*readonly, script], check=True)
             finally:
                 if process is not None and process.poll() is None:
                     process.terminate()
                     process.communicate(timeout=30)
                 subprocess.run([docker, 'rm', '-f', guard], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run([docker, 'volume', 'rm', volume], check=True, stdout=subprocess.DEVNULL)
-    print('PASS: Exclusive restore reservation, repeated-SIGTERM cleanup, and rollback guidance.')
+    print('PASS: Exclusive restore reservation, repeated-SIGTERM cleanup, and recovery after manual staging removal.')
 
 
 if __name__ == '__main__':

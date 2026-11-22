@@ -20,21 +20,38 @@ Commands use the deployment directory beside the launcher regardless of your cur
 containers whose configuration changes. By default it leaves newly created
 containers stopped; add `--start` to start the deployment afterward.
 
+Set the backup destination in `.env` before configuring. For local backups, first
+prepare the archive directory as described in [local backup setup](backups.md#optional-local-backups).
+
 ```sh
 ./manage configure --backup local --pull --start
 ./manage configure --backup s3 --project-name my-workspace --start
 ```
 
-Configure your selected backup destination in `.env` first. Backup mode defaults
-to `none` on the first configure. Later configuration runs retain the saved backup
-mode and project name unless you override them. Use `--backup none` to disable
-backups. Obsolete service containers are removed during configuration; volumes remain.
+Backup mode defaults to `none` on the first configure. Later configuration runs retain the saved backup
+mode and project name unless you override them. A project name change requires the saved
+project to have no running containers or Docker volumes on the active daemon.
+Use `--backup none` to disable backups. Obsolete service containers are removed
+during configuration; volumes remain.
+
+Choose a distinct `--project-name` on first configuration for each deployment
+that shares a Docker daemon. The `code-server-aio-dev-` prefix is reserved for
+development runs. Compose labels each service container with its project name.
+New or recreated deployment containers also carry the production run-mode label.
+To find the containers for a project named `my-workspace`, use:
+
+```sh
+docker ps -a --filter label=io.github.weeks-consulting.code-server-aio.run-mode=production \
+  --filter label=com.docker.compose.project=my-workspace
+```
 
 The resolved Compose configuration, including backup settings, project name,
 image references, and memory limit, is saved in `.manage.compose.json` with mode
 `600`. It contains secrets; protect it like `.env`. Do not edit it by hand.
-Configuration writes use `.manage.compose.json.lock`, and temporary snapshots are
-removed on failure. The saved file is replaced only after container creation succeeds.
+Configuration writes use `.manage.compose.json.lock`. Compose rendering also
+holds `.env.lock`, shared with install and upgrade, while reading deployment files.
+Temporary snapshots are removed on failure or interruption (see
+[interruptions](#interruptions)). The saved file is replaced only after container creation succeeds.
 Docker may already have changed some containers if creation fails; correct the
 error and rerun `configure` to finish applying the configuration.
 
@@ -57,8 +74,10 @@ Every command accepts `-h` or `--help`. Brackets mark optional arguments.
 | `backup` | Exactly one of `--run`, `--list`, or `--restore`. `--run` requires configured, running local or S3 backups; `--list` requires configured local backups; `--restore` requires `--archive FILE --volume NAME`. |
 | `install` | `[--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]` |
 
-`configure --pull` pulls configured images before creating containers. `--start` starts them
-after configuration. For attached output, use `manage logs --follow` after starting.
+Before creating containers, `configure` pulls any configured image that is missing
+locally, so a first configure or a changed tag may download images even without `--pull`.
+`configure --pull` refreshes all configured images. Pulls show progress and finish before
+any reservation or backup lock is taken. `--start` starts the containers after configuration. For attached output, use `manage logs --follow` after starting.
 See [installation](installation.md) for install option defaults and
 [restore](restore.md) for archive and volume requirements.
 
@@ -89,8 +108,25 @@ Changes to
 If containers were deleted, recreate them with `configure --start`.
 
 **Existing deployments:** run `configure` once with your existing backup mode and
-project name to create the saved configuration. For example,
+project name to create the saved configuration. For local backups, verify the
+directory and its marker first. For example,
 `./manage configure --backup local --project-name my-workspace --start`.
+
+### Interruptions
+
+`manage` treats Ctrl-C, a hangup (for example, a dropped SSH session), and `SIGTERM`
+the same way: it stops, then removes its temporary files. These are configuration
+snapshots and install staging directories, and both contain secrets. A signal that you
+deliberately ignore stays ignored, so `nohup ./manage configure --pull --start` keeps
+running after you log out. `SIGKILL` cannot be handled. After one, delete any leftover `.manage.*.json` file in
+the deployment directory, and inspect any `.install-*` directory before removing it: an
+interrupted rollback keeps recovery files there.
+
+If an interrupted `start` or `configure` reports a retained or unverified reservation,
+inspect the reported container with `docker inspect CONTAINER` on the same Docker
+daemon. Verify that the earlier Docker operation has finished and that the reservation
+belongs to that invocation before removing it or retrying. The reservation carries
+a `code-server.lifecycle-owner` label.
 
 ### Upgrade to the latest release
 
@@ -116,6 +152,9 @@ In a source checkout, `upgrade` refuses to overwrite tracked files; check out th
 release tag with git and set `CODE_SERVER_IMAGE` instead.
 
 ### Backup and restore commands
+
+Prepare the archive directory before using the local backup commands below. See
+[local backup setup](backups.md#optional-local-backups).
 
 ```sh
 ./manage configure --backup local --start

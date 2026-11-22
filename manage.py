@@ -12,19 +12,23 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 
 
-TAG = r'v\d+\.\d+\.\d+(?:-(?:0|[1-9]\d*))?'
+# Matches CI's release grammar: an optional revision is at least 1.
+TAG = r'v\d+\.\d+\.\d+(?:-[1-9]\d*)?'
 DEFAULT_IMAGE = "ghcr.io/weeks-consulting/code-server-aio:latest"
 BUNDLE = "code-server-aio.tar.gz"
-IMAGE_SETTING = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*=(.*)$", re.M)
+IMAGE_SETTING = re.compile(r"^[ \t]*(?:export[ \t]+)?CODE_SERVER_IMAGE[ \t]*[=:](.*)$", re.M)
 
 
 def fail(message):
@@ -40,7 +44,7 @@ def helper(directory, name):
 
 def validate_dotenv(text):
     """Require quoted dotenv values to end on the same physical line."""
-    assignment = re.compile(r"^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(.*)$")
+    assignment = re.compile(r"^[ \t]*(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*[=:][ \t]*(.*)$")
     for number, line in enumerate(text.splitlines(), 1):
         match = assignment.match(line)
         if not match or not match[1].startswith(("'", '"')):
@@ -51,6 +55,7 @@ def validate_dotenv(text):
             if escaped:
                 escaped = False
             elif character == "\\":
+                # Compose's dotenv parser also treats backslash as an escape in single quotes.
                 escaped = True
             elif character == value[0]:
                 break
@@ -90,7 +95,7 @@ def latest_tag(repository, timeout=15):
     request = urllib.request.Request(
         "https://api.github.com/repos/" + repository + "/releases/latest",
         headers={"User-Agent": "code-server-aio-manage", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with release_opener().open(request, timeout=timeout) as response:
         release = json.load(response)
     return stable_tag(release)
 
@@ -128,7 +133,7 @@ def env_lock(path):
             if (owner.st_uid, owner.st_gid) != (current.st_uid, current.st_gid):
                 os.fchown(guard.fileno(), owner.st_uid, owner.st_gid)
         fcntl.flock(guard, fcntl.LOCK_EX)
-        yield
+        yield guard.fileno()
 
 
 def upgrade(directory, version=None):
@@ -142,7 +147,7 @@ def upgrade(directory, version=None):
         if path.is_symlink() or not path.is_file():
             raise ValueError("Expected a regular .env file")
         repository = image_repository(path.read_text())
-        version, repository = (published_release(repository, version) if version else published_release(repository))
+        version, repository = published_release(repository, version)
         # install_files rereads .env under the lock before changing it.
         install(argparse.Namespace(directory=str(directory), repository=repository,
                                    version=version, dry_run=False), upgrade=True)
@@ -153,6 +158,8 @@ def upgrade(directory, version=None):
 def parser():
     result = argparse.ArgumentParser(
         prog='manage', usage='%(prog)s COMMAND [OPTIONS]',
+        # Abbreviations would let the bootstrap and manage read options differently.
+        allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description='Install and manage a code-server deployment.\n'
                     'Commands and options may appear in any order. A command is required.\n\n'
@@ -190,7 +197,9 @@ def parser():
     configure = result.add_argument_group('configure options')
     configure.add_argument('--backup', choices=['none', 's3', 'local'],
                            help='Backup services to include (default: saved mode, or none on first configure)')
-    configure.add_argument('--project-name', metavar='NAME', help='Compose project name (default: saved name, or Compose default)')
+    configure.add_argument('--project-name', metavar='NAME',
+                           help='Compose project name (default: saved name, or Compose default). '
+                                'Changing it requires no running containers or volumes for the saved project.')
     configure.add_argument('--start', action='store_true', help='Start containers after configuring them')
     logs = result.add_argument_group('logs options')
     logs.add_argument('-f', '--follow', action='store_true', help='Keep streaming new log output')
@@ -211,7 +220,8 @@ def parser():
     release = result.add_argument_group('release selection (install and upgrade)')
     release.add_argument('--version', metavar='TAG', help='Release tag vX.Y.Z[-N], including prereleases (default: latest stable)')
     images = result.add_argument_group('image refresh (configure and start)')
-    images.add_argument('--pull', action='store_true', help='Pull configured images and recreate containers as needed')
+    images.add_argument('--pull', action='store_true', help='Refresh all configured images and recreate containers as needed '
+                        '(configure always pulls images that are missing locally)')
     return result
 
 
@@ -238,6 +248,262 @@ def compose_command(directory, path):
     return command
 
 
+@contextmanager
+def reserve_backup(model):
+    project = model.get('name')
+    if not project or not model.get('volumes'):
+        yield
+        return
+    sidecars = subprocess.check_output([
+        'docker', 'container', 'ls', '--quiet',
+        '--filter', f'label=com.docker.compose.project={project}',
+        '--filter', 'label=com.docker.compose.service=backup',
+        # `compose run` one-off containers (backup --list) are not the sidecar.
+        '--filter', 'label=com.docker.compose.oneoff=False',
+        # A restarting (crash-looping) sidecar cannot be running a backup, and
+        # Docker refuses exec into it; it must not block stop or reconfiguration.
+        '--filter', 'status=running',
+    ], text=True).split()
+    if not sidecars:
+        yield
+        return
+    if len(sidecars) != 1:
+        fail(f'Expected one running backup container for {project}. Inspect the backup containers and retry.')
+    # Scheduled and manual Offen runs take this same lock before stopping the
+    # workspace. Keep the Docker exec input open to hold it during the operation.
+    command = ['docker', 'exec', '-i', sidecars[0], 'flock', '-n',
+               '/var/lock/dockervolumebackup.lock', '/bin/sh', '-ec', 'echo locked; cat >/dev/null']
+    # Its own session keeps a terminal Ctrl-C from releasing the lock while a
+    # forwarded signal lets Compose finish; closing stdin releases it.
+    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, start_new_session=True) as lock:
+        try:
+            if lock.stdout.readline() == 'locked\n':
+                yield
+                return
+            lock.stdin.close()
+            error = lock.stderr.read().strip()
+            lock.wait()
+            # The sidecar may have stopped or begun restarting since it was listed.
+            state = subprocess.run(['docker', 'inspect', '--format', '{{.State.Status}}', sidecars[0]],
+                                   capture_output=True, text=True).stdout.strip()
+            if state != 'running':
+                print(f'Backup service for {project} is {state or "gone"}; continuing without its backup lock.',
+                      file=sys.stderr)
+                yield
+                return
+            if lock.returncode == 1 and not error:
+                fail(f'Could not acquire the backup lock for {project}: a backup is running. '
+                     'Wait for it to finish and retry.')
+            fail(f'Could not acquire the backup lock for {project} (backup container {sidecars[0]} is {state}): '
+                 f'{error or "exit status " + str(lock.returncode)}')
+        finally:
+            if not lock.stdin.closed:
+                lock.stdin.close()
+
+
+def start_workspace(run, command, model):
+    # A newly started sidecar can run immediately. Start the workspace before
+    # enabling its backup schedule, including with older saved Compose models.
+    services = model['services']
+    if 'backup' not in services:
+        run(command + ['start'])
+        return
+    run(command + ['start', *(service for service in services if service != 'backup')])
+    run(command + ['start', 'backup'])
+
+
+def image_present(image):
+    return subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', image],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def pull_images(command, model, refresh):
+    """Pull with visible progress before taking any reservation or backup lock."""
+    services = [name for name, service in model['services'].items()
+                if service.get('image') and not service.get('build')
+                and (refresh or not image_present(service['image']))]
+    if services:
+        # Pulling changes no containers, so it needs no lifecycle lock.
+        subprocess.run(command + ['pull', *services], check=True)
+
+
+def run_checked(arguments):
+    subprocess.run(arguments, check=True)
+
+
+def find_owned_reservation(name, owner):
+    try:
+        result = subprocess.run(['docker', 'inspect', '--type', 'container', '--format', '{{json .}}', name],
+                                capture_output=True, text=True, check=True, timeout=15, start_new_session=True)
+        container = json.loads(result.stdout)
+        if (container['Config'].get('Labels') or {}).get('code-server.lifecycle-owner') == owner:
+            return container['Id']
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        # A cancelled create may reach the daemon after this inspection.
+        print(f'Could not verify reservation {name} (owner {owner}). '
+              'Inspect it before removing it or retrying.', file=sys.stderr)
+    return None
+
+
+# After forwarding a signal, wait this long for Compose to exit on its own.
+LIFECYCLE_STOP_TIMEOUT = 60
+
+
+@contextmanager
+def reserve_workspace(model, command, use_saved_image):
+    """Yield a runner for lifecycle commands while holding the volume reservation."""
+    workspace = model['services']['code-server']
+    volume_key = next((mount['source'] for mount in workspace.get('volumes', [])
+                       if mount['type'] == 'volume' and mount['target'] == '/home'), 'code-server-home')
+    volume = model.get('volumes', {}).get(volume_key)
+    if volume is None:
+        yield run_checked
+        return
+    # Share the restore helper's atomic Docker name reservation, even across
+    # clients of a remote daemon. A stopped guard need not mount the volume.
+    name = 'code-server-restore-' + hashlib.sha256(volume['name'].encode()).hexdigest()[:24]
+    if use_saved_image:
+        image = workspace['image']
+    else:
+        # Use the existing container's image ID so plain start works offline
+        # even if a local tag has since been moved or removed.
+        containers = subprocess.check_output(command + ['ps', '--all', '--quiet', 'code-server'], text=True).split()
+        if not containers:
+            fail('No workspace container exists. Run manage configure --start to recreate the deployment.')
+        image = subprocess.check_output(['docker', 'inspect', '--format', '{{.Image}}', containers[0]], text=True).strip()
+    owner = uuid.uuid4().hex
+    handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+    received_signal = None
+    acquiring = False
+    create_returned = False
+    changing = False
+    cleaning_up = False
+    guard = None
+    child = None
+    # True while a lifecycle Compose client may still be acting on Docker.
+    unfinished = False
+    abandoned = False
+
+    def interrupt(signum, frame):
+        nonlocal received_signal, abandoned
+        if child is not None and child.poll() is None:
+            # Let Compose stop cleanly; a second signal abandons the wait.
+            if received_signal is None:
+                received_signal = signum
+                child.send_signal(signum)
+            else:
+                abandoned = True
+            return
+        if received_signal is None:
+            received_signal = signum
+            if not cleaning_up:
+                raise SystemExit(128 + signum)
+
+    def run(arguments):
+        nonlocal child, unfinished, abandoned
+        if received_signal is not None:
+            raise SystemExit(128 + received_signal)
+        unfinished = True
+        # A separate session receives only forwarded signals, exactly once.
+        child = subprocess.Popen(arguments, start_new_session=True)
+        deadline = None
+        while True:
+            try:
+                returncode = child.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if received_signal is None:
+                    continue
+                deadline = deadline or time.monotonic() + LIFECYCLE_STOP_TIMEOUT
+                if abandoned or time.monotonic() >= deadline:
+                    abandoned = True
+                    child.kill()
+                    child.wait()
+                    raise SystemExit(128 + received_signal)
+        # The client exited by itself, so no request of ours remains in flight.
+        unfinished = False
+        if received_signal is not None:
+            raise SystemExit(128 + received_signal)
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, arguments)
+
+    try:
+        for signum in handlers:
+            signal.signal(signum, interrupt)
+        acquiring = True
+        # Images are pulled beforehand; never download while holding the reservation.
+        reservation = subprocess.run(['docker', 'create', '--name', name, '--network', 'none',
+                                      '--label', 'code-server.lifecycle-reservation=true',
+                                      '--label', f'code-server.lifecycle-owner={owner}',
+                                      '--pull', 'never', '--entrypoint', '/bin/false', image],
+                                     capture_output=True, text=True)
+        create_returned = True
+        if reservation.returncode or not reservation.stdout.strip():
+            fail(f'Could not reserve workspace volume {volume["name"]} ({name}): {reservation.stderr.strip()}')
+        guard = reservation.stdout.strip()
+        changing = True
+        yield run
+        changing = False
+    finally:
+        cleaning_up = True
+        error = sys.exc_info()[1]
+        # Compose can be terminated separately from manage. In either case
+        # Docker may still be acting on a request after its client exits.
+        child_interrupted = isinstance(error, subprocess.CalledProcessError) and (
+            error.returncode < 0 or error.returncode in (129, 130, 143))
+        try:
+            if changing and (unfinished or child_interrupted):
+                print(f'Reservation {name} ({guard}) retained after interruption. '
+                      'Verify the Docker operation has finished before removing it or retrying.', file=sys.stderr)
+            elif acquiring:
+                # Only an interrupted create can leave a container this client never saw.
+                if not guard and not create_returned:
+                    guard = find_owned_reservation(name, owner)
+                if guard:
+                    try:
+                        subprocess.run(['docker', 'rm', guard], check=True, stdout=subprocess.DEVNULL,
+                                       timeout=15, start_new_session=True)
+                    except (OSError, subprocess.SubprocessError):
+                        message = (f'Could not confirm removal of reservation {name} ({guard}). '
+                                   'Inspect it before removing it or retrying.')
+                        if error is None and received_signal is None:
+                            fail(message)
+                        print(message, file=sys.stderr)
+        finally:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
+        if received_signal is not None:
+            raise SystemExit(128 + received_signal)
+
+
+def check_project_name_change(previous, project):
+    old_project = previous.get('name')
+    if not old_project or project == old_project:
+        return
+    label = f'label=com.docker.compose.project={old_project}'
+    message = f'Cannot change the Compose project name from {old_project} to {project}'
+    containers = subprocess.check_output(['docker', 'container', 'ls', '--quiet', '--filter', label], text=True)
+    if containers.strip():
+        fail(f'{message} while {old_project} has running containers. Keep the saved project name.')
+    volumes = set(subprocess.check_output(['docker', 'volume', 'ls', '--quiet', '--filter', label], text=True).split())
+    if not volumes and previous.get('volumes'):
+        # Volumes reused by Compose may have been created without a project label.
+        names = {volume['name'] for volume in previous['volumes'].values()}
+        existing = subprocess.check_output(['docker', 'volume', 'ls', '--quiet'], text=True)
+        volumes = names.intersection(existing.split())
+    if volumes:
+        fail(f'{message} while {old_project} has Docker volumes. Keep the saved project name.')
+
+
+def validate_backup_id(model):
+    # Same rule as the backup entrypoint; failing there would leave the sidecar crash-looping.
+    backup_id = model.get('services', {}).get('backup', {}).get('environment', {}).get('BACKUP_ID')
+    if backup_id is not None and not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', backup_id):
+        fail('BACKUP_ID must be 1 to 64 lowercase letters, digits, hyphens or underscores, '
+             f'starting with a letter or digit; got: {backup_id!r}')
+
+
 def configure(args, directory):
     path = directory / CONFIGURATION
     if path.is_symlink():
@@ -246,48 +512,69 @@ def configure(args, directory):
         previous = saved_configuration(directory) if path.exists() else {}
         mode = args.backup if args.backup is not None else previous.get('x-manage-backup', 'none')
         project = args.project_name or previous.get('name')
-        command = ['docker', 'compose', '--project-directory', str(directory),
-                   '--env-file', str(directory / '.env')]
-        if project:
-            command += ['--project-name', project]
-        files = ['compose.yaml']
-        if mode != 'none':
-            files += ['compose.backup-common.yaml',
-                      'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml']
-        for name in files:
-            source = directory / name
-            if not source.is_file():
-                fail(f'Required Compose file is missing: {source}')
-            command += ['-f', str(source)]
-        if mode == 'local':
-            os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
-        if mode != 'none':
-            subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(directory / '.env')], check=True)
-            os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
-        total = int(subprocess.check_output(['docker', 'info', '--format', '{{.MemTotal}}'], text=True).strip())
-        if total <= 0:
-            fail('Docker did not report a positive host memory total.')
-        os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
+        check_project_name_change(previous, project)
+        # Take the snapshot lock first, then the lock used by file replacement.
+        env = directory / '.env'
+        with env_lock(env) as lock_fd:
+            command = ['docker', 'compose', '--project-directory', str(directory), '--env-file', str(env)]
+            if project:
+                command += ['--project-name', project]
+            files = ['compose.yaml']
+            if mode != 'none':
+                files += ['compose.backup-common.yaml',
+                          'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml']
+            for name in files:
+                source = directory / name
+                if not source.is_file():
+                    fail(f'Required Compose file is missing: {source}')
+                command += ['-f', str(source)]
+            if mode == 'local':
+                os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
+            if mode != 'none':
+                subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(env),
+                                '--lock-fd', str(lock_fd)], check=True, pass_fds=(lock_fd,))
+                os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
+            total = int(subprocess.check_output(['docker', 'info', '--format', '{{.MemTotal}}'], text=True).strip())
+            if total <= 0:
+                fail('Docker did not report a positive host memory total.')
+            os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
+            model = json.loads(subprocess.check_output(command + ['config', '--format', 'json'], text=True))
+        validate_backup_id(model)
         if args.pull:
-            warn_release(command)
-        model = json.loads(subprocess.check_output(command + ['config', '--format', 'json'], text=True))
+            warn_release(model)
         model['x-manage-backup'] = mode
         # Compose config escapes literal dollars for reuse as a Compose file.
         # Keep secrets private, and publish the snapshot only after creation succeeds.
-        descriptor, temporary = tempfile.mkstemp(prefix='.manage.', suffix='.json', dir=directory)
+        # The temporary snapshot holds interpolated secrets; main() makes hangups
+        # and terminations unwind so this finally block still removes it.
+        temporary = None
         try:
+            descriptor, temporary = tempfile.mkstemp(prefix='.manage.', suffix='.json', dir=directory)
             with os.fdopen(descriptor, 'w') as output:
                 json.dump(model, output)
-            create = compose_command(directory, temporary) + ['create', '--remove-orphans']
-            if args.pull:
-                create += ['--pull', 'always']
-            subprocess.run(create, check=True)
-            os.replace(temporary, path)
+            configured = compose_command(directory, temporary)
+            pull_images(configured, model, refresh=args.pull)
+            with reserve_workspace(model, configured, use_saved_image=True) as run, reserve_backup(model):
+                run(configured + ['create', '--remove-orphans'])
+                os.replace(temporary, path)
+                if args.start:
+                    start_workspace(run, compose_command(directory, path), model)
         finally:
-            if os.path.exists(temporary):
+            if temporary and os.path.exists(temporary):
                 os.unlink(temporary)
-        if args.start:
-            subprocess.run(compose_command(directory, path) + ['start'], check=True)
+
+
+def warn_restore_key(directory, key):
+    # Scheduled backups use the key saved by configure, not later .env edits.
+    try:
+        saved = saved_configuration(directory)['services']['backup']['environment']['GPG_PASSPHRASE']
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if saved and saved != key:
+        print(f'Warning: BACKUP_GPG_PASSPHRASE in {directory / ".env"} differs from the key the backup service '
+              f'uses, saved in {directory / CONFIGURATION} when manage configure last ran. Archives created since '
+              'then are encrypted with the saved key. If this restore fails with a wrong key, rerun it with '
+              'BACKUP_GPG_PASSPHRASE set to the GPG_PASSPHRASE value from the saved configuration.', file=sys.stderr)
 
 
 def manage(args, directory):
@@ -304,9 +591,9 @@ def manage(args, directory):
                 '--env-file', str(directory / '.env'), '-f', '-', 'config', '--format', 'json'],
                 input='services:\n  restore-key:\n    image: unused\n    environment:\n      BACKUP_GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Restore requires the original BACKUP_GPG_PASSPHRASE in .env}\n',
                 text=True, env=env)
-            # Compose serializes each literal '$' as '$$'; decode to the value backups used.
             os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment'][
-                'BACKUP_GPG_PASSPHRASE'].replace('$$', '$')
+                'BACKUP_GPG_PASSPHRASE']
+            warn_restore_key(directory, os.environ['BACKUP_GPG_PASSPHRASE'])
         os.execvp('sh', ['sh', str(restore), archive, args.volume])
     os.chdir(directory)
     if args.action in ('upgrade', 'configure'):
@@ -319,19 +606,27 @@ def manage(args, directory):
         else:
             configure(args, directory)
         return
-    if args.action == 'start' and args.pull:
+    if args.action in ('start', 'stop'):
         path = directory / CONFIGURATION
         with env_lock(path):
-            saved_configuration(directory)
+            model = saved_configuration(directory)
             command = compose_command(directory, path)
-            subprocess.run(command + ['create', '--pull', 'always'], check=True)
-            subprocess.run(command + ['start'], check=True)
+            if args.action == 'stop':
+                with reserve_backup(model):
+                    subprocess.run(command + ['stop'], check=True)
+            else:
+                if args.pull:
+                    pull_images(command, model, refresh=True)
+                    # Pulling an older tag succeeds but brings no new fixes; say so.
+                    warn_release(model)
+                with reserve_workspace(model, command, use_saved_image=args.pull) as run, reserve_backup(model):
+                    if args.pull:
+                        run(command + ['create'])
+                    start_workspace(run, command, model)
         return
     model = saved_configuration(directory)
     command = compose_command(directory, directory / CONFIGURATION)
-    if args.action in ('start', 'stop'):
-        command += [args.action]
-    elif args.action == 'logs':
+    if args.action == 'logs':
         command += ['logs']
         if args.follow:
             command += ['--follow']
@@ -348,15 +643,18 @@ def manage(args, directory):
     os.execvp(command[0], command)
 
 
-def warn_release(command):
+def warn_release(model):
     try:
-        model = subprocess.check_output(command + ['config', '--format', 'json'], stderr=subprocess.DEVNULL, text=True)
-        image = json.loads(model)['services']['code-server']['image']
-        match = re.fullmatch(r'ghcr.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(\d+\.\d+\.\d+(?:-(?:0|[1-9]\d*))?)', image)
+        image = model['services']['code-server']['image']
+        match = re.fullmatch(r'ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(' + TAG[1:] + ')', image)
         if match:
             latest = latest_tag(match[1], timeout=2)
             if latest != 'v' + match[2]:
-                print('Warning: CODE_SERVER_IMAGE differs from latest release ' + latest + '. Review .env before pulling; pinned older tags may miss security fixes.', file=sys.stderr)
+                # Weekly security rebuilds republish only the latest stable release,
+                # so an older pinned tag silently stops receiving fixes.
+                print(f'Warning: CODE_SERVER_IMAGE differs from latest release {latest}. Only the latest '
+                      'stable release receives weekly security rebuilds; to keep receiving fixes, run '
+                      'manage upgrade, then manage configure --pull --start.', file=sys.stderr)
     except Exception:
         pass  # Remain usable offline and with custom images.
 
@@ -393,11 +691,27 @@ def dependencies():
              "(Debian's docker.io, or Homebrew on macOS), then rerun the installer.")
 
 
+def require_https(url):
+    if urllib.parse.urlsplit(url).scheme != 'https':
+        fail('Release downloads require HTTPS for every request and redirect.')
+
+
+def release_opener():
+    class HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, msg, headers, newurl):
+            require_https(newurl)
+            return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+    return urllib.request.build_opener(HTTPSRedirectHandler())
+
+
 def download(url):
+    require_https(url)
+    opener = release_opener()
     for attempt in range(4):
         try:
             request = urllib.request.Request(url, headers={'User-Agent': 'code-server-aio-manage'})
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with opener.open(request, timeout=30) as response:
                 return response.read()
         except (OSError, http.client.HTTPException) as error:
             # HTTPError owns a response body even when urlopen raises before
@@ -426,18 +740,22 @@ def read_bundle(data):
 
 
 def parse_checksums(checksums):
+    # Same rules as install.sh and publish-release.py: 64-hex digests, unique names.
     expected = {}
     for line in checksums.decode().splitlines():
-        if line.strip():
-            digest, name = line.split(maxsplit=1)
-            expected[name] = digest
+        if not line.strip():
+            continue
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r'[a-f0-9]{64}', fields[0]) or fields[1] in expected:
+            fail('Release checksum manifest SHA256SUMS is malformed')
+        expected[fields[1]] = fields[0]
     return expected
 
 
 def merge_settings(original, template, version):
     validate_dotenv(original)
     validate_dotenv(template)
-    key = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=')
+    key = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]')
     existing = {m[1] for line in original.splitlines() if (m := key.match(line))}
     additions, notes = [], []
     for line in template.splitlines(keepends=True):
@@ -494,9 +812,10 @@ def install_files(directory, files, template, version, image, replace_pin=False)
             for index, (name, data) in enumerate(contents.items()):
                 destination = directory / name
                 original = staging / f'original-{index}'
-                if destination.exists():
+                # Capture the existing owner once per file for both copies below.
+                info = destination.stat() if destination.exists() else None
+                if info is not None:
                     shutil.copy2(destination, original)
-                    info = destination.stat()
                     os.chown(original, info.st_uid, info.st_gid)
                     originals[name] = original
                 else:
@@ -505,7 +824,7 @@ def install_files(directory, files, template, version, image, replace_pin=False)
                 candidate.write_bytes(data)
                 candidate.chmod(0o600 if name == '.env' else
                                 0o755 if name == 'manage' or name.endswith('.sh') else 0o644)
-                if name == '.env' and destination.exists():
+                if name == '.env' and info is not None:
                     os.chown(candidate, info.st_uid, info.st_gid)
             # Keep the previous release files for manual rollback as before.
             for index, name in enumerate(contents):
@@ -618,7 +937,24 @@ def validate_args(args):
         fail('--archive and --volume are only supported by backup --restore')
 
 
+def unwind_on_termination():
+    """Make SIGHUP and SIGTERM unwind like Ctrl-C, so every finally block runs.
+
+    Temporary snapshots and install staging hold copies of secrets; any catchable
+    interruption must remove them. Signals the caller deliberately ignores (nohup
+    ignores SIGHUP) stay ignored. reserve_workspace installs its own handlers for
+    lifecycle Compose commands and restores these afterwards.
+    """
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        if signal.getsignal(signum) == signal.SIG_DFL:
+            signal.signal(signum, terminate)
+
+
 def main():
+    unwind_on_termination()
     args = parser().parse_args()
     validate_args(args)
     if args.action == 'install':
@@ -632,5 +968,8 @@ if __name__ == '__main__':
         main()
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode)
+    except KeyboardInterrupt:
+        # For example, Ctrl-C during a pull, before any lifecycle lock is held.
+        sys.exit(130)
     except (OSError, ValueError, KeyError, http.client.HTTPException, tarfile.TarError) as error:
         sys.exit(str(error))

@@ -10,27 +10,10 @@ project_dir=$(cd -- "$script_dir/../.." && pwd)
 prefix="code-server-restore-$$"
 source_volume="${prefix}_code-server-home"
 app_name="$prefix-app"
+command -v gpg >/dev/null || { echo 'Install gpg to run encrypted backup/restore tests.' >&2; exit 1; }
 # The checkout must be shared with Docker on macOS; system temp paths may not be.
 archive_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
-assert_metadata() {
-    python3 - "$1" "$2" <<'PYTHON'
-import os, stat, sys
-info = os.stat(sys.argv[1])
-assert (info.st_uid, info.st_gid) == (os.getuid(), os.getgid()), sys.argv[1]
-assert stat.S_IMODE(info.st_mode) == int(sys.argv[2], 8), sys.argv[1]
-PYTHON
-}
-command -v gpg >/dev/null || { echo 'Install gpg to run encrypted backup/restore tests.' >&2; exit 1; }
-# Generate a disposable key through the same initializer as deployed installations.
-touch "$archive_dir/.env"
-python3 "$script_dir/../tools/backup-key.py" "$archive_dir/.env"
-BACKUP_GPG_PASSPHRASE=$(sed -n 's/^BACKUP_GPG_PASSPHRASE=//p' "$archive_dir/.env")
-# User-chosen keys may contain '$'; restore must decode Compose's '$$' escaping.
-BACKUP_GPG_PASSPHRASE="$BACKUP_GPG_PASSPHRASE\$\$custom"
-printf "BACKUP_GPG_PASSPHRASE='%s'\n" "$BACKUP_GPG_PASSPHRASE" > "$archive_dir/.env"
-export BACKUP_GPG_PASSPHRASE
-BACKUP_ID=$prefix
-export BACKUP_ID
+# Install cleanup before anything else can fail and leak the directory.
 cleanup() {
     docker rm -f "$app_name" >/dev/null 2>&1 || true
     docker volume rm "$source_volume" "${prefix}_docker-data" "$prefix-restored" "$prefix-relative" >/dev/null 2>&1 || true
@@ -41,28 +24,65 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# Retention prunes only this deployment's prefix, leaving unrelated files alone.
-old_archive="$archive_dir/$prefix-home-2000-01-01T00-00-00.tar.gz.gpg"
+assert_metadata() {
+    python3 - "$1" "$2" <<'PYTHON'
+import os, stat, sys
+info = os.stat(sys.argv[1])
+assert (info.st_uid, info.st_gid) == (os.getuid(), os.getgid()), sys.argv[1]
+assert stat.S_IMODE(info.st_mode) == int(sys.argv[2], 8), sys.argv[1]
+PYTHON
+}
+# Generate a disposable key through the same initializer as deployed installations.
+touch "$archive_dir/.env"
+python3 "$script_dir/../tools/backup-key.py" "$archive_dir/.env"
+BACKUP_GPG_PASSPHRASE=$(sed -n 's/^BACKUP_GPG_PASSPHRASE=//p' "$archive_dir/.env")
+# Restore resolves the key from a quoted Compose dotenv assignment.
+printf "BACKUP_GPG_PASSPHRASE: '%s'\n" "$BACKUP_GPG_PASSPHRASE" > "$archive_dir/.env"
+export BACKUP_GPG_PASSPHRASE
+BACKUP_ID=$prefix
+export BACKUP_ID
+touch "$archive_dir/.code-server-aio-backups"
+# Retention prunes only this deployment's prefix, including its trailing dot.
+old_timestamp=2000-01-01T00-00-00-000000+0000
+old_archive="$archive_dir/home.$BACKUP_ID.$old_timestamp.tar.gz.gpg"
+other_archive="$archive_dir/home.$BACKUP_ID-other.$old_timestamp.tar.gz.gpg"
 printf 'old archive' > "$old_archive"
+printf 'another deployment\n' > "$other_archive"
 printf 'unrelated' > "$archive_dir/unrelated.txt"
-python3 - "$old_archive" "$archive_dir/unrelated.txt" <<'PY'
+python3 - "$old_archive" "$other_archive" "$archive_dir/unrelated.txt" <<'PY'
 import os, sys
 for name in sys.argv[1:]:
     os.utime(name, (946684800, 946684800))
 PY
 # A lightweight application verifies backup stop/restart behavior.
 start_backup_fixture
+run_backup() {
+    BACKUP_RETENTION_DAYS=7 BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" \
+        docker compose --project-directory "$project_dir" \
+        --project-name "$prefix" --env-file "$project_dir/.env.example" \
+        -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup-local.yaml" \
+        run --rm --no-deps --entrypoint backup backup
+}
+chmod 755 "$archive_dir"
+if run_backup > "$archive_dir/failed-backup.log" 2>&1; then
+    echo 'Local backup accepted an archive directory with mode 755.' >&2; exit 1
+fi
+grep -q 'with mode 700' "$archive_dir/failed-backup.log"
+assert_metadata "$archive_dir" 755
+test -f "$old_archive"
+chmod 700 "$archive_dir"
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
-BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" docker compose --project-directory "$project_dir" \
-    --project-name "$prefix" --env-file "$project_dir/.env.example" \
-    -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup-local.yaml" \
-    run --rm --no-deps --entrypoint backup backup
+run_backup
 assert_backup_restarted_app
 test ! -e "$old_archive"
+grep -qx 'another deployment' "$other_archive"
 test -f "$archive_dir/unrelated.txt"
 echo 'PASS: Local backup stopped and restarted the labeled application.'
-archive=$(find "$archive_dir" -maxdepth 1 -name '*.tar.gz.gpg' -print -quit)
-test -n "$archive"
+echo "PASS: Local retention pruned only this deployment's old archive."
+set -- "$archive_dir"/"home.$BACKUP_ID."*.tar.gz.gpg
+test "$#" -eq 1
+archive=$1
+test -f "$archive"
 assert_metadata "$archive" 600
 assert_metadata "$archive_dir" 700
 echo 'PASS: Local archive belongs to the invoking user with mode 600.'
@@ -74,7 +94,8 @@ docker volume create "$prefix-restored" >/dev/null
 docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data" \
     --entrypoint /bin/sh "$image" -ec 'echo original > /data/original; ln -s original /data/link; chown 1:13 /data/original'
 # A wrong or missing key must fail before changing the original volume.
-if BACKUP_GPG_PASSPHRASE=wrong-key RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
+wrong_key=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+if BACKUP_GPG_PASSPHRASE="$wrong_key" RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then
     echo 'Encrypted restore accepted the wrong key.' >&2; exit 1
 fi
 if BACKUP_GPG_PASSPHRASE='' RESTORE_IMAGE="$image" sh "$restore_script" "$archive_dir/restore-test.tar.gz.gpg" "$prefix-restored"; then

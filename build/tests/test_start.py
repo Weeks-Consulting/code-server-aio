@@ -106,20 +106,31 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
 
     def test_healthcheck_requires_running_services(self):
         script = (ROOT / 'build/runtime/container-healthcheck.sh').read_text()
-        script = script.replace('timeout 3 /usr/bin/supervisorctl', 'fake_supervisorctl').replace(
-            'timeout 3 /usr/bin/docker', 'fake_docker').replace('code=$(curl ', 'code=$(fake_curl ')
+        script = script.replace('timeout 3 /usr/bin/env', 'fake_env').replace('code=$(curl ', 'code=$(fake_curl ')
         functions = '''fake_supervisorctl() {
     test "$*" = "status service-events dockerd code-server envoy" || return 1
     printf '%s\\n' 'service-events RUNNING' 'dockerd RUNNING' 'code-server RUNNING' 'envoy RUNNING'
     return 0
 }
 fake_docker() { echo server-version=26.1.5; }
-fake_curl() { case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac; }
+fake_env() {
+    if [ "$1 $2 $3 $4" = '-i HOME=/root PYTHONNOUSERSITE=1 /usr/bin/supervisorctl' ]; then
+        shift 4
+        fake_supervisorctl "$@"
+        return
+    fi
+    test "$*" = '-i /usr/bin/docker --config /run --host unix:///var/run/docker.sock info --format server-version={{.ServerVersion}}' || return 1
+    fake_docker
+}
+fake_curl() {
+    test "$1" = --disable || return 1
+    case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac;
+}
 '''
         result = subprocess.run(['bash', '-c', functions + script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        online = functions.replace('*) return 1 ;; esac; }',
-                                   '*"https://test.cloudflareaccess.com/cdn-cgi/access/certs"*) echo 200 ;; *) return 1 ;; esac; }')
+        online = functions.replace('*) return 1 ;; esac;',
+                                   '*"https://test.cloudflareaccess.com/cdn-cgi/access/certs"*) echo 200 ;; *) return 1 ;; esac;')
         result = subprocess.run(['bash', '-c', online + script, 'healthcheck', '--access'],
                                 env={**os.environ, 'CF_ACCESS_TEAM_DOMAIN': 'test.cloudflareaccess.com'},
                                 capture_output=True, text=True)

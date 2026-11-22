@@ -207,7 +207,7 @@
                               "${CF_ACCESS_AUD:-}"
                             ],
                             "require_expiration": true,
-                            "clock_skew_seconds": 1,
+                            "clock_skew_seconds": 30,
                             "from_headers": [
                               {
                                 "name": "cf-access-jwt-assertion"

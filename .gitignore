@@ -8,3 +8,4 @@ CODE_REVIEW.md
 .manage.compose.json
 .manage.compose.json.lock
 .manage.*.json
+.run-development.lock/

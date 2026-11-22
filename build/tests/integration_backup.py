@@ -27,26 +27,35 @@ def wait_for(predicate, description, timeout=45):
 def integration(image, mode, management_source=ROOT / 'manage.py'):
     project = f'backup-lock-{os.getpid()}-{mode}'
     app = project + '-app'
+    blocker = project + '-stop-hook'
     processes = []
     # Keep the configuration mountable by Docker Desktop and act siblings.
     with tempfile.TemporaryDirectory(prefix='.test-tmp.', dir=os.environ.get('TEST_TMPDIR', ROOT)) as temporary:
         directory = Path(temporary).resolve()
-        # Create the bind source on the host: Docker's automatic mkdir/chown
-        # can fail on macOS shared filesystems (including Colima).
-        (directory / 'archives').mkdir(mode=0o700)
+        archives = directory / 'archives'
+        archives.mkdir(mode=0o700)
+        (archives / '.code-server-aio-backups').touch()
         for name in ('manage', 'compose.backup-common.yaml', 'compose.backup-local.yaml'):
             shutil.copyfile(ROOT / name, directory / name)
-        # Configure real backup services without creating the IDE and tunnel.
-        # The application under test is the separately controlled fixture below.
+        hook = "/bin/sh -ec 'touch /tmp/backup-hooks/$$$$; while [ ! -f /tmp/release-backup ]; do sleep 0.1; done'"
         (directory / 'compose.yaml').write_text(json.dumps({
-            'services': {'code-server': {'image': image}},
+            'services': {'code-server': {
+                'image': image,
+                'container_name': app,
+                'init': True,
+                'entrypoint': ['/bin/sleep'],
+                'command': ['infinity'],
+                'volumes': ['code-server-home:/home'],
+                'labels': {'docker-volume-backup.exec-label': project + '-local-home',
+                           'docker-volume-backup.archive-pre': hook},
+            }},
             'volumes': {'code-server-home': {}},
         }))
         shutil.copyfile(management_source, directory / 'manage.py')
         shutil.copyfile(ROOT / 'build/tools/backup-key.py', directory / 'backup-key.py')
         (directory / '.env').write_text(
             'CF_TUNNEL_TOKEN=test-only\n'
-            'BACKUP_GPG_PASSPHRASE=disposable-backup-lock-key\n'
+            'BACKUP_GPG_PASSPHRASE=\n'
             'BACKUP_LOCAL_PATH=./archives\n'
             'BACKUP_TIMEZONE=Etc/UTC\n'
             'BACKUP_RETENTION_DAYS=-1\n')
@@ -57,7 +66,8 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
                    '--env-file', str(directory / '.env'), '-f', str(directory / 'compose.yaml'),
                    '-f', str(directory / 'compose.backup-common.yaml'),
                    '-f', str(directory / 'compose.backup-local.yaml')]
-        launcher = ['sh', str(directory / 'manage'), 'backup', '--run']
+        manage = ['sh', str(directory / 'manage')]
+        launcher = [*manage, 'backup', '--run']
 
         def docker(*arguments):
             return subprocess.check_output(['docker', *arguments], text=True, env=environment).strip()
@@ -77,27 +87,27 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
         second_log = directory / 'second.log'
         first = None
         try:
-            volume = project + '_code-server-home'
-            docker('volume', 'create', '--label', f'com.docker.compose.project={project}',
-                   '--label', 'com.docker.compose.volume=code-server-home', volume)
-            hook = "/bin/sh -ec 'touch /tmp/backup-hooks/$$; while [ ! -f /tmp/release-backup ]; do sleep 0.1; done'"
-            docker('run', '-d', '--init', '--name', app, '--network', 'none',
+            # Create the blocker first so Docker lists the workspace first.
+            # Hold the blocker in its TERM handler while the workspace is stopped.
+            docker('run', '-d', '--init', '--name', blocker, '--network', 'none', '--stop-timeout', '30',
                    '--label', f'docker-volume-backup.stop-during-backup={project}-home',
-                   '--label', f'docker-volume-backup.exec-label={project}-local-home',
-                   '--label', 'docker-volume-backup.archive-pre=' + hook,
-                   '--mount', f'type=volume,src={volume},dst=/home',
-                   '--entrypoint', '/bin/sleep', image, 'infinity')
-            docker('exec', app, '/bin/sh', '-ec', 'mkdir /tmp/backup-hooks; echo snapshot > /home/sentinel')
-            started_before = docker('inspect', '-f', '{{.State.StartedAt}}', app)
+                   '--entrypoint', '/bin/sh', image, '-ec',
+                   """trap 'while [ ! -f /tmp/release-stop ]; do sleep 0.1; done; exit 0' TERM
+                      while :; do sleep 0.1; done""")
             # A six-field expression schedules exactly one run this year. Avoid
             # recurring jobs piling up behind the intentionally held lock.
             scheduled = datetime.now(timezone.utc) + timedelta(seconds=15)
             expression = scheduled.strftime('%S %M %H %d %m *') if mode == 'scheduled' else '0 0 31 2 *'
             with (directory / '.env').open('a') as output:
                 output.write(f'BACKUP_CRON_EXPRESSION="{expression}"\n')
-            subprocess.run(['sh', str(directory / 'manage'), 'configure', '--backup', 'local',
+            subprocess.run([*manage, 'configure', '--backup', 'local',
                             '--project-name', project], env=environment, check=True)
-            subprocess.run([*compose, 'up', '-d', '--no-deps', 'backup'], env=environment, check=True)
+            subprocess.run([*manage, 'start'], env=environment, check=True)
+            docker('exec', app, '/bin/sh', '-ec', 'mkdir /tmp/backup-hooks; echo snapshot > /home/sentinel')
+            started_before = docker('inspect', '-f', '{{.State.StartedAt}}', app)
+            workspace_id = docker('inspect', '-f', '{{.Id}}', app)
+            configuration = directory / '.manage.compose.json'
+            saved = configuration.read_bytes()
             with first_log.open('w') as output:
                 if mode == 'manual':
                     first = start_manual(output)
@@ -124,6 +134,27 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
                     assert second.poll() is None, second_log.read_text()
                     assert 'Exclusive lock was not available' in second_log.read_text(), second_log.read_text()
                     docker('exec', app, 'touch', '/tmp/release-backup')
+                    wait_for(lambda: docker('inspect', '-f', '{{.State.Running}}', app) == 'false',
+                             'backup to stop the workspace')
+                    for action in (('start',), ('start', '--pull'), ('stop',),
+                                   ('configure', '--backup', 'none', '--start')):
+                        result = subprocess.run([*manage, *action], env=environment,
+                                                capture_output=True, text=True, timeout=15)
+                        # start --pull pulls before taking the lock; the local-only
+                        # test image cannot be pulled, so it stops there instead.
+                        # Registries word that failure differently (Docker Hub:
+                        # "pull access denied"; GHCR, as named in CI: "manifest
+                        # unknown"), so require a Compose pull error naming the
+                        # image rather than one registry's message. The state
+                        # checks below prove nothing changed either way.
+                        pull_failed = (action == ('start', '--pull') and image in result.stderr
+                                       and 'Error' in result.stderr and 'Traceback' not in result.stderr)
+                        refused = 'Could not acquire the backup lock' in result.stderr or pull_failed
+                        assert result.returncode != 0 and refused, result
+                        assert docker('inspect', '-f', '{{.State.Running}}', app) == 'false', action
+                        assert docker('inspect', '-f', '{{.Id}}', app) == workspace_id, action
+                        assert configuration.read_bytes() == saved, action
+                    docker('exec', blocker, 'touch', '/tmp/release-stop')
                     if first is not None:
                         assert first.wait(timeout=45) == 0, first_log.read_text()
                     assert second.wait(timeout=45) == 0, second_log.read_text()
@@ -132,12 +163,17 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
             assert docker('inspect', '-f', '{{.State.Running}}', app) == 'true'
             assert docker('inspect', '-f', '{{.State.StartedAt}}', app) != started_before
             assert len(list((directory / 'archives').glob('*.tar.gz.gpg'))) == 2
+            subprocess.run([*manage, 'start'], env=environment, check=True, timeout=15)
+            sidecar = subprocess.check_output([*compose, 'ps', '-q', 'backup'], text=True, env=environment).strip()
+            docker('exec', sidecar, 'flock', '-n', '/var/lock/dockervolumebackup.lock', 'true')
+            for action in ('stop', 'start'):
+                subprocess.run([*manage, action], env=environment, check=True, timeout=15)
             # A missing sidecar must fail instead of creating a fresh lock domain.
             subprocess.run([*compose, 'stop', 'backup'], env=environment, check=True)
             missing = subprocess.run(launcher, env=environment, capture_output=True, text=True, timeout=15)
             assert missing.returncode != 0, 'Backup succeeded without its running sidecar'
             assert len(list((directory / 'archives').glob('*.tar.gz.gpg'))) == 2
-            print(f'PASS: {mode}/manual backup serialization, application restart, and stopped-sidecar rejection.')
+            print(f'PASS: {mode}/manual backup serialization, lifecycle exclusion, and application restart.')
         except BaseException:
             for path in (first_log, second_log):
                 if path.exists():
@@ -159,7 +195,7 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-            subprocess.run(['docker', 'rm', '-f', app], env=environment,
+            subprocess.run(['docker', 'rm', '-f', blocker], env=environment,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run([*compose, 'down', '--volumes', '--remove-orphans'], env=environment, check=True,
                            stdout=subprocess.DEVNULL)

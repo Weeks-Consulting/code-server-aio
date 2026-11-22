@@ -98,14 +98,7 @@ publish_tags() (
 
 # Publish only after all checks, image publication, and checksum attestation pass.
 publish_release() (
-    assets=(build/tools/install.sh manage.py code-server-aio.tar.gz SHA256SUMS)
-    if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-        # A rerun may replace assets without changing the release's promotion state.
-        gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-    else
-        gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag \
-            --title "$RELEASE_TAG" --generate-notes --prerelease --latest=false
-    fi
+    python3 "$(dirname -- "${BASH_SOURCE[0]}")/publish-release.py"
 )
 
 # Promote an existing tested image by digest, without rebuilding it.

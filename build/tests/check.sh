@@ -13,7 +13,7 @@ shellcheck --severity=style manage build/tools/*.sh build/tests/*.sh build/runti
 python3 -m unittest discover -s build/tests -p "test_*.py"
 
 # Configuration checks use a disposable passphrase, never a deployment key.
-export BACKUP_GPG_PASSPHRASE=validation-only
+export BACKUP_GPG_PASSPHRASE=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 # The base file must work with only the tunnel token set.
 CF_TUNNEL_TOKEN=validation-only docker compose --env-file /dev/null config --quiet

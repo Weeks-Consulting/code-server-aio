@@ -242,6 +242,10 @@ jobs:
 
   release-assets:
     name: Publish installer and deployment checksums
+    concurrency:
+      group: publish-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
     needs: [source, publish]
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-26.04
@@ -257,10 +261,12 @@ jobs:
         run: |
           files='compose.yaml compose.backup-common.yaml compose.backup.yaml compose.backup-local.yaml .env.example
             manage manage.py build/tools/restore-home.sh build/tools/backup-key.py'
-          # Installers read members by flat name; preserve modes for manual extraction.
-          tar --create --gzip --file code-server-aio.tar.gz --owner=0 --group=0 --numeric-owner \
+          # Stable tar metadata allows a rerun to resume an upload from the same tag.
+          tar --create --gzip --file code-server-aio.tar.gz --mtime=@0 --owner=0 --group=0 --numeric-owner \
             --transform 's,^build/tools/,,' $files
-          sha256sum code-server-aio.tar.gz manage.py build/tools/install.sh > SHA256SUMS
+          # Record the published asset names so `sha256sum -c SHA256SUMS` works on downloads.
+          cp build/tools/install.sh install.sh
+          sha256sum code-server-aio.tar.gz manage.py install.sh > SHA256SUMS
       - name: Attest deployment checksums
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

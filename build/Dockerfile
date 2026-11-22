@@ -7,9 +7,9 @@ RUN apt-get update && \
 
 FROM download-tools AS code-server-download
 # Defaults are synchronized from build/versions.json by just sync-pins.
-ARG CODE_SERVER_VERSION=4.145.0
-ARG CODE_SERVER_SHA256_AMD64=43fa1dc0e7929753bb3442e4ef40d4beb8bb5f8fe63601ede31b305536e6275b
-ARG CODE_SERVER_SHA256_ARM64=43813b81df484b49facf19d99faaa51683a2cdd8c652dc97ebddefa9cbe7fd6a
+ARG CODE_SERVER_VERSION=4.145.2
+ARG CODE_SERVER_SHA256_AMD64=7eddbdeaab34380bde3ac3bbadce58fe2f5722c4877f331ea593ae797c2517e1
+ARG CODE_SERVER_SHA256_ARM64=0fa9af7f602536b1e320a17d32bb1a85e4a924fdc09283898f1bea73d2a5c1e7
 RUN --mount=type=bind,source=build/tools/fetch-pinned.py,target=/tmp/fetch-pinned.py \
     arch=$(dpkg --print-architecture) && \
     case "$arch" in \
@@ -77,8 +77,10 @@ COPY build/runtime/envoy/ /etc/envoy/
 COPY build/runtime/envoy.json.template /etc/envoy/envoy.json.template
 COPY build/runtime/start-envoy.py /usr/local/lib/start-envoy.py
 
-ENV LANG=en_US.UTF-8 \
-    HOME=/home/cloud-user
+# Do not set HOME image-wide: root processes (supervisord, health checks,
+# docker exec) would load cloud-user's Python user site-packages. Docker derives
+# HOME from /etc/passwd, and supervisord sets it for code-server.
+ENV LANG=en_US.UTF-8
 
 WORKDIR /home/cloud-user
 

@@ -21,8 +21,10 @@ class ReviewFixTests(unittest.TestCase):
             body = io.BytesIO(b'failure')
             error = urllib.error.HTTPError('https://example.org', status, 'failure', {}, body)
             self.addCleanup(error.close)
-            with self.subTest(status=status), patch.object(manage.urllib.request, 'urlopen', side_effect=error) as fetch, \
+            with self.subTest(status=status), patch.object(manage, 'release_opener') as opener, \
                     patch.object(manage.time, 'sleep') as sleep:
+                fetch = opener.return_value.open
+                fetch.side_effect = error
                 with self.assertRaises(urllib.error.HTTPError):
                     manage.download('https://example.org')
                 self.assertEqual(fetch.call_count, attempts)
