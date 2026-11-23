@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workspace update available</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }
+    body { margin: 0; padding: 3rem 1.25rem; }
+    main { max-width: 42rem; margin: auto; }
+    h1 { line-height: 1.2; font-size: 2rem; }
+    nav { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Workspace update available</h1>
+    <p>code-server-aio <strong>$latest</strong> is available. This workspace runs <strong>$current</strong>.</p>
+    <p>To install the update, run <code>./manage upgrade</code> on the Docker host.</p>
+    <nav>
+      <a href="">Continue to code-server</a>
+      <a href="$release_url" target="_blank" rel="noopener">Release notes</a>
+    </nav>
+  </main>
+</body>
+</html>

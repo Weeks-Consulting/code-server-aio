@@ -291,6 +291,15 @@
                       }
                     },
                     {
+                      "name": "envoy.filters.http.lua",
+                      "typed_config": {
+                        "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua",
+                        "default_source_code": {
+                          "filename": "/etc/envoy/lua/update-notice.lua"
+                        }
+                      }
+                    },
+                    {
                       "name": "envoy.filters.http.router",
                       "typed_config": {
                         "@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router"
@@ -362,6 +371,29 @@
       }
     ],
     "clusters": [
+      {
+        "name": "update_notice",
+        "connect_timeout": "0.1s",
+        "type": "STATIC",
+        "load_assignment": {
+          "cluster_name": "update_notice",
+          "endpoints": [
+            {
+              "lb_endpoints": [
+                {
+                  "endpoint": {
+                    "address": {
+                      "pipe": {
+                        "path": "/run/envoy/update-notice.sock"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
       {
         "name": "code_server",
         "connect_timeout": "2s",

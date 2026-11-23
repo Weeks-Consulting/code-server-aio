@@ -31,7 +31,8 @@ def listen(source, output):
         output.write(b'RESULT 2\nOK')
         output.flush()
         name = fields(payload).get(b'processname')
-        if name:
+        # The update notice is optional and access works without it.
+        if name and name != b'update-notice':
             print(f'Critical service {name.decode(errors="replace")} entered FATAL; shutting down for container restart',
                   file=sys.stderr, flush=True)
             os.kill(os.getppid(), signal.SIGTERM)

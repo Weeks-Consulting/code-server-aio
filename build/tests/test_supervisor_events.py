@@ -39,6 +39,15 @@ class ListenerTests(unittest.TestCase):
         listener.listen(source, output)
         self.assertEqual(output.getvalue(), b'READY\nRESULT 2\nOKREADY\nRESULT 2\nOKREADY\n')
 
+    def test_update_notice_failure_leaves_workspace_running(self):
+        payload = b'processname:update-notice'
+        event = b'len:' + str(len(payload)).encode() + b'\n' + payload
+        output = io.BytesIO()
+        with patch.object(listener.os, 'kill') as kill:
+            listener.listen(io.BytesIO(event), output)
+        self.assertEqual(output.getvalue(), b'READY\nRESULT 2\nOKREADY\n')
+        kill.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

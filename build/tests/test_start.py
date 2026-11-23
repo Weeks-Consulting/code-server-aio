@@ -98,6 +98,13 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
         sources = [item['typed_config']['default_source_code']
                    for item in manager(rendered)['http_filters']
                    if item['name'] == 'envoy.filters.http.lua']
+        filters = manager(rendered)['http_filters']
+        names = [item['name'] for item in filters]
+        self.assertEqual(names[-3:], ['envoy.filters.http.lua', 'envoy.filters.http.lua',
+                                      'envoy.filters.http.router'])
+        self.assertEqual([source['filename'] for source in sources[-2:]],
+                         ['/etc/envoy/lua/identity.lua', '/etc/envoy/lua/update-notice.lua'])
+        self.assertLess(names.index('envoy.filters.http.jwt_authn'), len(names) - 3)
         for source in sources + [item['body'] for item in mappers]:
             asset = ROOT / 'build/runtime/envoy' / Path(source['filename']).relative_to('/etc/envoy')
             self.assertTrue(asset.is_file(), asset)

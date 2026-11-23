@@ -137,6 +137,13 @@ a `code-server.lifecycle-owner` label.
 
 ### Upgrade to the latest release
 
+Published images check GitHub for newer stable releases in the background.
+When one is available, the first authenticated visit to the IDE each UTC day
+can show an update notice with release notes and a link to continue. The notice
+is tracked per Cloudflare Access identity across browsers on the same container.
+Checking for updates is optional for workspace access, so GitHub outages leave
+the IDE accessible. Weekly rebuilds of the same release tag do not trigger a notice.
+
 ```sh
 ./manage upgrade
 ```

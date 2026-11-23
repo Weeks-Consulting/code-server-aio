@@ -105,6 +105,9 @@ jobs:
           context: .
           file: build/Dockerfile
           platforms: linux/${{ matrix.arch }}
+          build-args: |
+            AIO_RELEASE_TAG=${{ needs.source.outputs.tag }}
+            AIO_RELEASE_REPOSITORY=${{ github.repository }}
           labels: |
             org.opencontainers.image.title=${{ github.event.repository.name }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

@@ -97,4 +97,8 @@ COPY build/runtime/start-code-server.sh /usr/local/lib/start-code-server.sh
 COPY build/runtime/supervisord.conf /etc/supervisor/supervisord.conf
 COPY build/runtime/supervisor-events.py /usr/local/lib/supervisor-events.py
 COPY --chmod=755 build/runtime/container-healthcheck.sh /usr/local/bin/container-healthcheck
+COPY build/runtime/update-notice.py /usr/local/lib/update-notice.py
+ARG AIO_RELEASE_TAG
+ARG AIO_RELEASE_REPOSITORY
+ENV AIO_RELEASE_TAG=${AIO_RELEASE_TAG} AIO_RELEASE_REPOSITORY=${AIO_RELEASE_REPOSITORY}
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -317,6 +317,56 @@ class AccessProxyTests(unittest.TestCase):
                 self.assertEqual(self.status(self.token({'aud': audience})), 200)
         self.check_health()
 
+    def test_update_notice_only_intercepts_authenticated_ide_navigation(self):
+        subjects = []
+
+        class Updates(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                subject = self.rfile.read(int(self.headers['Content-Length']))
+                seen = subject in subjects
+                subjects.append(subject)
+                body = b'Workspace update available' if not seen else b''
+                self.send_response(200 if body else 204)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        path = self.root / 'updates.sock'
+
+        def change(config, manager, provider):
+            cluster = next(item for item in config['static_resources']['clusters']
+                           if item['name'] == 'update_notice')
+            endpoint = cluster['load_assignment']['endpoints'][0]['lb_endpoints'][0]['endpoint']
+            endpoint['address']['pipe']['path'] = str(path)
+
+        browser = {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}
+        alice = self.token({'sub': 'alice-id', 'email': 'alice@example.com'})
+        denied = self.token({'sub': 'other-id', 'email': 'other@example.com'})
+        self.start(emails=['alice@example.com'], change=change, env_override={'AIO_RELEASE_TAG': 'v4.146.0-1'})
+        with UnixServer(str(path), Updates) as updates:
+            path.chmod(0o666)
+            worker = threading.Thread(target=updates.serve_forever, daemon=True)
+            worker.start()
+            try:
+                self.assertEqual(self.status(headers=browser), 403)
+                self.assertEqual(self.status(denied, headers=browser), 403)
+                self.assertEqual(self.response(alice, '/proxy/3000/', browser)[2], 'backend reached')
+                self.assertEqual(self.response(alice)[2], 'backend reached')
+                self.assertEqual(subjects, [])
+                status, headers, body = self.response(alice, '/?folder=/home/cloud-user', browser)
+                self.assertEqual(status, 200)
+                self.assertEqual({key.lower(): value for key, value in headers.items()}['cache-control'], 'no-store')
+                self.assertEqual(body, 'Workspace update available')
+                self.assertEqual(self.response(alice, headers=browser)[2], 'backend reached')
+                self.assertEqual(subjects, [b'alice-id', b'alice-id'])
+            finally:
+                updates.shutdown()
+                worker.join()
+        self.assertEqual(self.response(alice, headers=browser)[2], 'backend reached')
+
     def test_invalid_tokens(self):
         tokens = [None, 'garbage', 'a.b.c', self.token(key=1),
                   self.token({'iss': 'https://other.cloudflareaccess.com'}),
