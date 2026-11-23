@@ -1,7 +1,7 @@
 {
   "packages": {},
   "images": {
-    "catthehacker/ubuntu:act-24.04": "f68a2abac9c927421fd5a38e23d3610c7804916ffdb2491d7e669fe0ebbe1979",
+    "catthehacker/ubuntu:act-24.04": "ebfc2752875ebb29fbfa360db9dcd2f76bc160147ec6bd1b035bba0ef8b38fbe",
     "rustfs/rustfs:1.0.3": "9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b"
   },
   "actions": {
