@@ -9,13 +9,13 @@ restore_script="$script_dir/../tools/restore-home.sh"
 project_dir=$(cd -- "$script_dir/../.." && pwd)
 prefix="code-server-restore-$$"
 source_volume="${prefix}_code-server-home"
-app_name="$prefix-app"
 command -v gpg >/dev/null || { echo 'Install gpg to run encrypted backup/restore tests.' >&2; exit 1; }
 # The checkout must be shared with Docker on macOS; system temp paths may not be.
 archive_dir=$(mktemp -d "${TEST_TMPDIR:-$project_dir}/.test-tmp.XXXXXXXX")
 # Install cleanup before anything else can fail and leak the directory.
 cleanup() {
-    docker rm -f "$app_name" >/dev/null 2>&1 || true
+    docker ps -aq --filter "label=com.docker.compose.project=$prefix" |
+        while IFS= read -r container; do docker rm -f "$container" >/dev/null 2>&1 || true; done
     docker volume rm "$source_volume" "${prefix}_docker-data" "$prefix-restored" "$prefix-relative" >/dev/null 2>&1 || true
     docker network rm "${prefix}_default" >/dev/null 2>&1 || true
     remove_test_archives
@@ -54,15 +54,31 @@ import os, sys
 for name in sys.argv[1:]:
     os.utime(name, (946684800, 946684800))
 PY
-# A lightweight application verifies backup stop/restart behavior.
-start_backup_fixture
-run_backup() {
-    BACKUP_RETENTION_DAYS=7 BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" \
+backup_compose() {
+    CODE_SERVER_IMAGE="$image" CF_ACCESS_TEAM_DOMAIN=test.cloudflareaccess.com \
+        CF_ACCESS_AUD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        BACKUP_RETENTION_DAYS=7 BACKUP_LOCAL_UID=$(id -u) BACKUP_LOCAL_GID=$(id -g) BACKUP_LOCAL_PATH="$archive_dir" \
         docker compose --project-directory "$project_dir" \
         --project-name "$prefix" --env-file "$project_dir/.env.example" \
         -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup-local.yaml" \
-        run --rm --no-deps --entrypoint backup backup
+        "$@"
 }
+run_backup() {
+    backup_compose run --rm --no-deps --entrypoint backup backup
+}
+seed_backup_home
+backup_compose up -d --wait --wait-timeout 120 code-server
+app_name=$(backup_compose ps -q code-server)
+backup_compose exec -T code-server sudo -u cloud-user docker run -d --name backup-nested \
+    --restart unless-stopped --mount type=bind,src=/home/cloud-user,dst=/workspace \
+    debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 /bin/sh -ec '
+        trap "echo stopped > /workspace/backup-shutdown; exit 0" TERM
+        touch /workspace/backup-workload-ready
+        while :; do sleep 1; done
+    '
+backup_compose exec -T code-server timeout 15 /bin/sh -c '
+    until test -f /home/cloud-user/backup-workload-ready; do sleep 0.2; done
+'
 chmod 755 "$archive_dir"
 if run_backup > "$archive_dir/failed-backup.log" 2>&1; then
     echo 'Local backup accepted an archive directory with mode 755.' >&2; exit 1
@@ -74,6 +90,10 @@ chmod 700 "$archive_dir"
 started_before=$(docker inspect -f '{{.State.StartedAt}}' "$app_name")
 run_backup
 assert_backup_restarted_app
+backup_compose exec -T code-server timeout 60 /bin/sh -c '
+    until /usr/local/bin/container-healthcheck >/dev/null 2>&1; do sleep 1; done
+'
+test "$(backup_compose exec -T code-server docker inspect -f '{{.State.Running}}' backup-nested)" = true
 test ! -e "$old_archive"
 grep -qx 'another deployment' "$other_archive"
 test -f "$archive_dir/unrelated.txt"
@@ -126,6 +146,8 @@ mkdir "$restore_tmp"
 env -u BACKUP_GPG_PASSPHRASE TMPDIR="$restore_tmp" RESTORE_IMAGE="$image" sh "$archive_dir/manage" backup --restore \
     --archive "$archive_dir/restore-test.tar.gz.gpg" --volume "$prefix-restored"
 assert_restored_home
+docker run --rm --network none --mount "type=volume,src=$prefix-restored,dst=/data,readonly" \
+    --entrypoint /bin/grep "$image" -qx stopped /data/cloud-user/backup-shutdown
 rollback=$(find "$archive_dir" -name original-home.tar.gz.gpg -print -quit)
 test -n "$rollback"
 assert_metadata "$rollback" 600

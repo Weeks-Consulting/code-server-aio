@@ -1,0 +1,19 @@
+[Unit]
+Description=Envoy Access proxy
+StartLimitIntervalSec=120
+StartLimitBurst=11
+StartLimitAction=exit
+
+[Service]
+Type=exec
+User=envoy
+PassEnvironment=CF_ACCESS_TEAM_DOMAIN CF_ACCESS_AUD CF_ACCESS_ALLOWED_EMAILS AIO_RELEASE_TAG
+ExecStart=/usr/bin/python3 -I /usr/local/lib/start-envoy.py
+Restart=always
+RestartSec=2s
+TimeoutStopSec=30s
+StandardOutput=append:/dev/console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

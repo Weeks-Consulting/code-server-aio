@@ -11,15 +11,27 @@ not_ready() {
     exit 1
 }
 
-# supervisorctl is Python; never load user site-packages or PYTHON* settings as root.
-status=$(timeout 3 /usr/bin/env -i HOME=/root PYTHONNOUSERSITE=1 \
-    /usr/bin/supervisorctl status service-events dockerd code-server envoy 2>&1) || not_ready "$status"
-while read -r service state _; do
-    case "$service:$state" in
-        service-events:RUNNING|dockerd:RUNNING|code-server:RUNNING|envoy:RUNNING) ;;
-        *) not_ready "services not ready: $status" ;;
-    esac
-done <<< "$status"
+if [[ $(< /proc/1/comm) == docker-init ]]; then
+    status=$(timeout 3 /usr/bin/env -i HOME=/root PYTHONNOUSERSITE=1 \
+        /usr/bin/supervisorctl -c /etc/supervisor/supervisord.conf \
+        status service-events dockerd code-server envoy 2>&1) || not_ready "$status"
+    while read -r service state _; do
+        case "$service:$state" in
+            service-events:RUNNING|dockerd:RUNNING|code-server:RUNNING|envoy:RUNNING) ;;
+            *) not_ready "services not ready: $status" ;;
+        esac
+    done <<< "$status"
+else
+    # is-active succeeds if any requested unit is active, so check every line.
+    status=$(timeout 3 /usr/bin/env -i /usr/bin/systemctl --system is-active \
+        dockerd.service code-server.service envoy.service user@10000.service 2>&1) || not_ready "$status"
+    [[ "$status" == $'active\nactive\nactive\nactive' ]] || not_ready "services not ready: $status"
+    bus_status=$(timeout 2 /usr/bin/env -i /usr/bin/setpriv \
+        --reuid=cloud-user --regid=cloud-user --clear-groups \
+        /usr/bin/busctl --address=unix:path=/run/user/10000/bus \
+        call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetId 2>&1) \
+        || not_ready "Workspace user bus is not ready: $bus_status"
+fi
 
 # The CLI can exit 0 with an empty version when it cannot connect; require a
 # labeled, nonempty server version rather than trusting the exit status.

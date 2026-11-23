@@ -63,6 +63,11 @@ class Backend(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+    def do_POST(self):
+        # Drain the fixture request before closing, so Envoy receives the 501.
+        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        self.send_error(501)
+
     def log_message(self, *args):
         pass
 

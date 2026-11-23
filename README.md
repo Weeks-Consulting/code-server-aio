@@ -9,9 +9,9 @@ The entire project has also been reviewed and tested by a real person.
 
 ## Quick start
 
-Requires Docker with Compose, Python 3, and curl; no GitHub account or GitHub CLI
-is needed. See the [installation guide](docs/installation.md) for options and
-release selection.
+Requires Docker on a cgroup v2 host, Docker Compose 2.15 or later, Python 3,
+and curl. No GitHub account or GitHub CLI is needed. See the
+[installation guide](docs/installation.md) for options and release selection.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/refs/heads/main/build/tools/install.sh | sh

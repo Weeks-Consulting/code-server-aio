@@ -4,9 +4,11 @@
 
 ### Requirements
 
-Supported hosts are Debian Linux and macOS with a working Docker installation,
-Docker Compose, and Python 3. The bootstrap also needs curl. The installer
-checks for Docker Compose but never installs host packages; if Compose is
+Supported hosts are Debian Linux and macOS with a Docker daemon using cgroup v2,
+Docker Compose 2.15 or later, and Python 3. Run
+`docker info --format '{{.CgroupVersion}}'` in the deployment's Docker context
+to check the daemon. The bootstrap also needs curl. The installer checks for
+Docker Compose and leaves host package installation to you. If Compose is
 missing, install `docker-compose-plugin` (Docker CE), `docker-compose` (Debian's
 `docker.io`), or use Docker Desktop or Homebrew on macOS. Restoring encrypted
 backups additionally needs `gpg` on the host; see [restore](restore.md).

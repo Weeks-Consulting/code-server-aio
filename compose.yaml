@@ -15,7 +15,10 @@ services:
       - apparmor=unconfined
       - seccomp=unconfined
       - systempaths=unconfined
-    init: true
+    cgroup: private
+    init: false
+    # Give systemd a console for the workspace logs streamed by manage logs.
+    tty: true
     restart: unless-stopped
     logging:
       driver: json-file

@@ -104,9 +104,10 @@ Compose default network and reach the protected listener; the backend has no TCP
 
 The application build downloads a static Envoy executable pinned by
 `packages.envoy.version` in `build/versions.json` and architecture-specific checksums in `packages.envoy.sha256` in `build/versions.json`.
-Supervisor runs it as a dedicated `envoy` user with group 10000 for backend socket
+systemd runs it as a dedicated `envoy` user with group 10000 for backend socket
 access. Envoy starts alongside workspace initialization. The container healthcheck
-checks Supervisor, backend readiness, Envoy readiness, and rejection of unauthenticated
+checks the required systemd units, the workspace user bus, nested Docker, backend
+readiness, Envoy readiness, and rejection of unauthenticated
 requests. Exhausted startup retries trigger a container restart.
 
 `build/runtime/start-envoy.py` renders `build/runtime/envoy.json.template` into
@@ -159,7 +160,7 @@ installed with `sudo`) to disconnect existing sockets. These commands use the sa
 configuration and project name; a bare `docker compose restart` may target the wrong project. Apply origin allowlist changes
 with `manage configure --start`, which recreates the workspace container with its updated environment.
 
-The entrypoint completes workspace setup before starting Supervisor and its services.
+The entrypoint prepares the mounted home directory and cgroups before starting systemd.
 While code-server starts, authenticated visitors can see the startup page. The
 container health check verifies running supervised services, nested Docker, the
 backend Unix socket, Envoy listener readiness, and rejection of unauthenticated

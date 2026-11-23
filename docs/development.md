@@ -131,8 +131,12 @@ GitHub-hosted runs keep. Neither uploads BuildKit build-record artifacts.
 The wrapper disables act's automatic `.env` loading so deployment settings do not
 override the workflow's test configuration.
 
-The smoke test needs a Docker host that allows `SYS_ADMIN` and unconfined seccomp/AppArmor/system paths. On macOS it uses named volumes to preserve Linux UID/GID ownership;
-on Linux it also exercises an empty home bind mount. Temporary bind-mounted test
+The smoke test needs a cgroup v2 Docker host that allows `SYS_ADMIN` and
+unconfined seccomp/AppArmor/system paths. It installs a pinned Homebrew revision
+and a repository-defined test formula in a disposable workspace to verify
+starting, persisting, and disabling a user service.
+On macOS it uses named volumes to preserve Linux UID/GID ownership. On Linux it
+also exercises an empty home bind mount. Temporary bind-mounted test
 files are created in ignored `.test-tmp.*` directories under the checkout, which
 must be shared with Docker. The restore test uses temporary volumes and encrypted
 local archives, without S3.

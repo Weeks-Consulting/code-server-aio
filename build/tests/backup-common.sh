@@ -3,7 +3,7 @@
 # Callers supply image, prefix, source_volume, app_name, archive_dir, and started_before.
 # shellcheck disable=SC2154
 
-start_backup_fixture() {
+seed_backup_home() {
     docker volume create --label "com.docker.compose.project=$prefix" \
         --label com.docker.compose.volume=code-server-home "$source_volume" >/dev/null
     docker run --rm --network none --mount "type=volume,src=$source_volume,dst=/data" \
@@ -15,7 +15,11 @@ start_backup_fixture() {
             echo low-owner > /data/low-uid
             chown 1:13 /data/low-uid
         '
-    docker run -d --name "$app_name" \
+}
+
+start_backup_fixture() {
+    seed_backup_home
+    docker run -d --init --stop-signal SIGTERM --name "$app_name" \
         --label "docker-volume-backup.stop-during-backup=$prefix-home" \
         --mount "type=volume,src=$source_volume,dst=/home" \
         --entrypoint /usr/bin/sleep "$image" infinity >/dev/null

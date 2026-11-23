@@ -45,6 +45,8 @@ RUN apt-get update && \
         build-essential \
         ca-certificates \
         curl \
+        dbus \
+        dbus-user-session \
         docker-cli \
         docker.io \
         file \
@@ -60,6 +62,7 @@ RUN apt-get update && \
         ripgrep \
         sudo \
         supervisor \
+        systemd \
         unzip \
         zip && \
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
@@ -81,25 +84,38 @@ RUN groupadd --gid 10000 cloud-user && \
     visudo -cf /etc/sudoers.d/cloud-user
 
 RUN useradd --system --gid 10000 --no-create-home --shell /usr/sbin/nologin envoy && \
-    install -d -o envoy -g 10000 -m 750 /run/envoy
+    install -d /var/lib/systemd/linger && touch /var/lib/systemd/linger/cloud-user
 COPY build/runtime/envoy/ /etc/envoy/
 COPY build/runtime/envoy.json.template /etc/envoy/envoy.json.template
 COPY build/runtime/start-envoy.py /usr/local/lib/start-envoy.py
 
-# Do not set HOME image-wide: root processes (supervisord, health checks,
-# docker exec) would load cloud-user's Python user site-packages. Docker derives
-# HOME from /etc/passwd, and supervisord sets it for code-server.
-ENV LANG=en_US.UTF-8
+# Docker and systemd derive HOME from the account running each process.
+ENV LANG=en_US.UTF-8 \
+    container=docker
 
 WORKDIR /home/cloud-user
 
 COPY --chmod=755 build/runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY build/runtime/start-code-server.sh /usr/local/lib/start-code-server.sh
+COPY build/runtime/systemd/ /etc/systemd/system/
+COPY --chmod=755 build/runtime/envoy-console-generator.sh /usr/lib/systemd/system-generators/workspace-envoy-console
+COPY build/runtime/workspace-tasks.conf /etc/systemd/system.conf.d/workspace.conf
+COPY build/runtime/workspace-tasks.conf /etc/systemd/user.conf.d/workspace.conf
+COPY build/runtime/workspace-journald.conf /etc/systemd/journald.conf.d/workspace.conf
+COPY build/runtime/dbus-socket-recovery.conf /etc/systemd/user/dbus.socket.d/recovery.conf
+COPY build/runtime/workspace-tmpfiles.conf /etc/tmpfiles.d/workspace.conf
 COPY build/runtime/supervisord.conf /etc/supervisor/supervisord.conf
-COPY build/runtime/supervisor-events.py /usr/local/lib/supervisor-events.py
+COPY build/runtime/legacy-supervisor.py build/runtime/supervisor-events.py /usr/local/lib/
 COPY --chmod=755 build/runtime/container-healthcheck.sh /usr/local/bin/container-healthcheck
 COPY build/runtime/update-notice.py /usr/local/lib/update-notice.py
+# dockerd starts its own containerd. Start Supervisor only in legacy mode
+# and keep the login prompt off the Docker log console.
+RUN systemctl --root=/ mask docker.service docker.socket containerd.service supervisor.service console-getty.service && \
+    systemctl --root=/ enable dockerd.service code-server.service envoy.service update-notice.service
+# Let systemd initialize a different machine ID for each new container.
+RUN ln -sf /etc/machine-id /var/lib/dbus/machine-id && truncate -s 0 /etc/machine-id
 ARG AIO_RELEASE_TAG
 ARG AIO_RELEASE_REPOSITORY
 ENV AIO_RELEASE_TAG=${AIO_RELEASE_TAG} AIO_RELEASE_REPOSITORY=${AIO_RELEASE_REPOSITORY}
+STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

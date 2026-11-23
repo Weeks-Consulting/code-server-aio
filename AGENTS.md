@@ -16,7 +16,7 @@ JWTs, with nested Docker (Docker-in-Docker) for developers.
 <!-- TODO: Expand as the layout changes. -->
 
 - `build/Dockerfile`, `build/runtime/`: image build and in-container services
-  (Supervisor, Envoy, code-server).
+  (systemd, Envoy, code-server).
 - `build/tools/`: install, restore, and dependency tooling.
 - `build/tests/`: unit and integration tests.
 - `build/ci/`, `.github/workflows/`: release, publishing, and promotion.
@@ -34,9 +34,9 @@ Do not change these without discussing it first.
 - **`docker-cli` and `docker.io` are both listed.** `docker.io` only recommends
   `docker-cli`, and apt runs with `--no-install-recommends`, so `docker-cli` must be
   named explicitly.
-- **`ENV HOME` is not set image-wide.** Root processes (supervisord, health checks,
-  `docker exec`) would otherwise load `cloud-user`'s Python user site-packages. Docker
-  derives `HOME` from `/etc/passwd`, and Supervisor sets it for code-server.
+- **`ENV HOME` is not set image-wide.** Root processes would otherwise load
+  `cloud-user`'s Python user site-packages. Docker and systemd derive `HOME` from
+  the process's account.
 - **`apt-get upgrade -y` is intentional.** Packages are patched frequently, and the weekly
   rebuild of the current stable release is meant to pick those patches up. This trades
   build reproducibility for security.
@@ -50,7 +50,23 @@ Do not change these without discussing it first.
 - The entrypoint remounts `/sys/fs/cgroup` read-write so nested containers can start.
   Use `remount,bind,rw` to change only this mount's flags; a filesystem-wide remount
   can be denied in a user namespace. A failed remount must stop startup.
+- systemd runs as PID 1 inside a private cgroup v2 namespace. Leave Docker's
+  init wrapper disabled. Compose allocates a TTY to preserve infrastructure
+  logs in Docker's log stream. Envoy writes access records directly to the
+  console so Docker log consumers receive raw JSON. The console login prompt
+  is masked. The journal has its own storage budget and keeps per-user logs.
+- Older saved Compose files still select `docker-init`. Keep the Supervisor
+  compatibility path for those deployments because `start --pull` can pull the
+  new image without changing the saved configuration. Both paths honor the
+  image stop signal and use the same Docker and proxy readiness probes.
 - `cloud-user` has passwordless sudo and Docker group access by design.
+- The systemd user manager for `cloud-user` starts at boot with lingering enabled.
+  Code-server exports the user bus and runtime directory to its terminals so
+  Homebrew services work without opening a PAM login. The linger marker belongs
+  to the image because backups include `/home`, which holds the user units.
+- code-server, nested Docker, and the workspace user's service units inherit
+  the container's PID limit. Override systemd's smaller default task limits for
+  these workloads.
 
 ### Port forwarding
 

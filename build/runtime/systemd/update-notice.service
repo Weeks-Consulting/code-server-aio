@@ -1,0 +1,16 @@
+[Unit]
+Description=Workspace release update notice
+
+[Service]
+Type=exec
+User=envoy
+PassEnvironment=AIO_RELEASE_TAG AIO_RELEASE_REPOSITORY
+PassEnvironment=HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+ExecStart=/usr/bin/python3 -I /usr/local/lib/update-notice.py
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=code-server workspace
+Wants=user@10000.service
+After=user@10000.service
+StartLimitIntervalSec=120
+StartLimitBurst=11
+StartLimitAction=exit
+
+[Service]
+Type=exec
+User=cloud-user
+WorkingDirectory=/home/cloud-user
+PassEnvironment=HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+Environment=XDG_RUNTIME_DIR=/run/user/10000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/10000/bus
+ExecStart=/bin/sh /usr/local/lib/start-code-server.sh
+Restart=always
+RestartSec=2s
+TimeoutStopSec=30s
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

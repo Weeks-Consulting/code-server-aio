@@ -43,6 +43,7 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
                 'image': image,
                 'container_name': app,
                 'init': True,
+                'stop_signal': 'SIGTERM',
                 'entrypoint': ['/bin/sleep'],
                 'command': ['infinity'],
                 'volumes': ['code-server-home:/home'],
@@ -89,7 +90,8 @@ def integration(image, mode, management_source=ROOT / 'manage.py'):
         try:
             # Create the blocker first so Docker lists the workspace first.
             # Hold the blocker in its TERM handler while the workspace is stopped.
-            docker('run', '-d', '--init', '--name', blocker, '--network', 'none', '--stop-timeout', '30',
+            docker('run', '-d', '--init', '--name', blocker, '--network', 'none',
+                   '--stop-signal', 'SIGTERM', '--stop-timeout', '30',
                    '--label', f'docker-volume-backup.stop-during-backup={project}-home',
                    '--entrypoint', '/bin/sh', image, '-ec',
                    """trap 'while [ ! -f /tmp/release-stop ]; do sleep 0.1; done; exit 0' TERM

@@ -1,6 +1,6 @@
 """Run the production Compose topology with real code-server and disposable Access keys.
 
-The fixture and client have no backend socket mount. Only the JWKS transport is replaced; production socket permissions and Supervisor lifecycle apply.
+The fixture and client have no backend socket mount. Only the JWKS transport is replaced; production socket permissions and systemd lifecycle apply.
 """
 
 import base64
@@ -102,6 +102,7 @@ def integration(image):
                                      'CF_ACCESS_ALLOWED_EMAILS': 'user@example.com'},
                       'healthcheck': {'interval': '1s', 'start_period': '10s', 'retries': 30}},
             'fixture': {'image': image, 'entrypoint': ['/usr/bin/python3', '/tmp/isolation.py', '--fixture'],
+                        'init': True, 'stop_signal': 'SIGTERM',
                         'volumes': [mount], 'healthcheck': {
                             'test': ['CMD', 'curl', '-fsS', 'http://localhost:8088/token'],
                             'interval': '1s', 'timeout': '2s', 'retries': 20}},
@@ -151,19 +152,27 @@ def integration(image):
             run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server')
             time.sleep(2)
             run('run', '--rm', '--no-deps', 'client', '200', backend_ip)
-            run('exec', '-T', 'code-server', 'supervisorctl', 'stop', 'code-server')
+            run('exec', '-T', 'code-server', 'systemctl', 'stop', 'code-server')
             run('run', '--rm', '--no-deps', 'client', '503', backend_ip)
-            run('exec', '-T', 'code-server', 'supervisorctl', 'start', 'code-server')
-            run('up', '-d', '--wait', '--wait-timeout', '120', 'code-server')
+            # Type=exec reports a successful start before the backend opens its socket.
+            run('exec', '-T', 'code-server', '/bin/sh', '-ec',
+                'mkdir -p /run/systemd/system/code-server.service.d; '
+                'cat > /run/systemd/system/code-server.service.d/delayed-start.conf; systemctl daemon-reload',
+                input="[Service]\nExecStart=\n"
+                      "ExecStart=/bin/sh -ec 'sleep 3; exec /bin/sh /usr/local/lib/start-code-server.sh'\n")
+            run('exec', '-T', 'code-server', 'systemctl', 'start', 'code-server')
+            # Docker may still report healthy from before the in-place service restart.
+            run('exec', '-T', 'code-server', 'timeout', '30', '/bin/sh', '-c',
+                'until /usr/local/bin/container-healthcheck >/dev/null 2>&1; do sleep 1; done')
             run('run', '--rm', '--no-deps', 'client', '200', backend_ip)
-            run('exec', '-T', 'code-server', 'supervisorctl', 'stop', 'envoy')
+            run('exec', '-T', 'code-server', 'systemctl', 'stop', 'envoy')
             run('run', '--rm', '--no-deps', 'client', 'down', backend_ip)
             print('PASS: Unix-socket backend, supervised Envoy, real code-server, restarts, and fail-closed routing.')
         except BaseException:
             print(run('logs', '--no-color'), file=sys.stderr)
             raise
         finally:
-            run('down', '--volumes', '--remove-orphans', '--timeout', '10')
+            run('down', '--volumes', '--remove-orphans')
 
 
 if __name__ == '__main__':

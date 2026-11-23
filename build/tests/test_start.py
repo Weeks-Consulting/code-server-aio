@@ -34,37 +34,39 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(result.stdout.splitlines(), ['--socket', str(stale), '--socket-mode',
                                                          '660', '--auth', 'none', '/home/cloud-user'])
 
-    def test_entrypoint_initializes_before_supervisor_and_aborts_on_failure(self):
+    def test_entrypoint_initializes_before_systemd_and_aborts_on_failure(self):
         script = (ROOT / 'build/runtime/entrypoint.sh').read_text()
         with tempfile.TemporaryDirectory() as directory:
-            supervisor = Path(directory) / 'supervisord'
-            supervisor.write_text('#!/bin/sh\nprintf "supervisord %s\\n" "$*"\n')
-            supervisor.chmod(0o755)
-            script = script.replace('/usr/bin/supervisord', str(supervisor))
-            functions = """mount() { printf 'mount %s\\n' "$*"; }
+            systemd = Path(directory) / 'systemd'
+            systemd.write_text('#!/bin/sh\nprintf "systemd %s\\n" "$*"\n')
+            systemd.chmod(0o755)
+            script = script.replace('/usr/lib/systemd/systemd', str(systemd))
+            functions = """grep() { test "$*" = '-qx 0::/ /proc/self/cgroup' && printf 'cgroup check\n'; }
+mount() { printf 'mount %s\\n' "$*"; }
 mkdir() { printf 'mkdir %s\\n' "$*"; }
 chown() { printf 'chown %s\\n' "$*"; }
-chmod() { printf 'chmod %s\\n' "$*"; }
 getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
 """
-            for failure in ('none', 'mount', 'mkdir', 'chown', 'chmod', 'getent'):
+            for failure in ('none', 'grep', 'mount', 'mkdir', 'chown', 'getent'):
                 with self.subTest(failure=failure):
                     setup = functions
                     if failure != 'none':
                         setup += failure + '() { return 9; }\n'
                     result = subprocess.run(['bash', '-c', setup + script, 'entrypoint', '--test'],
                                             capture_output=True, text=True)
-                    expected = 0 if failure == 'none' else 1 if failure == 'mount' else 9
+                    expected = 0 if failure == 'none' else 1 if failure in ('grep', 'mount') else 9
                     self.assertEqual(result.returncode, expected, result.stderr)
                     if failure == 'none':
                         self.assertEqual(result.stdout.splitlines(), [
-                            'mount -o remount,bind,rw /sys/fs/cgroup',
-                            'mkdir -p /run/code-server', 'chown 10000:10000 /run/code-server',
-                            'chmod 0750 /run/code-server', 'mkdir -p /home/cloud-user',
+                            'cgroup check', 'mount -o remount,bind,rw /sys/fs/cgroup',
+                            'mkdir -p /home/cloud-user',
                             'chown 123:456 /home/cloud-user',
-                            'supervisord -c /etc/supervisor/supervisord.conf --test'])
+                            'systemd --test'])
                     else:
-                        self.assertNotIn('supervisord', result.stdout)
+                        self.assertNotIn('systemd', result.stdout)
+                    if failure == 'grep':
+                        self.assertIn('requires cgroup v2', result.stderr)
+                        self.assertNotIn('mount', result.stdout)
                     if failure == 'mount':
                         self.assertIn('could not make /sys/fs/cgroup writable', result.stderr)
                         self.assertNotIn('mkdir', result.stdout)
@@ -114,16 +116,24 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
     def test_healthcheck_requires_running_services(self):
         script = (ROOT / 'build/runtime/container-healthcheck.sh').read_text()
         script = script.replace('timeout 3 /usr/bin/env', 'fake_env').replace('code=$(curl ', 'code=$(fake_curl ')
-        functions = '''fake_supervisorctl() {
-    test "$*" = "status service-events dockerd code-server envoy" || return 1
-    printf '%s\\n' 'service-events RUNNING' 'dockerd RUNNING' 'code-server RUNNING' 'envoy RUNNING'
-    return 0
+        script = script.replace('timeout 2 /usr/bin/env', 'fake_env')
+        functions = '''fake_user_bus() {
+    test "$*" = "--reuid=cloud-user --regid=cloud-user --clear-groups /usr/bin/busctl --address=unix:path=/run/user/10000/bus call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetId"
+}
+fake_systemctl() {
+    test "$*" = "--system is-active dockerd.service code-server.service envoy.service user@10000.service" || return 1
+    printf '%s\\n' active active active active
 }
 fake_docker() { echo server-version=26.1.5; }
 fake_env() {
-    if [ "$1 $2 $3 $4" = '-i HOME=/root PYTHONNOUSERSITE=1 /usr/bin/supervisorctl' ]; then
-        shift 4
-        fake_supervisorctl "$@"
+    if [ "$1 $2" = '-i /usr/bin/systemctl' ]; then
+        shift 2
+        fake_systemctl "$@"
+        return
+    fi
+    if [ "$1 $2" = '-i /usr/bin/setpriv' ]; then
+        shift 2
+        fake_user_bus "$@"
         return
     fi
     test "$*" = '-i /usr/bin/docker --config /run --host unix:///var/run/docker.sock info --format server-version={{.ServerVersion}}' || return 1
@@ -163,12 +173,20 @@ fake_curl() {
                                         capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
-        for transition in ('code-server STARTING', 'envoy FATAL', 'dockerd STOPPED', 'service-events BACKOFF'):
-            before = transition.split()[0] + ' RUNNING'
-            result = subprocess.run(['bash', '-c', functions.replace(before, transition) + script],
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-
+        for states in ('activating active active active', 'active failed active active',
+                       'active active inactive active', 'active active active activating', 'active'):
+            with self.subTest(states=states):
+                result = subprocess.run(['bash', '-c', functions.replace('active active active active', states)
+                                         + script], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('services not ready', result.stderr)
+        for failure in ('return 1', 'return 124'):
+            with self.subTest(bus_failure=failure):
+                result = subprocess.run(['bash', '-c', functions.replace(
+                    'fake_user_bus() {', 'fake_user_bus() { ' + failure + ';') + script],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Workspace user bus is not ready', result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

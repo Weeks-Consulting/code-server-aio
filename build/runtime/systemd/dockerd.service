@@ -1,0 +1,21 @@
+[Unit]
+Description=Workspace Docker daemon
+StartLimitIntervalSec=120
+StartLimitBurst=11
+StartLimitAction=exit
+
+[Service]
+Type=notify
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PassEnvironment=HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+ExecStart=/usr/sbin/dockerd --host=unix:///var/run/docker.sock --group=docker
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=2s
+TimeoutStartSec=0
+TimeoutStopSec=60s
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
