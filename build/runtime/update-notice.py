@@ -1,16 +1,14 @@
 """Serve the daily release notice over a private Unix socket."""
 
-from contextlib import closing
 from datetime import datetime, timezone
-import hashlib
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler
 import json
+import logging
 import os
 from pathlib import Path
 import re
 from socketserver import UnixStreamServer
-import sqlite3
 from string import Template
 from threading import Thread
 import time
@@ -38,51 +36,49 @@ def newer_release(repository, current):
 
 
 class Notice:
-    def __init__(self, database, page, repository, current):
-        self.database = database
+    def __init__(self, page, repository, current):
         self.page = page
         self.repository = repository
         self.current = current
         self.latest = None
-        self.database.execute('CREATE TABLE IF NOT EXISTS seen (subject TEXT PRIMARY KEY, day TEXT NOT NULL)')
+        self.check_failed = False
 
     def refresh(self):
         while True:
-            try:
-                self.latest = newer_release(self.repository, release_version(self.current))
-                delay = 3600
-            except (OSError, HTTPException, ValueError, TypeError, AttributeError):
-                self.latest = None
-                delay = 300
-            time.sleep(delay)
+            time.sleep(self.check_for_update())
 
-    def for_subject(self, subject, day):
+    def check_for_update(self):
+        try:
+            self.latest = newer_release(self.repository, release_version(self.current))
+        except (OSError, HTTPException, ValueError, TypeError, AttributeError) as error:
+            self.latest = None
+            if not self.check_failed:
+                logging.warning('AIO release check failed: %s', error)
+            self.check_failed = True
+            return 300
+        if self.check_failed:
+            logging.info('AIO release check recovered')
+            self.check_failed = False
+        return 3600
+
+    def page_for_day(self, day, dismissals=()):
         latest = self.latest
-        if not latest:
-            return None
-        # One dispatcher shares this record across both Envoy workers and all browsers.
-        subject_hash = hashlib.sha256(subject).hexdigest()
-        with self.database:
-            self.database.execute('DELETE FROM seen WHERE day < ?', (day,))
-            new = self.database.execute(
-                'INSERT OR IGNORE INTO seen (subject, day) VALUES (?, ?)', (subject_hash, day))
-        if new.rowcount:
+        if latest and f'{day}_{latest}' not in dismissals:
             url = f'https://github.com/{self.repository}/releases/tag/{latest}'
-            return self.page.substitute(current=self.current, latest=latest, release_url=url).encode()
+            return self.page.substitute(current=self.current, latest=latest, release_url=url, day=day).encode()
 
 
 class NoticeHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def do_POST(self):
-        length = self.headers.get('Content-Length', '')
-        if self.path != '/' or not length.isdecimal() or len(length) > 4 or not 0 < int(length) <= 1024:
-            self.send_error(400)
+    def do_GET(self):
+        if self.path != '/':
+            self.send_error(404)
             return
-        subject = self.rfile.read(int(length))
         day = datetime.now(timezone.utc).date().isoformat()
-        page = self.server.notice.for_subject(subject, day)
+        dismissals = self.headers.get('X-AIO-Dismissed-Notices', '').split()
+        page = self.server.notice.page_for_day(day, dismissals)
         self.send_response(200 if page else 204)
         if page:
             self.send_header('Content-Length', str(len(page)))
@@ -98,15 +94,15 @@ def main():
         return
     if not release_version(current):
         return
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     os.umask(0o077)
     socket = Path('/run/envoy/update-notice.sock')
     socket.unlink(missing_ok=True)
     with UnixStreamServer(str(socket), NoticeHandler) as server:
         page = Template(Path('/etc/envoy/pages/update-notice.html').read_text())
-        with closing(sqlite3.connect('/run/envoy/update-notice.sqlite3')) as database:
-            server.notice = Notice(database, page, repository, current)
-            Thread(target=server.notice.refresh, daemon=True).start()
-            server.serve_forever()
+        server.notice = Notice(page, repository, current)
+        Thread(target=server.notice.refresh, daemon=True).start()
+        server.serve_forever()
 
 
 if __name__ == '__main__':

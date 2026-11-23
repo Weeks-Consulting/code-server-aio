@@ -18,7 +18,9 @@
     <p>code-server-aio <strong>$latest</strong> is available. This workspace runs <strong>$current</strong>.</p>
     <p>To install the update, run <code>./manage upgrade</code> on the Docker host.</p>
     <nav>
-      <a href="">Continue to code-server</a>
+      <form method="post">
+        <button type="submit" name="aio-update-notice" value="${day}_$latest">Continue to code-server</button>
+      </form>
       <a href="$release_url" target="_blank" rel="noopener">Release notes</a>
     </nav>
   </main>

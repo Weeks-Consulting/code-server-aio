@@ -50,6 +50,7 @@ RUN apt-get update && \
         file \
         git \
         jq \
+        just \
         less \
         locales \
         openssh-client \

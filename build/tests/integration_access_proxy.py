@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import http.server
 import copy
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -193,14 +194,14 @@ class AccessProxyTests(unittest.TestCase):
         return message + '.' + b64(signature)
 
     @staticmethod
-    def response(token=None, path='/', headers=None, method='GET', source='127.0.0.1'):
+    def response(token=None, path='/', headers=None, method='GET', source='127.0.0.1', body=None):
         connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3,
                                                 source_address=(source, 0))
         request_headers = dict(headers or {})
         if token is not None:
             request_headers['Cf-Access-Jwt-Assertion'] = token
         try:
-            connection.request(method, path, headers=request_headers)
+            connection.request(method, path, body=body, headers=request_headers)
             response = connection.getresponse()
             return response.status, dict(response.getheaders()), response.read().decode()
         finally:
@@ -318,14 +319,15 @@ class AccessProxyTests(unittest.TestCase):
         self.check_health()
 
     def test_update_notice_only_intercepts_authenticated_ide_navigation(self):
-        subjects = []
+        lookups = []
+        today = datetime.now(timezone.utc).date().isoformat()
+        latest = 'v4.146.0-2'
 
         class Updates(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                subject = self.rfile.read(int(self.headers['Content-Length']))
-                seen = subject in subjects
-                subjects.append(subject)
-                body = b'Workspace update available' if not seen else b''
+            def do_GET(self):
+                lookups.append(self.path)
+                dismissals = self.headers.get('X-AIO-Dismissed-Notices', '').split()
+                body = b'' if f'{today}_{latest}' in dismissals else b'Workspace update available'
                 self.send_response(200 if body else 204)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -355,17 +357,53 @@ class AccessProxyTests(unittest.TestCase):
                 self.assertEqual(self.status(denied, headers=browser), 403)
                 self.assertEqual(self.response(alice, '/proxy/3000/', browser)[2], 'backend reached')
                 self.assertEqual(self.response(alice)[2], 'backend reached')
-                self.assertEqual(subjects, [])
+                self.assertEqual(lookups, [])
                 status, headers, body = self.response(alice, '/?folder=/home/cloud-user', browser)
                 self.assertEqual(status, 200)
                 self.assertEqual({key.lower(): value for key, value in headers.items()}['cache-control'], 'no-store')
                 self.assertEqual(body, 'Workspace update available')
-                self.assertEqual(self.response(alice, headers=browser)[2], 'backend reached')
-                self.assertEqual(subjects, [b'alice-id', b'alice-id'])
+                self.assertEqual(self.response(alice, headers=browser)[2], 'Workspace update available')
+                path_with_folder = '/?folder=/home/cloud-user'
+                form = {**browser, 'Sec-Fetch-Site': 'same-origin',
+                        'Content-Type': 'application/x-www-form-urlencoded'}
+                submission = f'aio-update-notice={today}_v4.146.0-2'
+                self.assertEqual(self.status(
+                    alice, path_with_folder, {**form, 'Sec-Fetch-Site': 'cross-site'},
+                    method='POST', body=submission), 501)
+                status, headers, _ = self.response(
+                    alice, path_with_folder, form, method='POST', body=submission)
+                self.assertEqual(status, 303)
+                headers = {key.lower(): value for key, value in headers.items()}
+                self.assertEqual(headers['location'], path_with_folder)
+                cookie = headers['set-cookie']
+                self.assertEqual(cookie, f'__Host-aio-update-notice-{today}_v4.146.0-2=1; '
+                                         'Path=/; Max-Age=86400; Secure; HttpOnly; SameSite=Lax')
+                with_cookie = {**browser, 'Cookie': 'unrelated=yes; ' + cookie.split(';', 1)[0]}
+                self.assertEqual(self.status(headers=with_cookie), 403)
+                self.assertEqual(self.response(alice, headers=with_cookie)[2], 'backend reached')
+                self.assertEqual(self.response(alice, headers=browser)[2], 'Workspace update available')
+                status, headers, _ = self.response(
+                    alice, path_with_folder, form, method='POST', body='aio-update-notice=2000-01-01_v4.146.0-2')
+                self.assertEqual(status, 303)
+                self.assertNotIn('set-cookie', {key.lower() for key in headers})
+                expired_cookie = {**browser, 'Cookie': '__Host-aio-update-notice-2000-01-01_v4.146.0-2=1'}
+                self.assertEqual(self.response(alice, headers=expired_cookie)[2], 'Workspace update available')
+                self.assertEqual(lookups, ['/'] * 5)
+                latest = 'v4.146.0-3'
+                self.assertEqual(self.response(alice, headers=with_cookie)[2], 'Workspace update available')
+                status, headers, _ = self.response(
+                    alice, path_with_folder, form, method='POST', body=f'aio-update-notice={today}_{latest}')
+                self.assertEqual(status, 303)
+                headers = {key.lower(): value for key, value in headers.items()}
+                with_cookie['Cookie'] += '; ' + headers['set-cookie'].split(';', 1)[0]
+                self.assertEqual(self.response(alice, headers=with_cookie)[2], 'backend reached')
             finally:
                 updates.shutdown()
                 worker.join()
         self.assertEqual(self.response(alice, headers=browser)[2], 'backend reached')
+        status, headers, _ = self.response(alice, path_with_folder, form, method='POST', body=submission)
+        self.assertEqual(status, 303)
+        self.assertIn('set-cookie', {key.lower() for key in headers})
 
     def test_invalid_tokens(self):
         tokens = [None, 'garbage', 'a.b.c', self.token(key=1),

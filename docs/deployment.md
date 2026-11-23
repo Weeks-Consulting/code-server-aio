@@ -139,8 +139,10 @@ a `code-server.lifecycle-owner` label.
 
 Published images check GitHub for newer stable releases in the background.
 When one is available, the first authenticated visit to the IDE each UTC day
-can show an update notice with release notes and a link to continue. The notice
-is tracked per Cloudflare Access identity across browsers on the same container.
+can show an update notice with release notes and a button to continue. Clicking
+Continue sets a first-party cookie that dismisses the release shown on that
+browser for the rest of the UTC day. A splash for a previous day or a different
+release cannot dismiss the current notice.
 Checking for updates is optional for workspace access, so GitHub outages leave
 the IDE accessible. Weekly rebuilds of the same release tag do not trigger a notice.
 
