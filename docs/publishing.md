@@ -54,7 +54,7 @@ version tag and `latest`, so both can point to new image contents without a code
 version change. Once a newer release is promoted, older version tags are no longer
 rebuilt. The installer and `manage upgrade` pin a version tag, so a deployment keeps
 receiving fixes only while its tag is the latest stable release; after a promotion, run
-`manage upgrade` and then `manage configure --pull --start`. Pin an image digest if you
+`manage upgrade`. Pin an image digest if you
 need fixed contents. To apply a rebuild to an already configured deployment, run `manage start --pull` and `sudo` if you installed with `sudo`. This first runs
 `docker compose pull` with visible progress, before taking any lifecycle or backup lock,
 then `docker compose create` and `docker compose start`: it checks the registry even when the tag is
@@ -78,12 +78,10 @@ To test a prerelease on an installed deployment:
 
 ```sh
 ./manage upgrade --version v4.141.0-1
-./manage configure --pull --start
 ```
 
-Use `sudo` if installed as root. Older installed managers need this version of
-`manage.py` before they accept `upgrade --version`; use `manage install --version`
-with the deployment's `--directory` to refresh an older installation first.
+Use `sudo` if installed as root. If an older manager only installs the release
+files, follow with `manage configure --pull --start`.
 
 Once testing is complete, open **Actions → Promote release → Run workflow** and
 select the tested tag, such as `v4.141.0-1`, in the ref selector. The workflow uses

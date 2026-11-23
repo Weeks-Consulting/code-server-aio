@@ -52,10 +52,19 @@ class LauncherTests(unittest.TestCase):
             '    args = sys.argv[1:]\n'
             '    if args[args.index("-f") + 1] == "-":\n'
             f'        os.execv({shutil.which("docker")!r}, sys.argv)\n'
-            '    model = {"name": args[args.index("--project-name") + 1] if "--project-name" in args else "example", "services": {"code-server": {"image": "test", "mem_limit": os.environ.get("CODE_SERVER_MEMORY_LIMIT"), "hostname": os.environ.get("CODE_SERVER_HOSTNAME")}}}\n'
+            '    model = {"name": args[args.index("--project-name") + 1] if "--project-name" in args else "example", "services": {"code-server": {"image": os.environ.get("CODE_SERVER_IMAGE", "test"), "mem_limit": os.environ.get("CODE_SERVER_MEMORY_LIMIT"), "hostname": os.environ.get("CODE_SERVER_HOSTNAME")}}}\n'
             '    print(os.environ.get("TEST_MODEL", json.dumps(model)))\n'
             'if sys.argv[-4:] == ["ps", "--all", "--quiet", "code-server"]: print("workspace-container")\n'
-            'if sys.argv[1:] == ["inspect", "--format", "{{.Image}}", "workspace-container"]: print("sha256:workspace-image")\n'
+            'if sys.argv[-4:-1] == ["ps", "--all", "--quiet"] and sys.argv[-1] in ("cloudflared", "backup"):\n'
+            '    print(sys.argv[-1] + "-container")\n'
+            'if sys.argv[1:] == ["inspect", "--format", "{{.Image}}", "workspace-container"]:\n'
+            '    print("sha256:new-workspace-image" if Path(os.environ["ARGUMENT_LOG"] + ".created").exists() else "sha256:workspace-image")\n'
+            'if sys.argv[1:4] == ["inspect", "--format", "{{.Image}}"]:\n'
+            '    if sys.argv[-1] == "cloudflared-container": print("sha256:" + "a" * 64)\n'
+            '    if sys.argv[-1] == "backup-container": print("sha256:" + "b" * 64)\n'
+            'if sys.argv[1:5] == ["image", "inspect", "--format", "{{.Created}}"]:\n'
+            '    print("2026-11-15T12:34:56Z")\n'
+            'if sys.argv[1:5] == ["image", "inspect", "--format", "{{json .RepoTags}}"]: print(os.environ.get("TEST_OLD_IMAGE_TAGS", "null"))\n'
             'if sys.argv[1:3] == ["create", "--name"]: print("workspace-reservation")\n'
             'if sys.argv[1:4] == ["container", "ls", "--quiet"] and "status=running" in sys.argv: print(os.environ.get("TEST_BACKUP_SIDECAR", ""))\n'
             'if sys.argv[1:2] == ["exec"] and "flock" in sys.argv:\n'
@@ -66,6 +75,8 @@ class LauncherTests(unittest.TestCase):
             'if sys.argv[1:4] == ["inspect", "--format", "{{.State.Status}}"]: print(os.environ.get("TEST_SIDECAR_STATE", "running"))\n'
             'if sys.argv[1:3] == ["image", "inspect"] and sys.argv[-1] in os.environ.get("TEST_MISSING_IMAGES", "").split(): sys.exit(1)\n'
             'if "create" in sys.argv and os.environ.get("FAIL_CREATE"): sys.exit(9)\n'
+            'if sys.argv[-2:] == ["create", "--remove-orphans"] and "TEST_OLD_IMAGE_TAGS" in os.environ:\n'
+            '    Path(os.environ["ARGUMENT_LOG"] + ".created").touch()\n'
             'if "pull" in sys.argv and os.environ.get("TEST_PULL_SLEEP"):\n'
             '    import time; time.sleep(float(os.environ["TEST_PULL_SLEEP"]))\n'
             'sys.exit(int(os.environ.get("DOCKER_EXIT", "0")))\n'
@@ -237,6 +248,31 @@ class LauncherTests(unittest.TestCase):
         self.configure('--start')
         self.assertEqual(self.calls()[-2][-2:], ['create', '--remove-orphans'])
         self.assertEqual(self.calls()[-1][-1], 'start')
+
+    def test_start_tags_pinned_sidecar_images_by_creation_date_and_id(self):
+        cloudflared = 'cloudflare/cloudflared:latest@sha256:' + 'c' * 64
+        backup = 'offen/docker-volume-backup:v2@sha256:' + 'd' * 64
+        services = {
+            'code-server': {'image': 'test'},
+            'cloudflared': {'image': cloudflared},
+            'backup': {'image': backup},
+        }
+        self.env['TEST_MODEL'] = json.dumps({'name': 'example', 'services': services})
+        self.configure()
+        self.assertFalse(any(call[:2] == ['image', 'tag'] for call in self.calls()))
+
+        for action in (('configure', '--start'), ('start',)):
+            with self.subTest(action=action):
+                before = len(self.calls())
+                result = self.run_launcher(*action)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.calls()[before:]
+                backup_start = next(i for i, call in enumerate(calls) if call[-2:] == ['start', 'backup'])
+                self.assertEqual([call for call in calls[backup_start + 1:] if call[:2] == ['image', 'tag']], [
+                    ['image', 'tag', 'sha256:' + 'a' * 64, 'cloudflare/cloudflared:2026-11-15-aaaaaaaaaaaa'],
+                    ['image', 'tag', 'sha256:' + 'b' * 64, 'offen/docker-volume-backup:2026-11-15-bbbbbbbbbbbb'],
+                ])
+                self.assertEqual(self.snapshot()['services'], services)
 
     def test_configure_waits_for_deployment_files_before_rendering(self):
         dotenv = self.deployment / '.env'
@@ -443,6 +479,20 @@ class LauncherTests(unittest.TestCase):
         dotenv.write_text("# Keep my settings\n"
                           "export CODE_SERVER_IMAGE='ghcr.io/example/fork:1.0.0'\n"
                           "SECRET=$(never-execute-this)\n")
+        previous_image = 'ghcr.io/example/fork:1.0.0'
+        saved = self.deployment / '.manage.compose.json'
+        saved.write_text(json.dumps({'name': 'previous-project', 'services': {'code-server': {'image': previous_image}}}))
+        self.env['TEST_OLD_IMAGE_TAGS'] = json.dumps([previous_image])
+        self.env['CODE_SERVER_IMAGE'] = 'unrelated-shell-override'
+        removal = ['image', 'rm', '--no-prune', 'sha256:workspace-image']
+        self.env['FAIL_CREATE'] = '1'
+        failed = self.run_launcher("upgrade")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('deployment could not be applied', failed.stderr)
+        self.assertEqual(self.snapshot()['services']['code-server']['image'], previous_image)
+        self.assertNotIn(removal, self.calls())
+        del self.env['FAIL_CREATE']
+        before = len(self.calls())
         result = self.run_launcher("upgrade")
         self.assertEqual(result.returncode, 0, result.stderr)
         text = dotenv.read_text()
@@ -451,7 +501,15 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("CODE_SERVER_IMAGE=ghcr.io/example/fork:9.0.0-1\n", text)
         self.assertEqual(dotenv.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.deployment / "compose.yaml").read_bytes(), (repository / "compose.yaml").read_bytes())
-        self.assertIn("manage configure --pull --start", result.stdout)
+        self.assertEqual(self.snapshot()['name'], 'previous-project')
+        self.assertEqual(self.snapshot()['services']['code-server']['image'], 'ghcr.io/example/fork:9.0.0-1')
+        calls = self.calls()[before:]
+        pull = next(i for i, call in enumerate(calls) if call[-2:] == ['pull', 'code-server'])
+        create = next(i for i, call in enumerate(calls) if call[-2:] == ['create', '--remove-orphans'])
+        start = next(i for i, call in enumerate(calls) if call[-1] == 'start')
+        self.assertLess(pull, create)
+        self.assertLess(create, start)
+        self.assertEqual(self.calls()[-1], removal)
         self.assertFalse((self.root / "gh-called").exists())
 
     def write_backup_configuration(self):

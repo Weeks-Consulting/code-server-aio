@@ -138,7 +138,7 @@ def env_lock(path):
 
 
 def upgrade(directory, version=None):
-    """Install the selected release's files and image together."""
+    """Install and start the selected release."""
     path = directory / ".env"
     try:
         # A checkout's deployment files are tracked source; never overwrite them.
@@ -149,7 +149,6 @@ def upgrade(directory, version=None):
             raise ValueError("Expected a regular .env file")
         repository = image_repository(path.read_text())
         version, repository = published_release(repository, version)
-        # install_files rereads .env under the lock before changing it.
         install(argparse.Namespace(directory=str(directory), repository=repository,
                                    version=version, dry_run=False), upgrade=True)
     except Exception as error:
@@ -174,7 +173,7 @@ def parser():
                     '  logs [-f|--follow]\n'
                     '      Print logs from the saved deployment; add -f to follow.\n'
                     '  upgrade [--version TAG]\n'
-                    '      Install a selected release (default: latest stable); no container changes.\n'
+                    '      Install and start a selected release (default: latest stable).\n'
                     '  backup --run | --list | --restore --archive FILE_OR_URI [--volume NAME]\n'
                     '      Run a backup, list configured archives, or restore an existing home volume.\n'
                     '  install [--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]\n'
@@ -231,10 +230,15 @@ def parser():
 CONFIGURATION = '.manage.compose.json'
 
 
-def saved_configuration(directory):
+def configuration_path(directory):
     path = directory / CONFIGURATION
     if path.is_symlink():
         fail('Expected a regular saved configuration file: ' + str(path))
+    return path
+
+
+def saved_configuration(directory):
+    path = configuration_path(directory)
     if not path.is_file():
         fail('No saved configuration. Run manage configure --start first; add --backup local or s3 if needed.')
     return json.loads(path.read_text())
@@ -311,14 +315,58 @@ def start_workspace(run, command, model):
     services = model['services']
     if 'backup' not in services:
         run(command + ['start'])
-        return
-    run(command + ['start', *(service for service in services if service != 'backup')])
-    run(command + ['start', 'backup'])
+    else:
+        run(command + ['start', *(service for service in services if service != 'backup')])
+        run(command + ['start', 'backup'])
+    tag_sidecar_images(command, services)
 
 
 def image_present(image):
     return subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', image],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def service_image_id(command, service):
+    containers = subprocess.check_output(command + ['ps', '--all', '--quiet', service], text=True).split()
+    if containers:
+        return subprocess.check_output(
+            ['docker', 'inspect', '--format', '{{.Image}}', containers[0]], text=True).strip()
+
+
+def tag_sidecar_images(command, services):
+    for service in ('cloudflared', 'backup'):
+        reference = services.get(service, {}).get('image', '')
+        name, separator, _ = reference.partition('@')
+        if not separator:
+            continue
+        repository = re.sub(r':[^/:]+$', '', name)
+        try:
+            image_id = service_image_id(command, service)
+            if not image_id:
+                continue
+            created = subprocess.check_output(
+                ['docker', 'image', 'inspect', '--format', '{{.Created}}', image_id], text=True)
+            date = re.match(r'(\d{4}-\d{2}-\d{2})T', created)
+            stamp = date[1] if date else 'pinned'
+            short_id = image_id.rsplit(':', 1)[-1][:12]
+            subprocess.run(['docker', 'image', 'tag', image_id, f'{repository}:{stamp}-{short_id}'], check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            print(f'Warning: could not tag the {service} image: {error}', file=sys.stderr)
+
+
+def remove_superseded_image(image_id, old_reference, command):
+    try:
+        current_id = service_image_id(command, 'code-server')
+        if not current_id or image_id == current_id:
+            return
+        tags = json.loads(subprocess.check_output(
+            ['docker', 'image', 'inspect', '--format', '{{json .RepoTags}}', image_id], text=True))
+        # Removing by ID can also remove a tag, so protect any other local names.
+        if tags and tags != [old_reference]:
+            return
+        subprocess.run(['docker', 'image', 'rm', '--no-prune', image_id], check=True)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f'Warning: could not remove previous workspace image {image_id}: {error}', file=sys.stderr)
 
 
 def pull_images(command, model, refresh):
@@ -376,10 +424,9 @@ def reserve_workspace(model, command, use_saved_image):
     else:
         # Use the existing container's image ID so plain start works offline
         # even if a local tag has since been moved or removed.
-        containers = subprocess.check_output(command + ['ps', '--all', '--quiet', 'code-server'], text=True).split()
-        if not containers:
+        image = service_image_id(command, 'code-server')
+        if not image:
             fail('No workspace container exists. Run manage configure --start to recreate the deployment.')
-        image = subprocess.check_output(['docker', 'inspect', '--format', '{{.Image}}', containers[0]], text=True).strip()
     owner = uuid.uuid4().hex
     handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
     received_signal = None
@@ -513,65 +560,80 @@ def validate_backup_id(model):
 
 
 def configure(args, directory):
-    path = directory / CONFIGURATION
-    if path.is_symlink():
-        fail('Expected a regular saved configuration file: ' + str(path))
+    path = configuration_path(directory)
     with env_lock(path):
-        previous = saved_configuration(directory) if path.exists() else {}
-        mode = args.backup if args.backup is not None else previous.get('x-manage-backup', 'none')
-        project = args.project_name or previous.get('name')
-        check_project_name_change(previous, project)
-        # Take the snapshot lock first, then the lock used by file replacement.
-        env = directory / '.env'
-        with env_lock(env) as lock_fd:
-            command = ['docker', 'compose', '--project-directory', str(directory), '--env-file', str(env)]
-            if project:
-                command += ['--project-name', project]
-            files = ['compose.yaml']
-            if mode != 'none':
-                files += ['compose.backup-common.yaml',
-                          'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml']
-            for name in files:
-                source = directory / name
-                if not source.is_file():
-                    fail(f'Required Compose file is missing: {source}')
-                command += ['-f', str(source)]
-            if mode == 'local':
-                os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
-            if mode != 'none':
-                subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(env),
-                                '--lock-fd', str(lock_fd)], check=True, pass_fds=(lock_fd,))
-                os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
-            host = json.loads(subprocess.check_output(['docker', 'info', '--format', '{{json .}}'], text=True))
-            total = int(host['MemTotal'])
-            if total <= 0:
-                fail('Docker did not report a positive host memory total.')
-            os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
-            os.environ['CODE_SERVER_HOSTNAME'] = host['Name']
-            model = json.loads(subprocess.check_output(command + ['config', '--format', 'json'], text=True))
-        validate_backup_id(model)
-        if args.pull:
-            warn_release(model)
-        model['x-manage-backup'] = mode
-        # Compose config escapes literal dollars for reuse as a Compose file.
-        # Keep secrets private, and publish the snapshot only after creation succeeds.
-        # The temporary snapshot holds interpolated secrets; main() makes hangups
-        # and terminations unwind so this finally block still removes it.
-        temporary = None
-        try:
-            descriptor, temporary = tempfile.mkstemp(prefix='.manage.', suffix='.json', dir=directory)
-            with os.fdopen(descriptor, 'w') as output:
-                json.dump(model, output)
-            configured = compose_command(directory, temporary)
-            pull_images(configured, model, refresh=args.pull)
-            with reserve_workspace(model, configured, use_saved_image=True) as run, reserve_backup(model):
-                run(configured + ['create', '--remove-orphans'])
-                os.replace(temporary, path)
-                if args.start:
-                    start_workspace(run, compose_command(directory, path), model)
-        finally:
-            if temporary and os.path.exists(temporary):
-                os.unlink(temporary)
+        configure_locked(args, directory, path)
+
+
+def configure_locked(args, directory, path, *, upgrade_image=None):
+    previous = saved_configuration(directory) if path.exists() else {}
+    mode = args.backup if args.backup is not None else previous.get('x-manage-backup', 'none')
+    project = args.project_name or previous.get('name')
+    check_project_name_change(previous, project)
+    # Take the snapshot lock first, then the lock used by file replacement.
+    env = directory / '.env'
+    with env_lock(env) as lock_fd:
+        command = ['docker', 'compose', '--project-directory', str(directory), '--env-file', str(env)]
+        if project:
+            command += ['--project-name', project]
+        files = ['compose.yaml']
+        if mode != 'none':
+            files += ['compose.backup-common.yaml',
+                      'compose.backup-local.yaml' if mode == 'local' else 'compose.backup.yaml']
+        for name in files:
+            source = directory / name
+            if not source.is_file():
+                fail(f'Required Compose file is missing: {source}')
+            command += ['-f', str(source)]
+        if mode == 'local':
+            os.environ.update(BACKUP_LOCAL_UID=str(os.getuid()), BACKUP_LOCAL_GID=str(os.getgid()))
+        if mode != 'none':
+            subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(env),
+                            '--lock-fd', str(lock_fd)], check=True, pass_fds=(lock_fd,))
+            os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
+        host = json.loads(subprocess.check_output(['docker', 'info', '--format', '{{json .}}'], text=True))
+        total = int(host['MemTotal'])
+        if total <= 0:
+            fail('Docker did not report a positive host memory total.')
+        os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
+        os.environ['CODE_SERVER_HOSTNAME'] = host['Name']
+        render_env = dict(os.environ, CODE_SERVER_IMAGE=upgrade_image) if upgrade_image else None
+        model = json.loads(subprocess.check_output(
+            command + ['config', '--format', 'json'], text=True, env=render_env))
+    validate_backup_id(model)
+    if args.pull and not upgrade_image:
+        warn_release(model)
+    model['x-manage-backup'] = mode
+    # Compose config escapes literal dollars for reuse as a Compose file.
+    # Keep secrets private, and publish the snapshot only after creation succeeds.
+    # The temporary snapshot holds interpolated secrets; main() makes hangups
+    # and terminations unwind so this finally block still removes it.
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix='.manage.', suffix='.json', dir=directory)
+        with os.fdopen(descriptor, 'w') as output:
+            json.dump(model, output)
+        configured = compose_command(directory, temporary)
+        pull_images(configured, model, refresh=args.pull)
+        old_image = None
+        old_reference = previous.get('services', {}).get('code-server', {}).get('image', '')
+        old_repository = re.split('[:@]', old_reference, maxsplit=1)[0]
+        with reserve_workspace(model, configured, use_saved_image=True) as run, reserve_backup(model):
+            if upgrade_image and old_repository == upgrade_image.rsplit(':', 1)[0]:
+                try:
+                    old_image = service_image_id(compose_command(directory, path), 'code-server')
+                except (OSError, subprocess.CalledProcessError) as error:
+                    print(f'Warning: could not identify the previous workspace image: {error}', file=sys.stderr)
+            run(configured + ['create', '--remove-orphans'])
+            os.replace(temporary, path)
+            if args.start:
+                saved = compose_command(directory, path)
+                start_workspace(run, saved, model)
+                if old_image:
+                    remove_superseded_image(old_image, old_reference, saved)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def warn_restore_key(directory, key):
@@ -1014,12 +1076,20 @@ def install(args, upgrade=False):
     directory.mkdir(parents=True, exist_ok=True)
     validate_destination(directory, list(files) + ['.env'])
     env = directory / '.env'
-    install_files(directory, files, template, version, image, replace_pin=upgrade)
     if upgrade:
-        print(f'\nUpgraded deployment files in {directory} to release {version}.')
-        print('Set CODE_SERVER_IMAGE=' + image)
-        print(f'Review new settings in {env}, then run manage configure --pull --start to apply the upgrade.')
+        snapshot = configuration_path(directory)
+        with env_lock(snapshot):
+            install_files(directory, files, template, version, image, replace_pin=True)
+            print(f'\nInstalled deployment files in {directory} for release {version}.')
+            print('Set CODE_SERVER_IMAGE=' + image)
+            configure_args = argparse.Namespace(backup=None, project_name=None, pull=True, start=True)
+            try:
+                configure_locked(configure_args, directory, snapshot, upgrade_image=image)
+            except Exception as error:
+                fail(f'Release files were installed, but the deployment could not be applied: {error}. '
+                     'Retry manage upgrade or run manage configure --pull --start.')
         return
+    install_files(directory, files, template, version, image)
     print(f'\nInstalled deployment files in {directory} (release {version}).')
     print(f'Edit {env} to configure Cloudflare Access and your tunnel before starting.')
     print(f'Then run sh "{directory}/manage" configure --pull --start to launch. No services have been started.')

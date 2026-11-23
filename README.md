@@ -52,7 +52,7 @@ configuration, including backup mode and project name, for later commands.
 | `./manage start [--pull]` | Start saved deployment; `--pull` refreshes images and recreates as needed. |
 | `./manage stop` | Stop containers; keep containers, networks, and volumes. |
 | `./manage logs [-f]` | Print logs; add `-f` to follow. |
-| `./manage upgrade` | Install latest release files and image setting; apply with `configure --pull --start`. |
+| `./manage upgrade` | Install and start the latest stable release, then remove the superseded workspace image if unused. |
 | `./manage install` | Install or refresh deployment files. |
 | `./manage backup --run` | Run a backup inside the configured, running backup service. |
 | `./manage backup --list` | List archives at the configured local or S3 destination. |

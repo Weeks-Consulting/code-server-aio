@@ -99,6 +99,7 @@ class InstallationTests(unittest.TestCase):
             raise AssertionError('unexpected download: ' + url)
         self.fetch = fetch
         for mock in (patch.object(management, 'dependencies'),
+                     patch.object(management, 'configure_locked'),
                      patch.object(management.os, 'geteuid', return_value=1000),
                      patch.object(management, 'download', side_effect=fetch)):
             mock.start()

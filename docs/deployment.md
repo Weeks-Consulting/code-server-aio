@@ -112,6 +112,13 @@ project name to create the saved configuration. For local backups, verify the
 directory and its marker first. For example,
 `./manage configure --backup local --project-name my-workspace --start`.
 
+When `configure --start`, `start`, or `upgrade` starts a digest-pinned
+Cloudflare or backup sidecar, it adds a local image tag such as
+`cloudflare/cloudflared:2026-11-15-aaaaaaaaaaaa`. The date comes from the
+image's creation metadata and the suffix is its short image ID. Docker uses
+the digest from the deployment configuration, and the tag makes the image
+easier to identify in `docker system df -v`.
+
 ### Interruptions
 
 `manage` treats Ctrl-C, a hangup (for example, a dropped SSH session), and `SIGTERM`
@@ -132,22 +139,25 @@ a `code-server.lifecycle-owner` label.
 
 ```sh
 ./manage upgrade
-./manage configure --pull --start
 ```
 
-`upgrade` installs the latest stable GitHub release without changing containers.
+`upgrade` installs the latest stable GitHub release, pulls the deployment images,
+then recreates and starts the deployment.
 To select a specific release, including a prerelease you want to test, use:
 
 ```sh
 ./manage upgrade --version v4.144.0-1
-./manage configure --pull --start
 ```
 
 Both modes use the repository from your configured GHCR image, verify the release bundle
 against `SHA256SUMS`, refresh release files (saving `.bak` copies), append new
 `.env` settings, and replace the image setting, including an existing digest pin.
-Review new settings, then run `configure --pull --start`; the saved backup mode and
-project name are retained. No GitHub account is needed.
+The saved backup mode and project name are retained. After the start succeeds,
+the command attempts to remove the previous workspace image by ID. Images that are
+still in use or have other tags are kept. No GitHub account is needed.
+If the files install but the deployment fails to start, retry the upgrade or run
+`./manage configure --pull --start`. Older managers that only install the release
+files still need that configure step on their first upgrade.
 In a source checkout, `upgrade` refuses to overwrite tracked files; check out the
 release tag with git and set `CODE_SERVER_IMAGE` instead.
 

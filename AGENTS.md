@@ -151,8 +151,11 @@ Do not change these without discussing it first.
   bootstrap's `manage.py`, and `install.sh`, listed under their flat asset names so
   `sha256sum -c SHA256SUMS` works on downloaded assets.
 - The default install directory is `~/code-server`, or `/opt/code-server` as root.
-- `manage upgrade` installs the new release's files together with its image and
-  replaces digest pins; it refuses to run in a source checkout.
+- `manage upgrade` installs the new release's files, replaces digest pins, and
+  pulls, recreates, and starts the deployment through the configure path. It holds
+  the snapshot lock across installation and configuration. Only after start does it
+  try to remove the previous workspace image by ID, leaving other tags and images
+  in use protected. It refuses to run in a source checkout.
 - Restores reserve one named container per volume across the whole operation.
   Stop active helpers before staging cleanup, and retain staging/rollback after
   an interrupted replacement. A stale reservation after SIGKILL requires inspection.
