@@ -71,7 +71,7 @@ Every command accepts `-h` or `--help`. Brackets mark optional arguments.
 | `stop` | No command-specific options; stop existing containers. |
 | `logs` | `[-f\|--follow]` |
 | `upgrade` | `[--version TAG]`; install selected release files and image setting (default: latest stable). |
-| `backup` | Exactly one of `--run`, `--list`, or `--restore`. `--run` requires a running backup service. `--list` lists configured local or S3 archives. `--restore --archive FILE_OR_URI --volume NAME` accepts local files and S3 URIs. |
+| `backup` | Exactly one of `--run`, `--list`, or `--restore`. `--run` requires a running backup service. `--list` lists configured local or S3 archives. `--restore --archive FILE_OR_URI [--volume NAME]` accepts local files and S3 URIs and defaults to the saved home volume. |
 | `install` | `[--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]` |
 
 Before creating containers, `configure` pulls any configured image that is missing

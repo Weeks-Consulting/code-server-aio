@@ -35,39 +35,33 @@ and the verified rollback and prints the staging path and recovery command. Furt
 interrupts during cleanup are ignored so it can finish. Each cleanup Docker call times out
 after 60 seconds.
 
-1. Identify the home volume from the saved configuration. Run this in the deployment
-   directory, with `sudo` if you installed with `sudo`:
+1. From the deployment directory, run `sh manage stop`. This uses the saved project
+   configuration and keeps the containers for `manage start`. If you already ran
+   `docker compose down`, rerun `manage configure` to recreate the containers before
+   starting them. Stop any other containers using the home volume. Use `sudo` for the
+   `manage` commands if you installed with `sudo`.
+2. Run the restore with the archive path or URI. The launcher looks up the Docker volume
+   mounted at `/home` in the configuration saved by `manage configure`. Add `--volume NAME`
+   if you want to restore into a different existing Docker volume or need to specify
+   the target for a local restore without a saved configuration.
 
    ```sh
-   python3 -c 'import json; print(json.load(open(".manage.compose.json"))["volumes"]["code-server-home"]["name"])'
+   sh manage backup --restore --archive /absolute/path/to/backup.tar.gz.gpg
    ```
 
-   It prints the volume of the project saved by `manage configure`. Do not use a bare
-   `docker compose ps`: without `-p` it can resolve a different deployment's project.
-2. Stop the stack with `sh manage stop`, which uses the saved project configuration
-   and keeps the containers for `manage start` in step 4. Do not use `docker compose down`:
-   it removes the containers, so `manage start` then fails until you rerun
-   `manage configure`. Stop any other containers using the home volume.
-3. Run the launcher with the actual volume name:
+   For S3 or R2, pass the URI from the list command.
 
    ```sh
-   sh manage backup --restore --archive /absolute/path/to/backup.tar.gz.gpg --volume code-server_code-server-home
+   sh manage backup --restore --archive 's3://my-bucket/workspace/home/backup.tar.gz.gpg'
    ```
 
-   For S3 or R2, pass the URI from the list command:
-
-   ```sh
-   sh manage backup --restore --archive 's3://my-bucket/workspace/home/backup.tar.gz.gpg' --volume code-server_code-server-home
-   ```
-
-   Run as the user that installed the deployment, with `sudo` if you installed
-   with `sudo`. For local archives, the standalone helper accepts the archive path
+   For local archives, the standalone helper accepts the archive path
    and volume as positional arguments: `sh build/tools/restore-home.sh ARCHIVE VOLUME`
    (installed deployments have `restore-home.sh` beside `manage`). For encrypted
    archives, the standalone helper requires an exported `BACKUP_GPG_PASSPHRASE`; it does
    not read `.env`. When using `sudo`, the launcher reads `.env` as root; to use an
    exported older key on Debian, pass it with `sudo --preserve-env=BACKUP_GPG_PASSPHRASE sh ...`.
-4. Restart with `manage start` and verify files, extensions,
+3. Restart with `manage start` and verify files, extensions,
    Homebrew, and sign-in. The volume name stays unchanged; no Compose override is needed.
 
 The target volume must already exist and have no running containers attached.

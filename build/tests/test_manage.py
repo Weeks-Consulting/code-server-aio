@@ -779,7 +779,7 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher("--help")
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage:", result.stdout)
-        self.assertIn('backup --run | --list | --restore --archive FILE_OR_URI --volume NAME', result.stdout)
+        self.assertIn('backup --run | --list | --restore --archive FILE_OR_URI [--volume NAME]', result.stdout)
         self.assertFalse(self.log.exists())
 
     def test_docker_exit_status(self):
@@ -896,6 +896,18 @@ class LauncherTests(unittest.TestCase):
                 self.assertNotIn(saved_key, result.stderr)
                 self.assertNotIn(key, result.stderr)
 
+    def test_restore_requires_explicit_volume_when_home_is_a_bind_mount(self):
+        (self.deployment / '.manage.compose.json').write_text(json.dumps({
+            'services': {'code-server': {'volumes': [
+                {'type': 'bind', 'source': '/srv/home', 'target': '/home'},
+            ]}},
+            'volumes': {'code-server-home': {'name': 'unused-home'}},
+        }))
+        result = self.run_launcher('backup', '--restore', '--archive', 'saved.tar.gz')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Use --volume NAME', result.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_restore_rejects_invalid_key_before_using_docker(self):
         archive = self.root / 'saved.tar.gz.gpg'
         archive.touch()
@@ -906,7 +918,8 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
     def test_missing_configuration_explains_setup(self):
-        for args in (('start',), ('start', '--pull'), ('stop',), ('logs',), ('backup', '--run'), ('backup', '--list')):
+        for args in (('start',), ('start', '--pull'), ('stop',), ('logs',), ('backup', '--run'),
+                     ('backup', '--list'), ('backup', '--restore', '--archive', 'saved.tar.gz')):
             result = self.run_launcher(*args)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('manage configure --start', result.stderr)
@@ -937,11 +950,19 @@ class LauncherTests(unittest.TestCase):
 
     def s3_fixture(self):
         (self.deployment / '.manage.compose.json').write_text(json.dumps({
-            'name': 'example', 'x-manage-backup': 's3', 'services': {'backup': {'environment': {
-                'AWS_ENDPOINT': 'account.eu.r2.cloudflarestorage.com',
-                'AWS_S3_BUCKET_NAME': 'store', 'AWS_S3_PATH': 'example/home/',
-                'AWS_ACCESS_KEY_ID': 'saved-id', 'AWS_SECRET_ACCESS_KEY': 'saved-secret',
-            }}}}))
+            'name': 'example', 'x-manage-backup': 's3',
+            'services': {
+                'code-server': {'volumes': [
+                    {'type': 'volume', 'source': 'workspace-home', 'target': '/home'},
+                ]},
+                'backup': {'environment': {
+                    'AWS_ENDPOINT': 'account.eu.r2.cloudflarestorage.com',
+                    'AWS_S3_BUCKET_NAME': 'store', 'AWS_S3_PATH': 'example/home/',
+                    'AWS_ACCESS_KEY_ID': 'saved-id', 'AWS_SECRET_ACCESS_KEY': 'saved-secret',
+                }},
+            },
+            'volumes': {'workspace-home': {'name': 'custom-docker-home'}},
+        }))
         aws = self.root / 'aws'
         aws.write_text(textwrap.dedent(f"""\
             #!{sys.executable}
@@ -998,6 +1019,8 @@ class LauncherTests(unittest.TestCase):
 
             assert 'CODE_SERVER_AIO_S3_RESTORE_SETTINGS' not in os.environ
             args = sys.argv[1:]
+            if args[:2] == ['volume', 'inspect']:
+                assert args[2:] == ['custom-docker-home']
             if args[0] == 'create':
                 print('owned-reservation')
             if args[0] == 'exec':
@@ -1014,7 +1037,7 @@ class LauncherTests(unittest.TestCase):
         self.env.pop('BACKUP_GPG_PASSPHRASE', None)
         uri = 's3://store/old-prefix/an archive.tar.gz'
         self.env.update(TEST_S3_URI=uri, TEST_S3_BYTES=str(payload))
-        args = ('backup', '--restore', '--archive', uri, '--volume', 'home')
+        args = ('backup', '--restore', '--archive', uri)
         rejected = self.run_launcher('backup', '--restore', '--archive',
                                      's3://wrong/an archive.tar.gz', '--volume', 'home')
         self.assertNotEqual(rejected.returncode, 0)
@@ -1065,7 +1088,6 @@ class LauncherTests(unittest.TestCase):
 
     def test_restore_options_require_restore_action(self):
         for args in (('backup', '--restore'),
-                     ('backup', '--restore', '--archive', 'saved.tar.gz'),
                      ('backup', '--restore', '--volume', 'home'),
                      ('backup', '--run', '--archive', 'saved.tar.gz'),
                      ('backup', '--list', '--volume', 'home')):

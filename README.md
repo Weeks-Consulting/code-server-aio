@@ -56,7 +56,7 @@ configuration, including backup mode and project name, for later commands.
 | `./manage install` | Install or refresh deployment files. |
 | `./manage backup --run` | Run a backup inside the configured, running backup service. |
 | `./manage backup --list` | List archives at the configured local or S3 destination. |
-| `./manage backup --restore --archive FILE_OR_URI --volume NAME` | Restore from a local file or stream an S3 archive into an existing home volume. |
+| `./manage backup --restore --archive FILE_OR_URI [--volume NAME]` | Restore a local or S3 archive into the deployment's home volume by default. |
 | `./manage --help` | Show every command and its applicable options. |
 
 See the [command option reference](docs/deployment.md#command-option-reference) for

@@ -175,7 +175,7 @@ def parser():
                     '      Print logs from the saved deployment; add -f to follow.\n'
                     '  upgrade [--version TAG]\n'
                     '      Install a selected release (default: latest stable); no container changes.\n'
-                    '  backup --run | --list | --restore --archive FILE_OR_URI --volume NAME\n'
+                    '  backup --run | --list | --restore --archive FILE_OR_URI [--volume NAME]\n'
                     '      Run a backup, list configured archives, or restore an existing home volume.\n'
                     '  install [--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]\n'
                     '      Install or refresh deployment files; no services started.\n'
@@ -188,7 +188,7 @@ def parser():
                '  manage logs -f                                 Follow service logs\n'
                '  manage backup --run                            Run a backup now\n'
                '  manage backup --list                           List configured archives\n'
-               '  manage backup --restore --archive FILE_OR_URI --volume NAME\n\n'
+               '  manage backup --restore --archive FILE_OR_URI\n\n'
                'configure reads .env and Compose files beside manage and saves a private configuration.\n'
                'Later commands use that saved configuration, including backup mode and project name.\n'
                'Run configure again to apply changes. If installed with sudo, run with sudo.')
@@ -211,10 +211,11 @@ def parser():
     actions.add_argument('--list', dest='backup_action', action='store_const', const='list',
                          help='List archives from the configured local or S3 backup destination')
     actions.add_argument('--restore', dest='backup_action', action='store_const', const='restore',
-                         help='Restore an existing home volume; requires --archive and --volume')
+                         help='Restore an existing home volume; requires --archive')
     backup.add_argument('--archive', metavar='FILE_OR_URI',
                         help='Local path or s3:// URI for --restore (.tar.gz or .tar.gz.gpg)')
-    backup.add_argument('--volume', metavar='NAME', help='Existing home volume to replace with --restore')
+    backup.add_argument('--volume', metavar='NAME',
+                        help='Override the saved Docker home volume for --restore')
     install = result.add_argument_group('install options')
     install.add_argument('--directory', metavar='PATH', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
     install.add_argument('--repository', metavar='OWNER/REPO', help='GitHub repository (default: Weeks-Consulting/code-server-aio)')
@@ -352,13 +353,18 @@ def find_owned_reservation(name, owner):
 LIFECYCLE_STOP_TIMEOUT = 60
 
 
+def home_volume(model, default_key=None):
+    workspace = model.get('services', {}).get('code-server', {})
+    volume_key = next((mount['source'] for mount in workspace.get('volumes', [])
+                       if mount['type'] == 'volume' and mount['target'] == '/home'), default_key)
+    return model.get('volumes', {}).get(volume_key)
+
+
 @contextmanager
 def reserve_workspace(model, command, use_saved_image):
     """Yield a runner for lifecycle commands while holding the volume reservation."""
     workspace = model['services']['code-server']
-    volume_key = next((mount['source'] for mount in workspace.get('volumes', [])
-                       if mount['type'] == 'volume' and mount['target'] == '/home'), 'code-server-home')
-    volume = model.get('volumes', {}).get(volume_key)
+    volume = home_volume(model, default_key='code-server-home')
     if volume is None:
         yield run_checked
         return
@@ -667,9 +673,17 @@ def manage(args, directory):
         remote = args.archive.startswith('s3://')
         archive = args.archive if remote else os.path.abspath(args.archive)
         restore = helper(directory, 'restore-home.sh')
+        volume = args.volume
+        if remote or volume is None:
+            model = saved_configuration(directory)
         if remote:
-            settings = s3_settings(saved_configuration(directory))
+            settings = s3_settings(model)
             validate_s3_archive(settings, archive)
+        if volume is None:
+            volume = (home_volume(model) or {}).get('name')
+            if not isinstance(volume, str) or not volume.strip():
+                fail('Cannot find a named Docker volume mounted at /home in the saved configuration. '
+                     'Use --volume NAME to select an existing Docker volume.')
         if archive.endswith('.gpg') and not os.environ.get('BACKUP_GPG_PASSPHRASE'):
             if not (directory / '.env').is_file():
                 fail('Restore requires BACKUP_GPG_PASSPHRASE or the original .env encryption key.')
@@ -683,7 +697,7 @@ def manage(args, directory):
             os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(restore_key)['services']['restore-key']['environment'][
                 'BACKUP_GPG_PASSPHRASE']
             warn_restore_key(directory, os.environ['BACKUP_GPG_PASSPHRASE'])
-        command = ['sh', str(restore), archive, args.volume]
+        command = ['sh', str(restore), archive, volume]
         if remote:
             os.environ[S3_RESTORE_SETTINGS] = json.dumps(settings)
             os.chdir(directory)
@@ -1028,8 +1042,8 @@ def validate_args(args):
     if args.action != 'backup' and args.backup_action is not None:
         fail('--run, --list, and --restore are only supported by backup')
     if args.action == 'backup' and args.backup_action == 'restore':
-        if not args.archive or not args.volume:
-            fail('backup --restore requires --archive FILE_OR_URI and --volume NAME')
+        if not args.archive:
+            fail('backup --restore requires --archive FILE_OR_URI')
     elif args.archive or args.volume:
         fail('--archive and --volume are only supported by backup --restore')
 
