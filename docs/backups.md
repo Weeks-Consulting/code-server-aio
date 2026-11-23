@@ -122,6 +122,10 @@ prefix; `BACKUP_AWS_S3_BUCKET_LOOKUP` controls addressing (`auto`, `path`, or `d
 For R2, use your account's R2 endpoint and S3 credentials; `auto` normally works,
 or use `path` explicitly.
 
+With the AWS CLI installed, `./manage backup --list` lists the configured prefix and
+prints an `s3://` URI for each archive. Use one of those URIs to
+[restore directly from S3 or R2](restore.md).
+
 Use all three `-f` options for subsequent commands, including `down`. To disable backups:
 
 ```sh

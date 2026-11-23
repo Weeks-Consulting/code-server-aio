@@ -6,6 +6,7 @@ exec python3 - "$@" <<'PYTHON'
 import contextlib
 import os
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -23,7 +24,8 @@ def interrupted(signum, frame):
 
 
 for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-    signal.signal(signum, interrupted)
+    if signal.getsignal(signum) != signal.SIG_IGN:
+        signal.signal(signum, interrupted)
 
 
 def run(*arguments, **kwargs):
@@ -38,16 +40,26 @@ def sync_directory(path):
         os.close(descriptor)
 
 
-if len(sys.argv) != 3:
+remote = len(sys.argv) == 4 and sys.argv[1].startswith('s3://')
+if len(sys.argv) != 3 and not remote:
     sys.exit('Usage: sh restore-home.sh ARCHIVE.tar.gz[.gpg] EXISTING_VOLUME')
-archive = Path(sys.argv[1]).resolve()
+source = sys.argv[1]
+archive = None if remote else Path(source).resolve()
 volume = sys.argv[2]
-if not archive.is_file():
+if archive is not None and not archive.is_file():
     sys.exit('Archive does not exist or is not a regular file: ' + str(archive))
+if remote:
+    # Reuse the same client and saved settings as manage backup --list.
+    spec = importlib.util.spec_from_file_location('backup_management', sys.argv[3])
+    management = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(management)
+    settings = json.loads(os.environ.pop(management.S3_RESTORE_SETTINGS))
+    if not shutil.which('aws'):
+        sys.exit('Install the AWS CLI to list or restore S3 backups.')
 if ',' in volume:
     sys.exit('Volume names must not contain commas')
 key = os.environ.get('BACKUP_GPG_PASSPHRASE', '')
-encrypted = archive.name.endswith('.gpg')
+encrypted = (archive.name if archive is not None else source).endswith('.gpg')
 if encrypted and not key:
     sys.exit('Encrypted restore requires the original BACKUP_GPG_PASSPHRASE (manage reads it from .env).')
 if key and not re.fullmatch(r'[0-9a-f]{64}', key):
@@ -60,14 +72,14 @@ try:
         sys.exit('Stop all containers using ' + volume + ' before restoring (use manage stop).')
 except (OSError, subprocess.CalledProcessError) as error:
     sys.exit('Cannot inspect restore volume; check its name and Docker access: ' + str(error))
-parent = archive.parent
-if archive.name in ('original-home.tar.gz', 'original-home.tar.gz.gpg'):
+parent = archive.parent if archive is not None else Path.cwd()
+if archive is not None and archive.name in ('original-home.tar.gz', 'original-home.tar.gz.gpg'):
     while re.fullmatch(r'pre-restore\.[A-Za-z0-9_]{8}', parent.name):
         parent = parent.parent
 try:
     rollback = Path(tempfile.mkdtemp(prefix='pre-restore.', dir=parent))
 except OSError as error:
-    sys.exit('Cannot create rollback directory beside archive; copy the archive to a writable folder: ' + str(error))
+    sys.exit(f'Cannot create rollback directory in {parent}: {error}')
 os.chmod(rollback, 0o700)
 name = 'original-home.tar.gz' + ('.gpg' if key else '')
 partial = rollback / ('.' + name + '.partial')
@@ -174,19 +186,26 @@ try:
             test "$(find "$root/backup" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1
         '''
         extraction_attempted = True
-        if encrypted:
-            decrypt = gpg(['--decrypt', str(archive)], stdout=subprocess.PIPE)
-            try:
-                extraction = helper(extract, stdin=decrypt.stdout)
-            except BaseException:
-                decrypt.stdout.close()
-                decrypt.wait()
-                raise
-            decrypt.stdout.close()
-            finish([extraction, decrypt])
-        else:
-            with archive.open('rb') as source:
-                finish([helper(extract, stdin=source)])
+        with contextlib.ExitStack() as inputs:
+            readers = []
+            if remote:
+                command, env = inputs.enter_context(management.s3_cli(settings))
+                download = spawn(command + ['s3', 'cp', source, '-', '--only-show-errors'],
+                                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+                readers.append(download)
+                stream = inputs.enter_context(download.stdout)
+            else:
+                stream = inputs.enter_context(archive.open('rb'))
+            if encrypted:
+                decrypt = gpg(['--decrypt'], stdin=stream, stdout=subprocess.PIPE)
+                readers.append(decrypt)
+                stream.close()
+                stream = inputs.enter_context(decrypt.stdout)
+            extraction = helper(extract, stdin=stream)
+            stream.close()
+            # A complete-looking tar can arrive before a transfer or authentication
+            # failure. Every stage must succeed before creating the rollback.
+            finish([extraction, *reversed(readers)])
         # Exclude staging from the rollback while preserving scheduled-backup layout.
         backup_script = '''
             tar -czp --numeric-owner --exclude="./$STAGE" \
@@ -233,7 +252,7 @@ try:
         ''')])
         restored = True
     print('Restored ' + volume + '. Restart the deployment with its usual launch options.')
-except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
     sys.exit('Restore failed: ' + str(error))
 finally:
     # A repeated interrupt must not abandon cleanup midway; each Docker call is bounded.

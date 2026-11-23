@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import signal
@@ -174,8 +175,8 @@ def parser():
                     '      Print logs from the saved deployment; add -f to follow.\n'
                     '  upgrade [--version TAG]\n'
                     '      Install a selected release (default: latest stable); no container changes.\n'
-                    '  backup --run | --list | --restore --archive FILE --volume NAME\n'
-                    '      Run a backup, list local archives, or restore an existing home volume.\n'
+                    '  backup --run | --list | --restore --archive FILE_OR_URI --volume NAME\n'
+                    '      Run a backup, list configured archives, or restore an existing home volume.\n'
                     '  install [--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]\n'
                     '      Install or refresh deployment files; no services started.\n'
                     '  All commands accept -h or --help.',
@@ -186,8 +187,8 @@ def parser():
                '  manage start                                   Resume existing containers\n'
                '  manage logs -f                                 Follow service logs\n'
                '  manage backup --run                            Run a backup now\n'
-               '  manage backup --list                           List local archives\n'
-               '  manage backup --restore --archive FILE --volume NAME\n\n'
+               '  manage backup --list                           List configured archives\n'
+               '  manage backup --restore --archive FILE_OR_URI --volume NAME\n\n'
                'configure reads .env and Compose files beside manage and saves a private configuration.\n'
                'Later commands use that saved configuration, including backup mode and project name.\n'
                'Run configure again to apply changes. If installed with sudo, run with sudo.')
@@ -208,10 +209,11 @@ def parser():
     actions.add_argument('--run', dest='backup_action', action='store_const', const='run',
                          help='Run a backup inside the configured, running backup service')
     actions.add_argument('--list', dest='backup_action', action='store_const', const='list',
-                         help='List archives from the configured local backup destination')
+                         help='List archives from the configured local or S3 backup destination')
     actions.add_argument('--restore', dest='backup_action', action='store_const', const='restore',
                          help='Restore an existing home volume; requires --archive and --volume')
-    backup.add_argument('--archive', metavar='FILE', help='Archive for --restore (.tar.gz or .tar.gz.gpg)')
+    backup.add_argument('--archive', metavar='FILE_OR_URI',
+                        help='Local path or s3:// URI for --restore (.tar.gz or .tar.gz.gpg)')
     backup.add_argument('--volume', metavar='NAME', help='Existing home volume to replace with --restore')
     install = result.add_argument_group('install options')
     install.add_argument('--directory', metavar='PATH', help='Installation directory (default: ~/code-server, or /opt/code-server as root)')
@@ -577,24 +579,116 @@ def warn_restore_key(directory, key):
               'BACKUP_GPG_PASSPHRASE set to the GPG_PASSPHRASE value from the saved configuration.', file=sys.stderr)
 
 
+S3_RESTORE_SETTINGS = 'CODE_SERVER_AIO_S3_RESTORE_SETTINGS'
+S3_ARCHIVE_SUFFIXES = ('.tar.gz', '.tar.gz.gpg')
+S3_SETTINGS = ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_ENDPOINT',
+               'AWS_ENDPOINT_PROTO', 'AWS_S3_BUCKET_NAME', 'AWS_S3_BUCKET_LOOKUP',
+               'AWS_S3_PATH')
+
+
+def s3_settings(model):
+    if model.get('x-manage-backup') != 's3':
+        raise ValueError('S3 backup commands require configured S3 backups.')
+    env = model.get('services', {}).get('backup', {}).get('environment', {})
+    if not all(env.get(name) for name in
+               ('AWS_S3_BUCKET_NAME', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY')):
+        raise ValueError('Saved S3 backup settings are incomplete. Run manage configure --backup s3.')
+    return {name: env[name] for name in S3_SETTINGS if name in env}
+
+
+def validate_s3_archive(settings, archive):
+    bucket, _, key = archive[len('s3://'):].partition('/')
+    if bucket != settings['AWS_S3_BUCKET_NAME'] or not key.endswith(S3_ARCHIVE_SUFFIXES):
+        raise ValueError('Use an s3:// URI with the configured bucket and a .tar.gz or .tar.gz.gpg object key.')
+
+
+@contextmanager
+def s3_cli(settings):
+    aws = shutil.which('aws')
+    if aws is None:
+        raise ValueError('Install the AWS CLI to list or restore S3 backups.')
+    endpoint = settings.get('AWS_ENDPOINT', 's3.amazonaws.com')
+    protocol = settings.get('AWS_ENDPOINT_PROTO', 'https')
+    region = 'us-east-1'
+    if endpoint.lower().endswith('.r2.cloudflarestorage.com'):
+        region = 'auto'
+    elif regional := re.fullmatch(r's3[.-]([a-z]{2}(?:-[a-z]+)+-\d+)\.amazonaws\.com(?:\.cn)?', endpoint):
+        region = regional[1]
+
+    # Offen uses path-style addressing by default for R2 and custom endpoints.
+    lookup = settings.get('AWS_S3_BUCKET_LOOKUP', 'auto')
+    virtual_endpoints = ('.amazonaws.com', '.amazonaws.com.cn', '.aliyuncs.com')
+    if lookup == 'auto' and endpoint != 'storage.googleapis.com' and not endpoint.endswith(virtual_endpoints):
+        lookup = 'path'
+    style = {'path': 'path', 'dns': 'virtual', 'virtual': 'virtual', 'auto': 'auto'}.get(lookup)
+    if style is None or protocol not in ('https', 'http'):
+        raise ValueError('Unsupported S3 bucket lookup style or endpoint protocol in saved configuration.')
+
+    command = [aws, '--region', region]
+    # Let the SDK discover the bucket's region when using the standard AWS endpoint.
+    if (protocol, endpoint) != ('https', 's3.amazonaws.com'):
+        command += ['--endpoint-url', f'{protocol}://{endpoint}']
+    env = {name: value for name, value in os.environ.items() if not name.startswith('AWS_')}
+    env.pop('BACKUP_GPG_PASSPHRASE', None)
+    with tempfile.TemporaryDirectory(prefix='manage-s3-') as directory:
+        config = Path(directory) / 'config'
+        config.write_text(f'[default]\ns3 =\n    addressing_style = {style}\n', encoding='utf-8')
+        env.update(AWS_CONFIG_FILE=str(config), AWS_SHARED_CREDENTIALS_FILE=os.devnull,
+                   AWS_ACCESS_KEY_ID=settings['AWS_ACCESS_KEY_ID'],
+                   AWS_SECRET_ACCESS_KEY=settings['AWS_SECRET_ACCESS_KEY'],
+                   AWS_EC2_METADATA_DISABLED='true', AWS_PAGER='', AWS_CLI_AUTO_PROMPT='off',
+                   AWS_RESPONSE_CHECKSUM_VALIDATION='when_required')
+        yield command, env
+
+
+def list_s3_archives(settings):
+    bucket = settings['AWS_S3_BUCKET_NAME']
+    prefix = posixpath.normpath(settings.get('AWS_S3_PATH', ''))
+    # Go's path.Join (used by Offen) collapses consecutive leading slashes.
+    if prefix.startswith('//'):
+        prefix = prefix[1:]
+    if prefix == '.':
+        prefix = ''
+    if prefix and not prefix.endswith('/'):
+        prefix += '/'
+    with s3_cli(settings) as (command, env):
+        result = subprocess.check_output(command + [
+            's3api', 'list-objects-v2', '--output', 'json', '--bucket', bucket,
+            '--prefix=' + prefix], env=env)
+    objects = json.loads(result).get('Contents', [])
+    for item in sorted(objects, key=lambda entry: entry['LastModified'], reverse=True):
+        key = item['Key']
+        if key.endswith(S3_ARCHIVE_SUFFIXES):
+            print(f"{item['LastModified']}  {item['Size']:>12}  s3://{bucket}/{key}")
+
+
 def manage(args, directory):
     if args.action == 'backup' and args.backup_action == 'restore':
-        archive = os.path.abspath(args.archive)
+        remote = args.archive.startswith('s3://')
+        archive = args.archive if remote else os.path.abspath(args.archive)
         restore = helper(directory, 'restore-home.sh')
+        if remote:
+            settings = s3_settings(saved_configuration(directory))
+            validate_s3_archive(settings, archive)
         if archive.endswith('.gpg') and not os.environ.get('BACKUP_GPG_PASSPHRASE'):
             if not (directory / '.env').is_file():
                 fail('Restore requires BACKUP_GPG_PASSPHRASE or the original .env encryption key.')
             env = dict(os.environ)
             env.pop('BACKUP_GPG_PASSPHRASE', None)
-            settings = subprocess.check_output([
+            restore_key = subprocess.check_output([
                 'docker', 'compose', '--project-directory', str(directory),
                 '--env-file', str(directory / '.env'), '-f', '-', 'config', '--format', 'json'],
                 input='services:\n  restore-key:\n    image: unused\n    environment:\n      BACKUP_GPG_PASSPHRASE: ${BACKUP_GPG_PASSPHRASE:?Restore requires the original BACKUP_GPG_PASSPHRASE in .env}\n',
                 text=True, env=env)
-            os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(settings)['services']['restore-key']['environment'][
+            os.environ['BACKUP_GPG_PASSPHRASE'] = json.loads(restore_key)['services']['restore-key']['environment'][
                 'BACKUP_GPG_PASSPHRASE']
             warn_restore_key(directory, os.environ['BACKUP_GPG_PASSPHRASE'])
-        os.execvp('sh', ['sh', str(restore), archive, args.volume])
+        command = ['sh', str(restore), archive, args.volume]
+        if remote:
+            os.environ[S3_RESTORE_SETTINGS] = json.dumps(settings)
+            os.chdir(directory)
+            command.append(str(directory / 'manage.py'))
+        os.execvp('sh', command)
     os.chdir(directory)
     if args.action in ('upgrade', 'configure'):
         if not (directory / '.env').is_file():
@@ -636,8 +730,11 @@ def manage(args, directory):
         # Scheduled and manual runs must share the sidecar's filesystem lock.
         command += ['exec', '-T', 'backup', 'backup']
     elif args.action == 'backup' and args.backup_action == 'list':
+        if model.get('x-manage-backup') == 's3':
+            list_s3_archives(s3_settings(model))
+            return
         if model.get('x-manage-backup') != 'local':
-            fail('backup --list requires configured local backups; use your storage provider to list S3 archives.')
+            fail('backup --list requires configured local or S3 backups.')
         command += ['run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'backup', '-ec',
                     r'find /archive -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.tar.gz.gpg" \) -exec ls -lh {} \;']
     os.execvp(command[0], command)
@@ -932,7 +1029,7 @@ def validate_args(args):
         fail('--run, --list, and --restore are only supported by backup')
     if args.action == 'backup' and args.backup_action == 'restore':
         if not args.archive or not args.volume:
-            fail('backup --restore requires --archive FILE and --volume NAME')
+            fail('backup --restore requires --archive FILE_OR_URI and --volume NAME')
     elif args.archive or args.volume:
         fail('--archive and --volume are only supported by backup --restore')
 

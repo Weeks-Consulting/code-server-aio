@@ -16,7 +16,7 @@
     }
   },
   "images": {
-    "cloudflare/cloudflared:latest": "e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d",
+    "cloudflare/cloudflared:latest": "55c7e3e8d89d5e8d20b75a82f3602cbf98e06db406e73e282073cfdc5a9a3af6",
     "offen/docker-volume-backup:v2": "06fccb4c6ff79c4d5e4a839ace17c174da82a9327f43594f8a2c6a15f43bc660",
     "debian:13-slim": "a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2"
   },

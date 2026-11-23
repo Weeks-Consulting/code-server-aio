@@ -71,7 +71,7 @@ Every command accepts `-h` or `--help`. Brackets mark optional arguments.
 | `stop` | No command-specific options; stop existing containers. |
 | `logs` | `[-f\|--follow]` |
 | `upgrade` | `[--version TAG]`; install selected release files and image setting (default: latest stable). |
-| `backup` | Exactly one of `--run`, `--list`, or `--restore`. `--run` requires configured, running local or S3 backups; `--list` requires configured local backups; `--restore` requires `--archive FILE --volume NAME`. |
+| `backup` | Exactly one of `--run`, `--list`, or `--restore`. `--run` requires a running backup service. `--list` lists configured local or S3 archives. `--restore --archive FILE_OR_URI --volume NAME` accepts local files and S3 URIs. |
 | `install` | `[--directory PATH] [--repository OWNER/REPO] [--version TAG] [--dry-run]` |
 
 Before creating containers, `configure` pulls any configured image that is missing
@@ -167,8 +167,9 @@ the running backup service and share its exclusive lock with scheduled runs.
 They fail if it is stopped. After changing backup settings or the encryption key
 in `.env`, run `configure --start` before taking a backup.
 
-`backup --list` lists local archives with sizes and modification times. Browse S3 or R2
-archives with your storage provider's console or CLI.
+`backup --list` shows archives with sizes and modification times. For S3 or R2 it
+prints an `s3://` URI for each archive that you can pass to `backup --restore --archive`.
+Install the AWS CLI to use these commands for S3 or R2. They use the saved deployment settings.
 See [backups](backups.md) for scheduling and retention, and [restore](restore.md)
 for volume selection, encryption keys, validation, and rollback.
 

@@ -158,6 +158,10 @@ Do not change these without discussing it first.
   an interrupted replacement. A stale reservation after SIGKILL requires inspection.
   Reject a new restore while staging from a previous restore remains. Operators
   inspect and remove the reported staging directories before retrying.
+- S3 listing and restore use the saved backup settings with the host AWS CLI.
+  Stream remote archives into the standard restore staging directory and wait for
+  transfer, decryption, and extraction to succeed before touching original files.
+  Save the verified rollback in the deployment directory for remote restores.
 - Lifecycle commands share the restore reservation name. Use the invocation's
   owner label to resolve interrupted acquisition and remove by container ID.
   Retain and report the reservation if a Docker lifecycle operation may still be running.

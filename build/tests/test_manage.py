@@ -779,7 +779,7 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher("--help")
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage:", result.stdout)
-        self.assertIn('backup --run | --list | --restore --archive FILE --volume NAME', result.stdout)
+        self.assertIn('backup --run | --list | --restore --archive FILE_OR_URI --volume NAME', result.stdout)
         self.assertFalse(self.log.exists())
 
     def test_docker_exit_status(self):
@@ -932,8 +932,109 @@ class LauncherTests(unittest.TestCase):
         before = len(self.calls())
         result = self.run_launcher('backup', '--list')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('storage provider', result.stderr)
+        self.assertIn('Saved S3 backup settings are incomplete', result.stderr)
         self.assertEqual(len(self.calls()), before)
+
+    def s3_fixture(self):
+        (self.deployment / '.manage.compose.json').write_text(json.dumps({
+            'name': 'example', 'x-manage-backup': 's3', 'services': {'backup': {'environment': {
+                'AWS_ENDPOINT': 'account.eu.r2.cloudflarestorage.com',
+                'AWS_S3_BUCKET_NAME': 'store', 'AWS_S3_PATH': 'example/home/',
+                'AWS_ACCESS_KEY_ID': 'saved-id', 'AWS_SECRET_ACCESS_KEY': 'saved-secret',
+            }}}}))
+        aws = self.root / 'aws'
+        aws.write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json
+            import os
+            from pathlib import Path
+            import sys
+
+            args = sys.argv[1:]
+            assert args[:4] == ['--region', 'auto', '--endpoint-url',
+                                'https://account.eu.r2.cloudflarestorage.com']
+            assert os.environ['AWS_ACCESS_KEY_ID'] == 'saved-id'
+            assert os.environ['AWS_SECRET_ACCESS_KEY'] == 'saved-secret'
+            assert 'AWS_PROFILE' not in os.environ
+            assert 'BACKUP_GPG_PASSPHRASE' not in os.environ
+            config = Path(os.environ['AWS_CONFIG_FILE'])
+            assert 'addressing_style = path' in config.read_text()
+            Path(os.environ['ARGUMENT_LOG'] + '.aws').write_text(str(config))
+            if args[4] == 's3api':
+                assert args[5:] == ['list-objects-v2', '--output', 'json', '--bucket',
+                                    'store', '--prefix=example/home/']
+                print(json.dumps({{'Contents': [
+                    {{'Key': 'example/home/older.tar.gz', 'LastModified': '2026-01-01', 'Size': 12}},
+                    {{'Key': 'example/home/notes.txt', 'LastModified': '2026-03-01', 'Size': 8}},
+                    {{'Key': 'example/home/newer.tar.gz.gpg', 'LastModified': '2026-02-01', 'Size': 24}},
+                ]}}))
+            else:
+                assert args[4:] == ['s3', 'cp', os.environ['TEST_S3_URI'], '-', '--only-show-errors']
+                sys.stdout.buffer.write(Path(os.environ['TEST_S3_BYTES']).read_bytes())
+                sys.exit(int(os.environ.get('TEST_S3_EXIT', '0')))
+            """))
+        aws.chmod(0o755)
+        self.env.update(AWS_ACCESS_KEY_ID='ignored-id', AWS_PROFILE='ignored-profile')
+
+    def test_list_s3_backups_uses_saved_settings(self):
+        self.s3_fixture()
+        result = self.run_launcher('backup', '--list')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([line.split()[-1] for line in result.stdout.splitlines()], [
+            's3://store/example/home/newer.tar.gz.gpg', 's3://store/example/home/older.tar.gz'])
+        self.assertFalse(self.log.exists())
+        self.assertFalse(Path(Path(str(self.log) + '.aws').read_text()).parent.exists())
+
+    def test_s3_restore_checks_download_before_replacing(self):
+        self.s3_fixture()
+        payload = self.root / 'download-bytes'
+        payload.write_bytes(b'archive bytes')
+        docker = self.root / 'docker'
+        docker.write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import os
+            from pathlib import Path
+            import sys
+
+            assert 'CODE_SERVER_AIO_S3_RESTORE_SETTINGS' not in os.environ
+            args = sys.argv[1:]
+            if args[0] == 'create':
+                print('owned-reservation')
+            if args[0] == 'exec':
+                script = args[-1]
+                if 'tar -xzp' in script:
+                    assert sys.stdin.buffer.read() == b'archive bytes'
+                elif 'tar -czp' in script:
+                    sys.stdout.buffer.write(b'rollback bytes')
+                elif 'tar -tzf' in script:
+                    assert sys.stdin.buffer.read() == b'rollback bytes'
+                elif 'mv -t /restore' in script:
+                    Path(os.environ['ARGUMENT_LOG']).touch()
+            """))
+        self.env.pop('BACKUP_GPG_PASSPHRASE', None)
+        uri = 's3://store/old-prefix/an archive.tar.gz'
+        self.env.update(TEST_S3_URI=uri, TEST_S3_BYTES=str(payload))
+        args = ('backup', '--restore', '--archive', uri, '--volume', 'home')
+        rejected = self.run_launcher('backup', '--restore', '--archive',
+                                     's3://wrong/an archive.tar.gz', '--volume', 'home')
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('configured bucket', rejected.stderr)
+        self.assertFalse(Path(str(self.log) + '.aws').exists())
+        self.env['TEST_S3_EXIT'] = '22'
+        failed = self.run_launcher(*args)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('Restore stream failed', failed.stderr)
+        self.assertFalse(self.log.exists(), 'a failed transfer must never reach replacement')
+        self.assertFalse(list(self.deployment.glob('pre-restore.*')))
+        self.env.pop('TEST_S3_EXIT')
+        succeeded = self.run_launcher(*args)
+        self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+        self.assertTrue(self.log.exists())
+        rollbacks = list(self.deployment.glob('pre-restore.*/original-home.tar.gz'))
+        self.assertEqual(len(rollbacks), 1)
+        self.assertEqual(rollbacks[0].read_bytes(), b'rollback bytes')
+        self.assertFalse(list(self.deployment.glob('*.tar.gz')))
+        self.assertFalse(Path(Path(str(self.log) + '.aws').read_text()).parent.exists())
 
     def test_invalid_commands(self):
         for args in (("backup",), ("backups", "--backup", "s3"), ("restore",),
