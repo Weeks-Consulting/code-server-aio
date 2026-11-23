@@ -44,7 +44,7 @@ class LauncherTests(unittest.TestCase):
             'Path(os.environ["ARGUMENT_LOG"]).write_text(json.dumps(sys.argv[1:]))\n'
             'with open(os.environ["ARGUMENT_LOG"] + ".calls", "a") as log: log.write(json.dumps(sys.argv[1:]) + "\\n")\n'
             'Path(os.environ["ARGUMENT_LOG"] + ".env").write_text(json.dumps({k: os.environ.get(k) for k in ("BACKUP_LOCAL_UID", "BACKUP_LOCAL_GID", "CODE_SERVER_MEMORY_LIMIT")}))\n'
-            'if sys.argv[1:] == ["info", "--format", "{{.MemTotal}}"]: print(os.environ.get("TEST_HOST_MEMORY", "10737418240"))\n'
+            'if sys.argv[1:] == ["info", "--format", "{{json .}}"]: print(json.dumps({"MemTotal": int(os.environ.get("TEST_HOST_MEMORY", "10737418240")), "Name": "docker-host.example"}))\n'
             'if sys.argv[1:4] == ["container", "ls", "--quiet"] and "status=running" not in sys.argv: print(os.environ.get("TEST_RUNNING_CONTAINERS", ""))\n'
             'if sys.argv[1:5] == ["volume", "ls", "--quiet", "--filter"]: print(os.environ.get("TEST_PROJECT_VOLUMES", ""))\n'
             'if sys.argv[1:] == ["volume", "ls", "--quiet"]: print(os.environ.get("TEST_ALL_VOLUMES", ""))\n'
@@ -52,7 +52,7 @@ class LauncherTests(unittest.TestCase):
             '    args = sys.argv[1:]\n'
             '    if args[args.index("-f") + 1] == "-":\n'
             f'        os.execv({shutil.which("docker")!r}, sys.argv)\n'
-            '    model = {"name": args[args.index("--project-name") + 1] if "--project-name" in args else "example", "services": {"code-server": {"image": "test", "mem_limit": os.environ.get("CODE_SERVER_MEMORY_LIMIT")}}}\n'
+            '    model = {"name": args[args.index("--project-name") + 1] if "--project-name" in args else "example", "services": {"code-server": {"image": "test", "mem_limit": os.environ.get("CODE_SERVER_MEMORY_LIMIT"), "hostname": os.environ.get("CODE_SERVER_HOSTNAME")}}}\n'
             '    print(os.environ.get("TEST_MODEL", json.dumps(model)))\n'
             'if sys.argv[-4:] == ["ps", "--all", "--quiet", "code-server"]: print("workspace-container")\n'
             'if sys.argv[1:] == ["inspect", "--format", "{{.Image}}", "workspace-container"]: print("sha256:workspace-image")\n'
@@ -277,6 +277,12 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual((self.deployment / '.manage.compose.json').read_bytes(), saved)
         self.assertEqual(list(self.deployment.glob('.manage.*.json')), [self.deployment / '.manage.compose.json'])
         self.assertNotEqual(self.calls()[-1][-1], 'start')
+
+    def test_configure_saves_docker_host_name(self):
+        self.env['CODE_SERVER_HOSTNAME'] = 'client-host.example'
+        self.configure('--backup', 'none')
+        saved = json.loads((self.deployment / '.manage.compose.json').read_text())
+        self.assertEqual(saved['services']['code-server']['hostname'], 'docker-host.example')
 
     def test_local_backup_owner(self):
         self.env.update(SUDO_UID='1234', SUDO_GID='5678')

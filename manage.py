@@ -542,10 +542,12 @@ def configure(args, directory):
                 subprocess.run([sys.executable, str(helper(directory, 'backup-key.py')), str(env),
                                 '--lock-fd', str(lock_fd)], check=True, pass_fds=(lock_fd,))
                 os.environ.pop('BACKUP_GPG_PASSPHRASE', None)
-            total = int(subprocess.check_output(['docker', 'info', '--format', '{{.MemTotal}}'], text=True).strip())
+            host = json.loads(subprocess.check_output(['docker', 'info', '--format', '{{json .}}'], text=True))
+            total = int(host['MemTotal'])
             if total <= 0:
                 fail('Docker did not report a positive host memory total.')
             os.environ['CODE_SERVER_MEMORY_LIMIT'] = str(total * 4 // 5)
+            os.environ['CODE_SERVER_HOSTNAME'] = host['Name']
             model = json.loads(subprocess.check_output(command + ['config', '--format', 'json'], text=True))
         validate_backup_id(model)
         if args.pull:

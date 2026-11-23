@@ -1,6 +1,7 @@
 services:
   code-server:
     image: ${CODE_SERVER_IMAGE:-ghcr.io/weeks-consulting/code-server-aio:latest}
+    hostname: ${CODE_SERVER_HOSTNAME:-}
     labels:
       io.github.weeks-consulting.code-server-aio.run-mode: production
     # manage computes 80% of the Docker host's memory. Direct Compose users

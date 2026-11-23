@@ -167,7 +167,12 @@ requests. It does not prove that a JWKS fetch will succeed or that a particular
 user can authenticate. Initialization failures exit the container so Docker's
 restart policy can retry.
 
-## Memory and logs
+## Hostname, memory, and logs
+
+`manage configure` sets the workspace hostname to the name reported by the active
+Docker daemon. With Docker Desktop, this is the Docker VM's name. Run
+`./manage configure --start` to apply the hostname to an existing workspace.
+Direct Compose users can set `CODE_SERVER_HOSTNAME` to choose a hostname.
 
 `manage configure` asks the active Docker daemon for its host memory total and limits
 the workspace to 80% of that value. With Docker Desktop or a remote Docker context,
