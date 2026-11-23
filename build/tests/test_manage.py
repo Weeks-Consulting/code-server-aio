@@ -905,6 +905,7 @@ class LauncherTests(unittest.TestCase):
         args = json.loads(self.log.read_text())
         self.assertIn(str(self.deployment / ".manage.compose.json"), args)
         self.assertIn("find /archive", args[-1])
+        self.assertIn("ls -lh", args[-1])
         self.assertIn("--no-deps", args)
 
     def test_restore_relative_to_caller(self):
@@ -1051,7 +1052,7 @@ class LauncherTests(unittest.TestCase):
                 print(json.dumps({{'Contents': [
                     {{'Key': 'example/home/older.tar.gz', 'LastModified': '2026-01-01', 'Size': 12}},
                     {{'Key': 'example/home/notes.txt', 'LastModified': '2026-03-01', 'Size': 8}},
-                    {{'Key': 'example/home/newer.tar.gz.gpg', 'LastModified': '2026-02-01', 'Size': 24}},
+                    {{'Key': 'example/home/newer.tar.gz.gpg', 'LastModified': '2026-02-01', 'Size': 2621440}},
                 ]}}))
             else:
                 assert args[4:] == ['s3', 'cp', os.environ['TEST_S3_URI'], '-', '--only-show-errors']
@@ -1065,8 +1066,10 @@ class LauncherTests(unittest.TestCase):
         self.s3_fixture()
         result = self.run_launcher('backup', '--list')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([line.split()[-1] for line in result.stdout.splitlines()], [
-            's3://store/example/home/newer.tar.gz.gpg', 's3://store/example/home/older.tar.gz'])
+        self.assertEqual([line.split() for line in result.stdout.splitlines()], [
+            ['2026-02-01', '2.5', 'MiB', 's3://store/example/home/newer.tar.gz.gpg'],
+            ['2026-01-01', '12', 'B', 's3://store/example/home/older.tar.gz'],
+        ])
         self.assertFalse(self.log.exists())
         self.assertFalse(Path(Path(str(self.log) + '.aws').read_text()).parent.exists())
 

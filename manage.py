@@ -711,6 +711,17 @@ def s3_cli(settings):
         yield command, env
 
 
+def format_archive_size(byte_count):
+    if byte_count < 1024:
+        return f'{byte_count} B'
+    size = byte_count
+    for unit in ('KiB', 'MiB', 'GiB', 'TiB', 'PiB'):
+        size /= 1024
+        if size < 1024 or unit == 'PiB':
+            amount = f'{size:.1f}'.rstrip('0').rstrip('.')
+            return f'{amount} {unit}'
+
+
 def list_s3_archives(settings):
     bucket = settings['AWS_S3_BUCKET_NAME']
     prefix = posixpath.normpath(settings.get('AWS_S3_PATH', ''))
@@ -729,7 +740,8 @@ def list_s3_archives(settings):
     for item in sorted(objects, key=lambda entry: entry['LastModified'], reverse=True):
         key = item['Key']
         if key.endswith(S3_ARCHIVE_SUFFIXES):
-            print(f"{item['LastModified']}  {item['Size']:>12}  s3://{bucket}/{key}")
+            size = format_archive_size(item['Size'])
+            print(f"{item['LastModified']}  {size:>12}  s3://{bucket}/{key}")
 
 
 def manage(args, directory):

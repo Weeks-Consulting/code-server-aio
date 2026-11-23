@@ -41,6 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
+        bubblewrap \
         build-essential \
         ca-certificates \
         curl \
@@ -48,11 +49,18 @@ RUN apt-get update && \
         docker.io \
         file \
         git \
+        jq \
+        less \
         locales \
+        openssh-client \
         procps \
         python3 \
+        python3-venv \
+        ripgrep \
         sudo \
-        supervisor && \
+        supervisor \
+        unzip \
+        zip && \
     sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
     locale-gen && \
     rm -rf /var/lib/apt/lists/*
