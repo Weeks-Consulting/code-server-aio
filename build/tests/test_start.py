@@ -141,7 +141,7 @@ fake_env() {
 }
 fake_curl() {
     test "$1" = --disable || return 1
-    case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:8080/"*) echo 403 ;; *) return 1 ;; esac;
+    case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:18080/"*) echo 403 ;; *) return 1 ;; esac;
 }
 '''
         result = subprocess.run(['bash', '-c', functions + script], capture_output=True, text=True)

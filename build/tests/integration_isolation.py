@@ -74,12 +74,12 @@ def probe(expected, backend_ip):
         blocked(host, 8081)
     blocked('code-server', 9901)
     if expected == 'down':
-        blocked('code-server', 8080)
+        blocked('code-server', 18080)
         return
-    status, _ = request('code-server', 8080)
+    status, _ = request('code-server', 18080)
     assert status == 403, status
     _, token = request('fixture', 8088, '/token')
-    status, body = request('code-server', 8080, '/healthz', {'Cf-Access-Jwt-Assertion': token})
+    status, body = request('code-server', 18080, '/healthz', {'Cf-Access-Jwt-Assertion': token})
     assert status == int(expected), (status, body)
     if expected == '200':
         assert json.loads(body)['status'] in ('alive', 'expired'), body
@@ -110,7 +110,8 @@ def integration(image):
                        'volumes': [mount]},
         }}
         compose = ['docker', 'compose', '--project-directory', str(root), '--project-name', project,
-                   '--env-file', '/dev/null', '-f', str(root / 'compose.yaml'), '-f', str(overlay)]
+                   '--env-file', '/dev/null', '-f', str(root / 'compose.yaml'),
+                   '-f', str(root / 'build/tests/compose.no-host-ports.yaml'), '-f', str(overlay)]
         env = {**os.environ, 'CF_TUNNEL_TOKEN': 'test-only',
                'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD}
         import importlib.util

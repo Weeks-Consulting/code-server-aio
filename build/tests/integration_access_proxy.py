@@ -200,7 +200,7 @@ class AccessProxyTests(unittest.TestCase):
 
     @staticmethod
     def response(token=None, path='/', headers=None, method='GET', source='127.0.0.1', body=None):
-        connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3,
+        connection = http.client.HTTPConnection('127.0.0.1', 18080, timeout=3,
                                                 source_address=(source, 0))
         request_headers = dict(headers or {})
         if token is not None:
@@ -435,7 +435,7 @@ class AccessProxyTests(unittest.TestCase):
         token = self.token()
         for values in ((token, token), (token, 'garbage'), (token + ', ' + token,)):
             with self.subTest(values=len(values)):
-                connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3)
+                connection = http.client.HTTPConnection('127.0.0.1', 18080, timeout=3)
                 try:
                     connection.putrequest('GET', '/')
                     for value in values:
@@ -523,7 +523,7 @@ class AccessProxyTests(unittest.TestCase):
         self.assertEqual(self.status(), 403)
 
     def websocket(self):
-        connection = socket.create_connection(('127.0.0.1', 8080), timeout=5)
+        connection = socket.create_connection(('127.0.0.1', 18080), timeout=5)
         connection.sendall(('GET /socket HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n'
             'Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n'
             'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n'

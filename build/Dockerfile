@@ -51,6 +51,8 @@ RUN apt-get update && \
         docker.io \
         file \
         git \
+        iproute2 \
+        iputils-ping \
         jq \
         just \
         less \

@@ -66,7 +66,10 @@ class ComposeTests(unittest.TestCase):
                 self.assertEqual(service['labels'][RUN_MODE_LABEL], 'production')
             assert services['backup']['environment']['BACKUP_RETENTION_DAYS'] == '7'
             assert "envoy" not in services
-            assert not app.get("ports") and app["expose"] == ["8080"]
+            port, = app["ports"]
+            assert port["host_ip"] == "127.0.0.1"
+            assert str(port["published"]) == "8080"
+            assert port["target"] == 18080 and port["protocol"] == "tcp"
             assert set(base["networks"]) == {"default"}
             assert set(app["networks"]) == set(tunnel["networks"]) == {"default"}
             assert not any(volume.get("source") == "code-server-socket"
