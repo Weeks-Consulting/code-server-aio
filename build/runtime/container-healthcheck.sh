@@ -55,8 +55,10 @@ check_http() {
 
 check_http http://localhost/healthz 200 --unix-socket /run/code-server/backend.sock --location
 check_http http://localhost/ready 200 --unix-socket /run/envoy/admin.sock
-# The missing-token denial is quiet only for this exact loopback GET / probe.
-check_http http://127.0.0.1:18080/ 403 --user-agent code-server-container-healthcheck
+[[ -S /var/lib/tunnel-origin/envoy.sock ]] || not_ready 'Tunnel origin socket is missing'
+# Exercise the protected listener through its private health address.
+check_http http://localhost/ 403 --unix-socket /run/envoy/health.sock \
+    --user-agent code-server-container-healthcheck
 # Optional monitoring probe; normal container health remains usable offline.
 if [[ ${1:-} == --access ]]; then
     check_http "https://${CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs" 200

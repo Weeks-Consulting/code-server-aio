@@ -85,7 +85,8 @@ RUN groupadd --gid 10000 cloud-user && \
     chmod 0440 /etc/sudoers.d/cloud-user && \
     visudo -cf /etc/sudoers.d/cloud-user
 
-RUN useradd --system --gid 10000 --no-create-home --shell /usr/sbin/nologin envoy && \
+RUN groupadd --gid 10001 tunnel-origin && \
+    useradd --system --gid 10000 --no-create-home --shell /usr/sbin/nologin envoy && \
     install -d /var/lib/systemd/linger && touch /var/lib/systemd/linger/cloud-user
 COPY build/runtime/envoy/ /etc/envoy/
 COPY build/runtime/envoy.json.template /etc/envoy/envoy.json.template

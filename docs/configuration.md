@@ -13,7 +13,7 @@ allowlist below in addition to restricting the Access policy.
    - `CF_TUNNEL_TOKEN`: your remotely managed tunnel token.
    - `CF_ACCESS_TEAM_DOMAIN`: your `team.cloudflareaccess.com` hostname, without `https://`.
    - `CF_ACCESS_AUD`: the 64-character Application Audience tag copied exactly from your Access application, including letter casing.
-2. Configure the tunnel origin as `http://code-server:18080` and protect the hostname
+2. Configure the tunnel origin as `unix:/var/lib/tunnel-origin/envoy.sock` and protect the hostname
    with an Access application and an Allow or Service Auth policy.
 3. Start the services:
 
@@ -51,7 +51,7 @@ Setting backup variables alone does not enable them.
 | Property | Required / default | Description |
 | --- | --- | --- |
 | `CODE_SERVER_IMAGE` | Optional; `ghcr.io/weeks-consulting/code-server-aio:latest`. | Full registry image reference to pull, such as `ghcr.io/weeks-consulting/code-server-aio:4.141.0` or `:4.141.0-1`. The installer sets this to the resolved release's version tag (the latest stable release by default, or the requested version) on every installation, preserving existing digest pins. Set `:latest` yourself to follow stable releases. `latest` follows stable releases. Ignored when `compose.build.yaml` selects the local image. |
-| `CF_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `http://code-server:18080`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
+| `CF_TUNNEL_TOKEN` | Required; no default. | Tunnel token for your remotely managed Cloudflare Tunnel, used by the cloudflared sidecar. Configure the tunnel's origin service as `unix:/var/lib/tunnel-origin/envoy.sock`. This is the tunnel token, not a Cloudflare API token or an Access service token. |
 | `CF_ACCESS_TEAM_DOMAIN` | Required for access; no default. | Cloudflare Access team hostname, such as `my-team.cloudflareaccess.com`. Supply only the hostname, without `https://`, a path, or a trailing slash. Envoy fetches signing keys from this team and checks the JWT issuer. Missing or invalid configuration prevents Envoy from starting. |
 | `CF_ACCESS_AUD` | Required for access; no default. | The Access application's 64-character hexadecimal Application Audience (AUD) tag. Audience matching is case-sensitive: copy the value exactly as Cloudflare provides it, without changing letter casing. Use the application protecting this service, not the tunnel ID or account ID. Tokens with a different audience receive HTTP 403; missing or malformed configuration prevents Envoy from starting. Find it under **Zero Trust → Access controls → Applications → Configure → Additional settings**. |
 | `CF_ACCESS_ALLOWED_EMAILS` | Optional; empty. | Comma-separated exact, case-sensitive email claims, for example `alice@example.com,bob@example.com`. If set, the signed token must match an email; missing claims and spoofed headers do not match. Invalid list syntax (an empty entry, whitespace inside an entry, or an email without exactly one `@`) stops startup. Empty delegates identity authorization to the Access policy. |
@@ -94,11 +94,11 @@ project has no running containers or volumes on the active Docker daemon.
 
 ## Access protection
 
-Traffic flows through cloudflared → Envoy on port 18080 → code-server over
-`/run/code-server/backend.sock`. Configure the remotely managed tunnel origin as
-`http://code-server:18080`. Compose publishes the same protected listener at
-`http://127.0.0.1:8080` on the Docker host. Code-server's backend socket stays
-inside the workspace container. Envoy's admin interface uses
+Cloudflared connects to Envoy through `/var/lib/tunnel-origin/envoy.sock` over a
+dedicated Compose volume mounted read-only in cloudflared. Envoy's JWT-protected
+listener uses Unix sockets for the tunnel and the private readiness probe. Envoy
+reaches code-server through `/run/code-server/backend.sock` inside the workspace
+container. Envoy's admin interface uses
 `/run/envoy/admin.sock`, a mode `600` Unix socket owned by Envoy.
 
 The application build downloads a static Envoy executable pinned by
@@ -115,10 +115,11 @@ executes Envoy. No additional templating dependency is required. All three Acces
 variables are passed to the workspace container. `just upgrade` updates the binary
 version and both architecture checksums alongside the other dependency pins.
 
-**Existing deployments:** update the remotely managed tunnel origin to
-`http://code-server:18080` as part of the upgrade. Apply the updated Compose
-configuration with `manage configure --pull --start` after installing the new
-deployment files. For direct Compose deployments, use
+**Existing deployments** need a one-time change to the published application's
+Service URL in Cloudflare. When upgrading to the Unix-socket release, set it to
+`unix:/var/lib/tunnel-origin/envoy.sock`. Use `manage upgrade` to apply the image and
+create the shared volume. `manage start --pull` reuses the saved Compose configuration,
+which lacks the socket mount on older deployments. For direct Compose deployments, use
 `docker compose -p NAME up -d --remove-orphans` with your usual Compose files.
 
 Envoy's native JWT filter checks signatures, issuer, audience, required expiration,

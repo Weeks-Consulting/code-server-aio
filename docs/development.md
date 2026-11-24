@@ -103,8 +103,8 @@ New host tests follow `test_*.py`; container and topology programs use
 and a Unix-socket fixture: JWT claims, duplicate headers, email allowlist, TLS validation,
 key rotation and outages, error pages, and WebSocket lifetime limits. It also starts
 the production Compose topology with real code-server and a temporary JWKS service,
-then checks that a client on the default network cannot reach the backend socket or admin
-listener, container restarts, and rejection of requests while either service is unavailable.
+then checks access through the tunnel socket, isolation of the backend and admin
+sockets, container restarts, and behavior while either service is unavailable.
 No Cloudflare account or published host ports are needed.
 
 `just test-backup` exercises both local archives and S3 uploads to a disposable,

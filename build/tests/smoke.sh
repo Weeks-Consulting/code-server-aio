@@ -155,7 +155,9 @@ docker exec "$name" /bin/bash -ec '
     test "$(stat -c %u:%g /home/cloud-user)" = 10000:10000
     test "$(stat -c %a /run/code-server/backend.sock)" = 660
     test "$(stat -c %u:%g /run/code-server/backend.sock)" = 10000:10000
-    test "$(curl --silent --max-time 2 --output /dev/null --write-out "%{http_code}" http://127.0.0.1:18080/smoke-access-log)" = 403
+    test "$(curl --silent --max-time 2 --output /dev/null --write-out "%{http_code}" --unix-socket /var/lib/tunnel-origin/envoy.sock http://localhost/smoke-access-log)" = 403
+    test "$(stat -c %a:%g /var/lib/tunnel-origin/envoy.sock)" = 660:10001
+    test "$(stat -c %a /run/envoy/health.sock)" = 600
     envoy_pid=$(systemctl show -p MainPID --value envoy)
     test "$(stat -c %U /proc/$envoy_pid)" = envoy
     test "$(stat -c %a /run/envoy/admin.sock)" = 600

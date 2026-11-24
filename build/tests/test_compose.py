@@ -66,10 +66,14 @@ class ComposeTests(unittest.TestCase):
                 self.assertEqual(service['labels'][RUN_MODE_LABEL], 'production')
             assert services['backup']['environment']['BACKUP_RETENTION_DAYS'] == '7'
             assert "envoy" not in services
-            port, = app["ports"]
-            assert port["host_ip"] == "127.0.0.1"
-            assert str(port["published"]) == "8080"
-            assert port["target"] == 18080 and port["protocol"] == "tcp"
+            for service in (app, tunnel):
+                assert not service.get("ports")
+            assert "10001" in tunnel["group_add"]
+            for service, read_only in ((app, False), (tunnel, True)):
+                origin, = (volume for volume in service["volumes"]
+                           if volume["target"] == "/var/lib/tunnel-origin")
+                assert origin["source"] == "tunnel-origin"
+                assert origin.get("read_only", False) is read_only
             assert set(base["networks"]) == {"default"}
             assert set(app["networks"]) == set(tunnel["networks"]) == {"default"}
             assert not any(volume.get("source") == "code-server-socket"

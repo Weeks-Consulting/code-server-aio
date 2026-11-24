@@ -64,23 +64,29 @@ def blocked(host, port):
     except OSError:
         return
     connection.close()
-    raise AssertionError(f'Unprotected endpoint reachable: {host}:{port}')
+    raise AssertionError(f'Unexpected TCP endpoint reachable: {host}:{port}')
 
 
 def probe(expected, backend_ip):
-    assert not Path('/run/code-server/backend.sock').exists(), 'Client has backend socket access'
-    # Even a client attached to the default network cannot reach a TCP backend.
-    for host in ('code-server', backend_ip):
-        blocked(host, 8081)
-    blocked('code-server', 9901)
+    for path in ('/run/code-server/backend.sock', '/run/envoy/admin.sock', '/run/envoy/health.sock'):
+        assert not Path(path).exists(), f'Client has access to private socket {path}'
+    # The old origin ports, backend, and admin must all remain unreachable over TCP.
+    for port in (8080, 18080, 8081, 9901):
+        blocked('code-server', port)
+        blocked(backend_ip, port)
+    curl = ['curl', '--silent', '--max-time', '3', '--unix-socket', '/var/lib/tunnel-origin/envoy.sock']
     if expected == 'down':
-        blocked('code-server', 18080)
+        result = subprocess.run([*curl, 'http://localhost/'], capture_output=True)
+        assert result.returncode == 7, result
         return
-    status, _ = request('code-server', 18080)
-    assert status == 403, status
+    status = subprocess.check_output([*curl, '--output', '/dev/null', '--write-out', '%{http_code}',
+                                      'http://localhost/'], text=True)
+    assert status == '403', status
     _, token = request('fixture', 8088, '/token')
-    status, body = request('code-server', 18080, '/healthz', {'Cf-Access-Jwt-Assertion': token})
-    assert status == int(expected), (status, body)
+    response = subprocess.check_output([*curl, '--header', 'Cf-Access-Jwt-Assertion: ' + token,
+                                        '--write-out', '\n%{http_code}', 'http://localhost/healthz'], text=True)
+    body, status = response.rsplit('\n', 1)
+    assert status == expected, (status, body)
     if expected == '200':
         assert json.loads(body)['status'] in ('alive', 'expired'), body
     elif expected == '503':
@@ -107,11 +113,12 @@ def integration(image):
                             'test': ['CMD', 'curl', '-fsS', 'http://localhost:8088/token'],
                             'interval': '1s', 'timeout': '2s', 'retries': 20}},
             'client': {'image': image, 'entrypoint': ['/usr/bin/python3', '/tmp/isolation.py', '--probe'],
-                       'volumes': [mount]},
+                       'user': '65532:65532', 'group_add': ['10001'],
+                       'volumes': [mount, 'tunnel-origin:/var/lib/tunnel-origin:ro']},
         }}
         compose = ['docker', 'compose', '--project-directory', str(root), '--project-name', project,
                    '--env-file', '/dev/null', '-f', str(root / 'compose.yaml'),
-                   '-f', str(root / 'build/tests/compose.no-host-ports.yaml'), '-f', str(overlay)]
+                   '-f', str(overlay)]
         env = {**os.environ, 'CF_TUNNEL_TOKEN': 'test-only',
                'CF_ACCESS_TEAM_DOMAIN': DOMAIN, 'CF_ACCESS_AUD': AUD}
         import importlib.util

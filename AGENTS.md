@@ -70,6 +70,9 @@ Do not change these without discussing it first.
 
 ### Port forwarding
 
+- Cloudflared uses Envoy's JWT-protected Unix socket over a dedicated read-only
+  volume mount. Keep the backend, admin, and private health sockets outside that
+  volume. The health socket lets Envoy suppress only the local readiness probe.
 - code-server's `/proxy/<port>/` and `/absproxy/` are intentionally enabled. They pass
   through the same Envoy JWT checks as the IDE. Do not block or reroute them.
 

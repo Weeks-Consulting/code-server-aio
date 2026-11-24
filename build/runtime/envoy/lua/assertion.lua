@@ -14,9 +14,9 @@ function envoy_on_request(handle)
     metadata:set("workspace.access", "denial_reason",
                  assertions == 0 and "missing_assertion" or "multiple_assertions")
     -- Only this exact local probe's missing-token rejection may be quiet.
-    -- Use the physical peer, never a client-supplied forwarding header.
-    local peer = handle:streamInfo():downstreamDirectRemoteAddress()
-    if assertions == 0 and peer:match("^127%.0%.0%.1:%d+$")
+    -- The health socket is private to the workspace container.
+    local address = handle:streamInfo():downstreamDirectLocalAddress()
+    if assertions == 0 and address == "/run/envoy/health.sock"
         and headers:get(":method") == "GET" and headers:get(":path") == "/"
         and headers:get("user-agent") == "code-server-container-healthcheck" then
       metadata:set("workspace.access", "quiet_healthcheck", true)

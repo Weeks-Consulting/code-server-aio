@@ -117,6 +117,7 @@ getent() { echo 'cloud-user:x:123:456::/home/cloud-user:/bin/bash'; }
         script = (ROOT / 'build/runtime/container-healthcheck.sh').read_text()
         script = script.replace('timeout 3 /usr/bin/env', 'fake_env').replace('code=$(curl ', 'code=$(fake_curl ')
         script = script.replace('timeout 2 /usr/bin/env', 'fake_env')
+        script = script.replace('[[ -S /var/lib/tunnel-origin/envoy.sock ]]', 'true')
         functions = '''fake_user_bus() {
     test "$*" = "--reuid=cloud-user --regid=cloud-user --clear-groups /usr/bin/busctl --address=unix:path=/run/user/10000/bus call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetId"
 }
@@ -141,7 +142,7 @@ fake_env() {
 }
 fake_curl() {
     test "$1" = --disable || return 1
-    case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"127.0.0.1:18080/"*) echo 403 ;; *) return 1 ;; esac;
+    case "$*" in *"--unix-socket /run/code-server/backend.sock"*|*"--unix-socket /run/envoy/admin.sock"*) echo 200 ;; *"--unix-socket /run/envoy/health.sock"*) echo 403 ;; *) return 1 ;; esac;
 }
 '''
         result = subprocess.run(['bash', '-c', functions + script], capture_output=True, text=True)

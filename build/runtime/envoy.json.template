@@ -12,11 +12,21 @@
       {
         "name": "access",
         "address": {
-          "socket_address": {
-            "address": "0.0.0.0",
-            "port_value": 18080
+          "pipe": {
+            "path": "/var/lib/tunnel-origin/envoy.sock",
+            "mode": 432
           }
         },
+        "additional_addresses": [
+          {
+            "address": {
+              "pipe": {
+                "path": "/run/envoy/health.sock",
+                "mode": 384
+              }
+            }
+          }
+        ],
         "filter_chains": [
           {
             "filters": [

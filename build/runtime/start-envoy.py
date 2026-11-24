@@ -41,7 +41,9 @@ if __name__ == '__main__':
         sys.exit(str(error))
     config = render(Path('/etc/envoy/envoy.json.template').read_text(), os.environ)
     path = Path('/run/envoy/envoy.json')
-    Path('/run/envoy/admin.sock').unlink(missing_ok=True)
+    for socket_path in ('/run/envoy/admin.sock', '/run/envoy/health.sock',
+                        '/var/lib/tunnel-origin/envoy.sock'):
+        Path(socket_path).unlink(missing_ok=True)
     # A previous launch leaves a read-only config behind.
     path.unlink(missing_ok=True)
     with path.open('x') as output:

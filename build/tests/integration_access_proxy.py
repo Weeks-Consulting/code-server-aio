@@ -91,6 +91,26 @@ class Keys(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def connect_unix(path, timeout):
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(timeout)
+    try:
+        connection.connect(str(path))
+    except OSError:
+        connection.close()
+        raise
+    return connection
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__('localhost', timeout=3)
+        self.path = path
+
+    def connect(self):
+        self.sock = connect_unix(self.path, self.timeout)
+
+
 class AccessProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -119,6 +139,13 @@ class AccessProxyTests(unittest.TestCase):
         cls.keys_server.socket = context.wrap_socket(cls.keys_server.socket, server_side=True)
         threading.Thread(target=cls.keys_server.serve_forever, daemon=True).start()
         cls.addClassCleanup(cls.keys_server.shutdown)
+        # The fixture container starts without the workspace entrypoint.
+        cls.health_path = Path('/run/envoy/health.sock')
+        cls.health_path.parent.mkdir(exist_ok=True)
+        os.chown(cls.health_path.parent, 10000, 10000)
+        cls.origin_path = cls.root / 'origin' / 'envoy.sock'
+        cls.origin_path.parent.mkdir()
+        os.chown(cls.origin_path.parent, 10000, 10000)
         cls.socket_path = cls.root / 'backend.sock'
         cls.backend = UnixServer(str(cls.socket_path), Backend)
         cls.addClassCleanup(cls.backend.server_close)
@@ -152,7 +179,11 @@ class AccessProxyTests(unittest.TestCase):
         # Fixture clients use loopback TCP; production uses a private Unix socket.
         config['admin']['address'] = {'socket_address': {'address': '127.0.0.1', 'port_value': 9901}}
         resources = config['static_resources']
-        manager = resources['listeners'][0]['filter_chains'][0]['filters'][0]['typed_config']
+        listener = resources['listeners'][0]
+        listener['address']['pipe']['path'] = str(self.origin_path)
+        self.origin_path.unlink(missing_ok=True)
+        self.health_path.unlink(missing_ok=True)
+        manager = listener['filter_chains'][0]['filters'][0]['typed_config']
         jwt = next(item['typed_config'] for item in manager['http_filters']
                    if item['name'] == 'envoy.filters.http.jwt_authn')
         provider = jwt['providers']['cloudflare']
@@ -198,10 +229,9 @@ class AccessProxyTests(unittest.TestCase):
         signature = command('openssl', 'dgst', '-sha256', '-sign', str(self.private[key]), input=message.encode())
         return message + '.' + b64(signature)
 
-    @staticmethod
-    def response(token=None, path='/', headers=None, method='GET', source='127.0.0.1', body=None):
-        connection = http.client.HTTPConnection('127.0.0.1', 18080, timeout=3,
-                                                source_address=(source, 0))
+    @classmethod
+    def response(cls, token=None, path='/', headers=None, method='GET', body=None, *, private=False):
+        connection = UnixHTTPConnection(cls.health_path if private else cls.origin_path)
         request_headers = dict(headers or {})
         if token is not None:
             request_headers['Cf-Access-Jwt-Assertion'] = token
@@ -263,7 +293,7 @@ class AccessProxyTests(unittest.TestCase):
         marker = {'User-Agent': 'code-server-container-healthcheck'}
         cases = [
             ('quiet', {}, 403, False),
-            ('remote', {'source': '127.0.0.2', 'headers': {
+            ('remote', {'private': False, 'headers': {
                 **marker, 'X-Forwarded-For': '127.0.0.1'}}, 403, True),
             ('path', {'path': '/proxy/3000/private?secret=do-not-log', 'headers': {
                 **marker, 'x-envoy-original-path': '/forged'}}, 403, True),
@@ -276,7 +306,7 @@ class AccessProxyTests(unittest.TestCase):
             ('ordinary', {'headers': {'User-Agent': 'ordinary-client'}}, 403, True),
         ]
         for name, arguments, expected, _ in cases:
-            arguments = dict(arguments)
+            arguments = {'private': True, **arguments}
             arguments['headers'] = {**arguments.get('headers', marker), 'X-Request-ID': name}
             self.assertEqual(self.status(**arguments), expected, name)
         self.stop()  # Flush access logs before asserting both presence and absence.
@@ -293,7 +323,6 @@ class AccessProxyTests(unittest.TestCase):
                 self.assertEqual(int(entry['status']), expected)
                 self.assertIn('response_details', entry)
                 self.assertIn('duration_ms', entry)
-        self.assertTrue(records['remote']['peer'].startswith('127.0.0.2:'))
         self.assertEqual(records['path']['path'], '/proxy/3000/private')
         self.assertEqual(records['path']['denial_reason'], 'missing_assertion')
         self.assertNotIn('do-not-log', json.dumps(entries))
@@ -309,7 +338,7 @@ class AccessProxyTests(unittest.TestCase):
                 '[":status"] = "403"', '[":status"] = "503"')
         self.start(change=change, expect_ready=False)
         self.wait_status(None, 503)
-        self.assertEqual(self.status(headers={'User-Agent': 'code-server-container-healthcheck',
+        self.assertEqual(self.status(private=True, headers={'User-Agent': 'code-server-container-healthcheck',
                                               'X-Request-ID': 'unexpected-probe'}), 503)
         self.stop()
         self.log.seek(0)
@@ -435,7 +464,7 @@ class AccessProxyTests(unittest.TestCase):
         token = self.token()
         for values in ((token, token), (token, 'garbage'), (token + ', ' + token,)):
             with self.subTest(values=len(values)):
-                connection = http.client.HTTPConnection('127.0.0.1', 18080, timeout=3)
+                connection = UnixHTTPConnection(self.origin_path)
                 try:
                     connection.putrequest('GET', '/')
                     for value in values:
@@ -523,7 +552,7 @@ class AccessProxyTests(unittest.TestCase):
         self.assertEqual(self.status(), 403)
 
     def websocket(self):
-        connection = socket.create_connection(('127.0.0.1', 18080), timeout=5)
+        connection = connect_unix(self.origin_path, timeout=5)
         connection.sendall(('GET /socket HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\n'
             'Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n'
             'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n'

@@ -61,7 +61,6 @@ backup_compose() {
         docker compose --project-directory "$project_dir" \
         --project-name "$prefix" --env-file "$project_dir/.env.example" \
         -f "$project_dir/compose.yaml" -f "$project_dir/compose.backup-common.yaml" -f "$project_dir/compose.backup-local.yaml" \
-        -f "$script_dir/compose.no-host-ports.yaml" \
         "$@"
 }
 run_backup() {

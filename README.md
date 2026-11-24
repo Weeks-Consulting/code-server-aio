@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/Weeks-Consulting/code-server-aio/re
 Edit `~/code-server/.env` and set `CF_TUNNEL_TOKEN`,
 `CF_ACCESS_TEAM_DOMAIN` (your `team.cloudflareaccess.com` hostname), and
 `CF_ACCESS_AUD` (the application's 64-character audience tag).
-Configure the tunnel origin as `http://code-server:18080` and protect its public
+Configure the tunnel origin as `unix:/var/lib/tunnel-origin/envoy.sock` and protect its public
 hostname with a Cloudflare Access application and a policy for trusted users.
 Then start the deployment:
 

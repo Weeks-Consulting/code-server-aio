@@ -33,8 +33,7 @@ services:
     volumes:
       - code-server-home:/home
       - docker-data:/var/lib/docker
-    ports:
-      - "127.0.0.1:8080:18080"
+      - tunnel-origin:/var/lib/tunnel-origin
     healthcheck:
       test: ["CMD", "/usr/local/bin/container-healthcheck"]
       interval: 30s
@@ -48,6 +47,10 @@ services:
     labels:
       io.github.weeks-consulting.code-server-aio.run-mode: production
     command: tunnel --no-autoupdate run
+    group_add:
+      - "10001" # tunnel-origin group in the workspace image
+    volumes:
+      - tunnel-origin:/var/lib/tunnel-origin:ro
     restart: unless-stopped
     logging:
       driver: json-file
@@ -63,3 +66,4 @@ services:
 volumes:
   code-server-home:
   docker-data:
+  tunnel-origin:
